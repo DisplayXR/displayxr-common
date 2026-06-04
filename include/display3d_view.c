@@ -10,6 +10,7 @@
 #include "display3d_view.h"
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -263,8 +264,8 @@ display3d_compute_view(const XrVector3f *processed_eye,
                        const Display3DScreen *screen,
                        const Display3DTunables *tunables,
                        const XrPosef *display_pose,
-                       float near_z,
-                       float far_z,
+                       float near_offset,
+                       float far_offset,
                        Display3DView *out)
 {
 	Display3DTunables t = tunables ? *tunables : display3d_default_tunables();
@@ -297,6 +298,30 @@ display3d_compute_view(const XrVector3f *processed_eye,
 	eye_world.z += disp_pos.z;
 	out->eye_world = eye_world;
 
+	// ZDP-relative clip planes: near/far placed at fixed *absolute* offsets in
+	// front of / behind this eye's perpendicular distance to the display/
+	// convergence plane (ZDP). eye_scaled.z is that per-eye distance (==
+	// out->eye_display.z) in the same kooima-scaled units as the offsets, so
+	// the planes are per-eye and the offsets are expressed in virtual-display-
+	// height (vH) units by the caller. near = ez - near_offset, far = ez +
+	// far_offset. far_offset = 0 => far sits at the ZDP (foreground-only, e.g.
+	// transparent mode). Offsets are absolute (vH multiples), NOT fractions of
+	// ez — large scenes no longer scale the band with ez.
+	float ez = eye_scaled.z;
+	float near_z = ez - near_offset;
+	float far_z = ez + far_offset;
+	if (near_z < 1.0e-4f)
+		near_z = 1.0e-4f;
+	// Guarantee a valid frustum (far strictly past near) even when ez is tiny
+	// and far_offset is 0 (transparent mode at near-degenerate eye distance).
+	if (far_z < near_z + 1.0e-4f)
+		far_z = near_z + 1.0e-4f;
+	// Expose the resolved view-space planes so the caller can drive the
+	// renderer's explicit geometric near/far culls (this splat rasterizer does
+	// not clip against the projection matrix planes — see GsRenderer::renderEye).
+	out->near_z = near_z;
+	out->far_z = far_z;
+
 	// Build view matrix + projection + FOV
 	build_view_matrix(out->view_matrix, disp_ori, eye_world);
 	out->orientation = disp_ori;
@@ -306,32 +331,358 @@ display3d_compute_view(const XrVector3f *processed_eye,
 }
 
 void
+display3d_pose_slerp(const XrPosef *from, const XrPosef *to, float t, XrPosef *out)
+{
+	// Linear lerp position
+	out->position.x = from->position.x + (to->position.x - from->position.x) * t;
+	out->position.y = from->position.y + (to->position.y - from->position.y) * t;
+	out->position.z = from->position.z + (to->position.z - from->position.z) * t;
+
+	// Shortest-arc slerp orientation
+	XrQuaternionf q0 = from->orientation;
+	XrQuaternionf q1 = to->orientation;
+	float dot = q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w;
+	if (dot < 0.0f) {
+		q1.x = -q1.x; q1.y = -q1.y; q1.z = -q1.z; q1.w = -q1.w;
+		dot = -dot;
+	}
+	float k0, k1;
+	if (dot > 0.9995f) {
+		// Nearly identical — fall back to linear to avoid numerical issues
+		k0 = 1.0f - t;
+		k1 = t;
+	} else {
+		float theta = acosf(dot);
+		float sin_theta = sinf(theta);
+		k0 = sinf((1.0f - t) * theta) / sin_theta;
+		k1 = sinf(t * theta) / sin_theta;
+	}
+	XrQuaternionf r;
+	r.x = k0 * q0.x + k1 * q1.x;
+	r.y = k0 * q0.y + k1 * q1.y;
+	r.z = k0 * q0.z + k1 * q1.z;
+	r.w = k0 * q0.w + k1 * q1.w;
+	float norm = sqrtf(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+	if (norm > 1e-8f) {
+		float inv = 1.0f / norm;
+		r.x *= inv; r.y *= inv; r.z *= inv; r.w *= inv;
+	} else {
+		r.w = 1.0f; r.x = r.y = r.z = 0.0f;
+	}
+	out->orientation = r;
+}
+
+static XrVector3f
+vec3_normalize(XrVector3f v)
+{
+	float n = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+	if (n < 1e-8f) {
+		XrVector3f z = {0, 0, 0};
+		return z;
+	}
+	float inv = 1.0f / n;
+	XrVector3f r = {v.x * inv, v.y * inv, v.z * inv};
+	return r;
+}
+
+static XrVector3f
+vec3_cross(XrVector3f a, XrVector3f b)
+{
+	XrVector3f r;
+	r.x = a.y * b.z - a.z * b.y;
+	r.y = a.z * b.x - a.x * b.z;
+	r.z = a.x * b.y - a.y * b.x;
+	return r;
+}
+
+void
+display3d_align_pose_to_ray(XrVector3f hit_world,
+                            XrVector3f ray_dir_world,
+                            XrVector3f up_hint,
+                            XrPosef *out)
+{
+	// Display convention: viewer sits at display-local +Z; eyes look toward
+	// local -Z (into the display).  For the viewer to remain approximately in
+	// place after focus, the new display's local +Z (in world) must point from
+	// the hit back toward the old viewer — i.e. opposite the click ray.
+	XrVector3f z_axis = {-ray_dir_world.x, -ray_dir_world.y, -ray_dir_world.z};
+	z_axis = vec3_normalize(z_axis);
+	if (z_axis.x == 0 && z_axis.y == 0 && z_axis.z == 0) {
+		z_axis.x = 0; z_axis.y = 0; z_axis.z = 1;
+	}
+
+	// X = normalize(cross(up_hint, Z)); fall back if parallel
+	XrVector3f x_axis = vec3_cross(up_hint, z_axis);
+	float x_len2 = x_axis.x * x_axis.x + x_axis.y * x_axis.y + x_axis.z * x_axis.z;
+	if (x_len2 < 1e-8f) {
+		XrVector3f alt = {1, 0, 0};
+		x_axis = vec3_cross(alt, z_axis);
+		x_len2 = x_axis.x * x_axis.x + x_axis.y * x_axis.y + x_axis.z * x_axis.z;
+		if (x_len2 < 1e-8f) {
+			XrVector3f alt2 = {0, 0, 1};
+			x_axis = vec3_cross(alt2, z_axis);
+		}
+	}
+	x_axis = vec3_normalize(x_axis);
+
+	// Y = cross(Z, X) — right-handed, already unit length
+	XrVector3f y_axis = vec3_cross(z_axis, x_axis);
+
+	// Rotation matrix columns = [X, Y, Z]; extract quaternion (trace method).
+	float m00 = x_axis.x, m10 = x_axis.y, m20 = x_axis.z;
+	float m01 = y_axis.x, m11 = y_axis.y, m21 = y_axis.z;
+	float m02 = z_axis.x, m12 = z_axis.y, m22 = z_axis.z;
+
+	float tr = m00 + m11 + m22;
+	XrQuaternionf q;
+	if (tr > 0.0f) {
+		float s = sqrtf(tr + 1.0f) * 2.0f;
+		q.w = 0.25f * s;
+		q.x = (m21 - m12) / s;
+		q.y = (m02 - m20) / s;
+		q.z = (m10 - m01) / s;
+	} else if (m00 > m11 && m00 > m22) {
+		float s = sqrtf(1.0f + m00 - m11 - m22) * 2.0f;
+		q.w = (m21 - m12) / s;
+		q.x = 0.25f * s;
+		q.y = (m01 + m10) / s;
+		q.z = (m02 + m20) / s;
+	} else if (m11 > m22) {
+		float s = sqrtf(1.0f + m11 - m00 - m22) * 2.0f;
+		q.w = (m02 - m20) / s;
+		q.x = (m01 + m10) / s;
+		q.y = 0.25f * s;
+		q.z = (m12 + m21) / s;
+	} else {
+		float s = sqrtf(1.0f + m22 - m00 - m11) * 2.0f;
+		q.w = (m10 - m01) / s;
+		q.x = (m02 + m20) / s;
+		q.y = (m12 + m21) / s;
+		q.z = 0.25f * s;
+	}
+
+	out->position = hit_world;
+	out->orientation = q;
+}
+
+void
+display3d_unproject_ndc_to_ray(float ndc_x,
+                               float ndc_y,
+                               const float *V,
+                               const float *P,
+                               XrVector3f *out_origin_world,
+                               XrVector3f *out_dir_world)
+{
+	// View-space direction using Kooima-friendly shortcut.
+	float vx = (ndc_x + P[8]) / P[0];
+	float vy = (ndc_y + P[9]) / P[5];
+	float vz = -1.0f;
+
+	// World direction = R^T * view_dir (R = upper-left 3x3 of V, col-major).
+	float wx = V[0] * vx + V[1] * vy + V[2] * vz;
+	float wy = V[4] * vx + V[5] * vy + V[6] * vz;
+	float wz = V[8] * vx + V[9] * vy + V[10] * vz;
+	float len = sqrtf(wx * wx + wy * wy + wz * wz);
+	if (len < 1e-8f) {
+		out_dir_world->x = 0; out_dir_world->y = 0; out_dir_world->z = -1;
+	} else {
+		float inv = 1.0f / len;
+		out_dir_world->x = wx * inv;
+		out_dir_world->y = wy * inv;
+		out_dir_world->z = wz * inv;
+	}
+
+	// World eye = -R^T * V_translation (V[12], V[13], V[14]).
+	float tx = V[12], ty = V[13], tz = V[14];
+	out_origin_world->x = -(V[0] * tx + V[1] * ty + V[2] * tz);
+	out_origin_world->y = -(V[4] * tx + V[5] * ty + V[6] * tz);
+	out_origin_world->z = -(V[8] * tx + V[9] * ty + V[10] * tz);
+}
+
+// ── The single Vulkan-render Y-mirror ───────────────────────────────────────
+// This is the ONE place the +Y-up world frame is mirrored into the Vulkan
+// render frame (Y-down NDC). It pairs with the NDC view-row flip that
+// GsRenderer::updateUniforms applies. The render path passes vulkan_flip_y=1
+// here; the pick path passes 0 to stay in the clean world frame. No other
+// code (app, pick, geometry) negates Y — so the render and pick frames can
+// only ever differ by this one flag, never by hand-rolled sign juggling.
+static XrVector3f
+flip_vec_y(XrVector3f v, int flip)
+{
+	if (flip) v.y = -v.y;
+	return v;
+}
+
+static XrPosef
+flip_pose_y(XrPosef p, int flip)
+{
+	if (flip) p.position.y = -p.position.y;
+	return p;
+}
+
+void
 display3d_compute_views(const XrVector3f *raw_eyes,
                                uint32_t count,
                                const XrVector3f *nominal_viewer,
                                const Display3DScreen *screen,
                                const Display3DTunables *tunables,
                                const XrPosef *display_pose,
-                               float near_z,
-                               float far_z,
+                               float near_offset,
+                               float far_offset,
+                               int vulkan_flip_y,
                                Display3DView *out_views)
 {
 	Display3DTunables t = tunables ? *tunables : display3d_default_tunables();
 
+	if (count == 0)
+		return;
+
+	// Mirror inputs into the render frame (vulkan_flip_y) — single source of
+	// truth for the render-vs-pick frame relationship. Callers always supply
+	// clean +Y-up world-space inputs.
+	XrVector3f stack_eyes[8];
+	XrVector3f *eyes = (count <= 8) ? stack_eyes : (XrVector3f *)malloc(count * sizeof(XrVector3f));
+	for (uint32_t i = 0; i < count; i++)
+		eyes[i] = flip_vec_y(raw_eyes[i], vulkan_flip_y);
+	XrVector3f nom_local;
+	const XrVector3f *nom = nominal_viewer;
+	if (nominal_viewer) { nom_local = flip_vec_y(*nominal_viewer, vulkan_flip_y); nom = &nom_local; }
+	XrPosef pose_local;
+	const XrPosef *pose = display_pose;
+	if (display_pose) { pose_local = flip_pose_y(*display_pose, vulkan_flip_y); pose = &pose_local; }
+
 	// Apply IPD and parallax factors (N-view path)
 	XrVector3f stack_processed[8];
 	XrVector3f *processed = (count <= 8) ? stack_processed : (XrVector3f *)malloc(count * sizeof(XrVector3f));
-	display3d_apply_eye_factors_n(raw_eyes, count, nominal_viewer,
+	display3d_apply_eye_factors_n(eyes, count, nom,
 	                              t.ipd_factor, t.parallax_factor,
 	                              processed);
 
 	// Compute each view via single-eye primitive
 	for (uint32_t i = 0; i < count; i++) {
 		display3d_compute_view(&processed[i], screen, &t,
-		                       display_pose, near_z, far_z,
+		                       pose, near_offset, far_offset,
 		                       &out_views[i]);
 	}
 
-	if (count > 8)
+	if (count > 8) {
 		free(processed);
+		free(eyes);
+	}
+}
+
+void
+display3d_compute_center_view(const XrVector3f *raw_eyes,
+                              uint32_t count,
+                              const XrVector3f *nominal_viewer,
+                              const Display3DScreen *screen,
+                              const Display3DTunables *tunables,
+                              const XrPosef *display_pose,
+                              float near_offset,
+                              float far_offset,
+                              int vulkan_flip_y,
+                              Display3DView *out_view)
+{
+	Display3DTunables t = tunables ? *tunables : display3d_default_tunables();
+	if (count == 0)
+		return;
+
+	// Cyclopean eye = centroid of the raw eyes. (Averaging then mirroring Y is
+	// identical to mirroring each then averaging — the flip is linear.)
+	XrVector3f c = {0, 0, 0};
+	for (uint32_t i = 0; i < count; i++) {
+		c.x += raw_eyes[i].x; c.y += raw_eyes[i].y; c.z += raw_eyes[i].z;
+	}
+	float inv = 1.0f / (float)count;
+	c.x *= inv; c.y *= inv; c.z *= inv;
+	c = flip_vec_y(c, vulkan_flip_y);
+
+	XrVector3f nom_local;
+	const XrVector3f *nom = nominal_viewer;
+	if (nominal_viewer) { nom_local = flip_vec_y(*nominal_viewer, vulkan_flip_y); nom = &nom_local; }
+	XrPosef pose_local;
+	const XrPosef *pose = display_pose;
+	if (display_pose) { pose_local = flip_pose_y(*display_pose, vulkan_flip_y); pose = &pose_local; }
+
+	// Run the SAME eye-factor pipeline as compute_views on the single centroid.
+	// For a single eye the IPD term is a no-op, leaving the parallax-lerped
+	// center — exactly the average of the per-eye processed positions.
+	XrVector3f processed;
+	display3d_apply_eye_factors_n(&c, 1, nom, t.ipd_factor, t.parallax_factor, &processed);
+	display3d_compute_view(&processed, screen, &t, pose, near_offset, far_offset, out_view);
+}
+
+// Column-major 4x4 * vec4.
+static void
+mat4_mul_vec4_cm(const float *m, const float *v, float *out)
+{
+	for (int r = 0; r < 4; r++)
+		out[r] = m[0 * 4 + r] * v[0] + m[1 * 4 + r] * v[1] +
+		         m[2 * 4 + r] * v[2] + m[3 * 4 + r] * v[3];
+}
+
+int
+display3d_selftest(void)
+{
+	int fails = 0;
+
+	Display3DScreen screen = {0.30f, 0.20f};
+	Display3DTunables t = display3d_default_tunables();
+	t.virtual_display_height = 0.20f;
+	XrPosef pose;
+	pose.orientation = (XrQuaternionf){0, 0, 0, 1};
+	pose.position = (XrVector3f){0, 0, 0};
+	XrVector3f eye = {0, 0, 0.6f};
+
+	// Picking (clean) frame view. Offsets are absolute (vH units); the round-
+	// trip/orientation checks below only need a valid frustum.
+	Display3DView v;
+	display3d_compute_center_view(&eye, 1, NULL, &screen, &t, &pose,
+	                              t.virtual_display_height,
+	                              1000.0f * t.virtual_display_height,
+	                              /*vulkan_flip_y=*/0, &v);
+
+	// (a) Round-trip: project a world point, then unproject its NDC; the ray
+	//     must pass through the original point.
+	XrVector3f pts[3] = {{0.0f, 0.0f, -0.30f},
+	                     {0.05f, 0.04f, -0.50f},
+	                     {-0.06f, 0.03f, -0.80f}};
+	for (int i = 0; i < 3; i++) {
+		float w[4] = {pts[i].x, pts[i].y, pts[i].z, 1.0f};
+		float vc[4], cl[4];
+		mat4_mul_vec4_cm(v.view_matrix, w, vc);
+		mat4_mul_vec4_cm(v.projection_matrix, vc, cl);
+		if (fabsf(cl[3]) < 1e-6f) { fails++; continue; }
+		float ndcx = cl[0] / cl[3], ndcy = cl[1] / cl[3];
+		XrVector3f ro, rd;
+		display3d_unproject_ndc_to_ray(ndcx, ndcy, v.view_matrix, v.projection_matrix, &ro, &rd);
+		float dx = pts[i].x - ro.x, dy = pts[i].y - ro.y, dz = pts[i].z - ro.z;
+		float tt = dx * rd.x + dy * rd.y + dz * rd.z;
+		float ex = dx - tt * rd.x, ey = dy - tt * rd.y, ez = dz - tt * rd.z;
+		float perp = sqrtf(ex * ex + ey * ey + ez * ez);
+		if (perp > 1e-3f) {
+			fails++;
+			fprintf(stderr, "[display3d_selftest] round-trip perp=%.5f for point (%.2f,%.2f,%.2f)\n",
+			        perp, pts[i].x, pts[i].y, pts[i].z);
+		}
+	}
+
+	// (b) Orientation: +NDC.y must map to higher world Y, +NDC.x to higher world X.
+	XrVector3f roU, rdU, roD, rdD, roR, rdR, roL, rdL;
+	display3d_unproject_ndc_to_ray(0.0f, 0.5f, v.view_matrix, v.projection_matrix, &roU, &rdU);
+	display3d_unproject_ndc_to_ray(0.0f, -0.5f, v.view_matrix, v.projection_matrix, &roD, &rdD);
+	if (!((roU.y + rdU.y) > (roD.y + rdD.y))) {
+		fails++;
+		fprintf(stderr, "[display3d_selftest] +NDC.y did not map to higher world Y (%.3f <= %.3f)\n",
+		        roU.y + rdU.y, roD.y + rdD.y);
+	}
+	display3d_unproject_ndc_to_ray(0.5f, 0.0f, v.view_matrix, v.projection_matrix, &roR, &rdR);
+	display3d_unproject_ndc_to_ray(-0.5f, 0.0f, v.view_matrix, v.projection_matrix, &roL, &rdL);
+	if (!((roR.x + rdR.x) > (roL.x + rdL.x))) {
+		fails++;
+		fprintf(stderr, "[display3d_selftest] +NDC.x did not map to higher world X (%.3f <= %.3f)\n",
+		        roR.x + rdR.x, roL.x + rdL.x);
+	}
+
+	return fails;
 }

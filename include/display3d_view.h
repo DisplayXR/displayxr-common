@@ -46,6 +46,8 @@ typedef struct Display3DView {
 	XrVector3f eye_display;      //!< Modified eye position in display space (after all factors)
 	XrVector3f eye_world;        //!< Eye position in world space (after display pose transform)
 	XrQuaternionf orientation;   //!< Display/camera orientation (same for both eyes)
+	float near_z;                //!< Resolved view-space near plane = ez - near_offset (clamped)
+	float far_z;                 //!< Resolved view-space far plane  = ez + far_offset (clamped)
 } Display3DView;
 
 // --- Functions ---
@@ -69,8 +71,21 @@ typedef struct Display3DView {
  * @param screen         Physical screen dimensions
  * @param tunables       View factors (or NULL for defaults: all 1.0)
  * @param display_pose   Display pose in world space (or NULL for identity)
- * @param near_z         Near clip plane distance
- * @param far_z          Far clip plane distance
+ * @param near_offset    Pop-out clip as an ABSOLUTE offset (in virtual-display-
+ *                       height / kooima-scaled units) in front of the per-eye
+ *                       eye->display (ZDP) distance: near = ez - near_offset.
+ * @param far_offset     Recede clip as an absolute offset: far = ez + far_offset.
+ *                       far_offset = 0 => far at the ZDP (foreground only).
+ *                       Offsets are absolute (vH multiples), NOT fractions of ez.
+ * @param vulkan_flip_y  Single source of truth for the render-vs-pick frame.
+ *                       Pass 1 from the RENDER path: the eyes, nominal viewer,
+ *                       and display pose are Y-mirrored internally so the
+ *                       off-axis Kooima frustum matches the NDC view-row flip
+ *                       that GsRenderer::updateUniforms applies for Vulkan's
+ *                       Y-down clip space. Pass 0 to stay in the clean +Y-up
+ *                       world frame (used for picking). Callers ALWAYS pass
+ *                       clean +Y-up world-space inputs and never negate Y
+ *                       themselves — this flag owns the entire mirror.
  * @param out_views      Output array of N views
  */
 void
@@ -80,9 +95,53 @@ display3d_compute_views(const XrVector3f *raw_eyes,
                                const Display3DScreen *screen,
                                const Display3DTunables *tunables,
                                const XrPosef *display_pose,
-                               float near_z,
-                               float far_z,
+                               float near_offset,
+                               float far_offset,
+                               int vulkan_flip_y,
                                Display3DView *out_views);
+
+/*!
+ * Compute a single cyclopean (center-eye) view from N raw eyes — the average
+ * eye position run through the same IPD/parallax/Kooima pipeline as
+ * display3d_compute_views. This is the canonical view for CPU picking: it
+ * shares the exact eye-factor math (no hand-rolled inverse of
+ * eye_display = processed * es), so the pick ray can never drift from the
+ * render rig. Pass vulkan_flip_y = 0 for a clean world-frame ray.
+ *
+ * @param raw_eyes       Array of N raw eye positions in DISPLAY space
+ * @param count          Number of views (must be >= 1)
+ * @param nominal_viewer Nominal viewer in DISPLAY space (or NULL for {0,0,0.5})
+ * @param screen         Physical screen dimensions
+ * @param tunables       View factors (or NULL for defaults)
+ * @param display_pose   Display pose in world space (or NULL for identity)
+ * @param near_offset    See display3d_compute_views.
+ * @param far_offset     See display3d_compute_views.
+ * @param vulkan_flip_y  See display3d_compute_views (pass 0 for picking).
+ * @param out_view       Output center view
+ */
+void
+display3d_compute_center_view(const XrVector3f *raw_eyes,
+                              uint32_t count,
+                              const XrVector3f *nominal_viewer,
+                              const Display3DScreen *screen,
+                              const Display3DTunables *tunables,
+                              const XrPosef *display_pose,
+                              float near_offset,
+                              float far_offset,
+                              int vulkan_flip_y,
+                              Display3DView *out_view);
+
+/*!
+ * Self-test of the view/unproject math (the render-vs-pick drift guard).
+ * Builds a synthetic rig and asserts, for the picking (clean) frame:
+ *   (a) round-trip: unproject(project(P)) yields a ray through P;
+ *   (b) orientation: +NDC.y maps to higher world Y, +NDC.x to higher world X.
+ * Returns the number of failed checks (0 = all pass). On failure it writes a
+ * diagnostic to stderr. Call once at startup; a non-zero return means the
+ * projection/unproject/orientation conventions have drifted.
+ */
+int
+display3d_selftest(void);
 
 /*!
  * Compute Kooima FOV angles only (no matrices). Useful for runtime-side
@@ -164,8 +223,10 @@ display3d_apply_eye_factors_n(const XrVector3f *raw_eyes,
  * @param screen         Physical screen dimensions
  * @param tunables       View factors (perspective_factor, virtual_display_height)
  * @param display_pose   Display pose in world space (or NULL for identity)
- * @param near_z         Near clip plane distance
- * @param far_z          Far clip plane distance
+ * @param near_offset    Pop-out clip as an absolute offset (vH/kooima-scaled
+ *                       units): near = ez - near_offset.
+ * @param far_offset     Recede clip as an absolute offset: far = ez + far_offset;
+ *                       0 => far at the ZDP (foreground only).
  * @param out            Output view for this eye
  */
 void
@@ -173,8 +234,8 @@ display3d_compute_view(const XrVector3f *processed_eye,
                        const Display3DScreen *screen,
                        const Display3DTunables *tunables,
                        const XrPosef *display_pose,
-                       float near_z,
-                       float far_z,
+                       float near_offset,
+                       float far_offset,
                        Display3DView *out);
 
 /*!
@@ -182,6 +243,62 @@ display3d_compute_view(const XrVector3f *processed_eye,
  */
 Display3DTunables
 display3d_default_tunables(void);
+
+/*!
+ * Interpolate between two poses. Linear-lerps position, shortest-arc slerps
+ * orientation. t is already eased by the caller (e.g. ease-out cubic).
+ *
+ * @param from Starting pose
+ * @param to   Target pose
+ * @param t    Interpolation parameter in [0, 1]
+ * @param out  Output pose
+ */
+void
+display3d_pose_slerp(const XrPosef *from, const XrPosef *to, float t, XrPosef *out);
+
+/*!
+ * Build a pose whose local -Z points back along -ray_dir_world (display faces
+ * the ray source) and whose local +Y is closest to up_hint. Position = hit_world.
+ *
+ * Typical use: after double-click raycast picks a splat, this gives a display
+ * pose that centers on the splat and faces the viewer.
+ *
+ * @param hit_world     World-space position for the new display center
+ * @param ray_dir_world World-space ray direction (viewer -> scene), normalized
+ * @param up_hint       World-space up preference (typically {0, 1, 0})
+ * @param out           Output pose
+ */
+void
+display3d_align_pose_to_ray(XrVector3f hit_world,
+                            XrVector3f ray_dir_world,
+                            XrVector3f up_hint,
+                            XrPosef *out);
+
+/*!
+ * Unproject a normalized-device-coordinate point (ndc_x, ndc_y) through
+ * column-major view + projection matrices to a world-space ray.
+ *
+ * Uses the asymmetric Kooima-friendly shortcut:
+ *   vx = (ndc_x + P[8]) / P[0]
+ *   vy = (ndc_y + P[9]) / P[5]
+ *   vz = -1
+ * World direction = R^T * (vx, vy, vz) where R is the upper-left 3x3 of V.
+ * World origin    = eye position recovered from V.
+ *
+ * @param ndc_x            NDC x in [-1, 1]
+ * @param ndc_y            NDC y in [-1, 1] (caller is responsible for axis flip)
+ * @param view_col_major   4x4 view matrix, column-major
+ * @param proj_col_major   4x4 projection matrix, column-major
+ * @param out_origin_world Output world-space ray origin (eye position)
+ * @param out_dir_world    Output world-space ray direction (normalized)
+ */
+void
+display3d_unproject_ndc_to_ray(float ndc_x,
+                               float ndc_y,
+                               const float *view_col_major,
+                               const float *proj_col_major,
+                               XrVector3f *out_origin_world,
+                               XrVector3f *out_dir_world);
 
 #ifdef __cplusplus
 }
