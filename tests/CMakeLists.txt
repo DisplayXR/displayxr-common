@@ -1,0 +1,5 @@
+add_executable(displayxr_math_selftest selftest.c)
+target_link_libraries(displayxr_math_selftest PRIVATE displayxr::math)
+set_target_properties(displayxr_math_selftest PROPERTIES C_STANDARD 11)
+
+add_test(NAME displayxr_math_selftest COMMAND displayxr_math_selftest)

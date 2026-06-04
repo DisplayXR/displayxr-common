@@ -4,9 +4,15 @@
   <img alt="DisplayXR" src="https://raw.githubusercontent.com/DisplayXR/displayxr-runtime/main/doc/displayxr.png" width="100">
 </picture>
 
-# Kooima Projection
+# displayxr-common
 
-Generalized off-axis frustum projection math library for 3D displays. Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — the correct way to render perspective-correct stereoscopic 3D for physical displays with eye tracking.
+Shared native helper code for the [DisplayXR](https://github.com/DisplayXR/displayxr-runtime) ecosystem — the **canonical, versioned home** for the off-axis Kooima projection math that was previously copy-vendored across the runtime test apps, the demos, and the Unreal/Unity plug-ins ([#396](https://github.com/DisplayXR/displayxr-runtime/issues/396)).
+
+Today it exposes one CMake target:
+
+- **`displayxr::math`** — pure-C off-axis Kooima projection (display-centric + camera-centric rigs, FOV + matrices). Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — perspective-correct stereoscopic 3D for physical displays with eye tracking.
+
+A second target, `displayxr::common` (C++ scaffolding: HUD/input/window management), is planned (epic W4).
 
 ## What It Does
 
@@ -49,8 +55,10 @@ display3d_compute_views(
     &screen,            // physical display dimensions
     &tunables,
     &display_pose,      // display position/orientation in world
-    near, far,
-    views               // output: view_matrix + projection_matrix per eye
+    near_offset,        // ZDP-anchored clip: near = ez - near_offset (in vH units)
+    far_offset,         //                    far  = ez + far_offset (0 => far at ZDP)
+    0,                  // vulkan_flip_y: 0 = clean +Y-up world frame; 1 = mirror for Vulkan render
+    views               // output: view + projection matrices, resolved near_z/far_z, per eye
 );
 ```
 
@@ -94,26 +102,36 @@ These factors are applied before the view/projection computation, allowing smoot
 
 | File | Description |
 |------|-------------|
-| `include/display3d_view.h` | Display-centric API — structs and function declarations |
+| `include/display3d_view.h` | Display-centric API — structs + declarations (incl. `display3d_compute_center_view`, `display3d_selftest`) |
 | `include/display3d_view.c` | Display-centric implementation |
-| `include/camera3d_view.h` | Camera-centric API — structs and function declarations |
+| `include/camera3d_view.h` | Camera-centric API — structs + declarations |
 | `include/camera3d_view.c` | Camera-centric implementation |
+| `include/projection_depth.h` | `convert_projection_gl_to_zero_to_one()` — remap the GL `[-1,1]` clip-depth to `[0,1]` for D3D/Vulkan/Metal consumers (GL needs none) |
+
+> `leia_math.h` (a Windows-only, DirectXMath/C++ Leia SDK reference example) is intentionally **not** part of `displayxr::math` — it isn't portable pure-C math and stays app-local.
 
 ## Integration
 
-Copy the files into your project. The only dependency is `<openxr/openxr.h>` for `XrVector3f`, `XrPosef`, `XrFovf` types. If you're not using OpenXR, you can replace these with your own equivalent structs.
+Consume via CMake `FetchContent`, pinned to a tag — the same pattern the DisplayXR runtime uses for its other deps. Don't vendor a copy (that's exactly the drift this repo exists to kill).
 
 ```cmake
-# CMake example
-add_library(kooima_projection STATIC
-    include/display3d_view.c
-    include/camera3d_view.c
+include(FetchContent)
+FetchContent_Declare(
+    displayxr_common
+    GIT_REPOSITORY https://github.com/DisplayXR/displayxr-common.git
+    GIT_TAG v0.1.0
 )
-target_include_directories(kooima_projection PUBLIC include)
-target_link_libraries(kooima_projection PUBLIC OpenXR::openxr_loader)  # for XR types
+FetchContent_MakeAvailable(displayxr_common)
+
+target_link_libraries(your_app PRIVATE displayxr::math)
 ```
 
-**Matrix convention:** All output matrices are **column-major** (OpenGL / Vulkan / Metal). DirectX callers should transpose when loading into row-major `XMMATRIX`.
+For local co-development against a checkout, point CMake at it:
+`-DFETCHCONTENT_SOURCE_DIR_DISPLAYXR_COMMON=../displayxr-common`.
+
+**Dependency:** `displayxr::math` is typed in OpenXR types (`XrVector3f`/`XrPosef`/`XrFovf`), so it links `OpenXR::headers` (headers only — the build above fetches OpenXR-SDK with the loader disabled). Every real consumer already builds against OpenXR.
+
+**Matrix convention:** output matrices are **column-major** with **OpenGL `[-1,1]` clip-depth**. DirectX callers transpose into row-major `XMMATRIX`; D3D/Vulkan/Metal callers also remap depth to `[0,1]` via `convert_projection_gl_to_zero_to_one()` (`include/projection_depth.h`) — applied to the per-view `projection_matrix`. GL needs no remap.
 
 ## N-View Multiview
 
@@ -122,7 +140,7 @@ Both APIs accept an array of N eye positions and produce N views. This works for
 ```c
 XrVector3f eyes[4] = { ... };  // 4 eye positions from tracker
 Display3DView views[4];
-display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near, far, views);
+display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near_offset, far_offset, 0, views);
 // views[0..3] each have their own view_matrix + projection_matrix
 ```
 
@@ -132,10 +150,18 @@ display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near, far,
 - [DisplayXR Runtime](https://github.com/DisplayXR/displayxr-runtime) — the OpenXR runtime that uses this library
 - [Kooima's Original Paper](http://csc.lsu.edu/~kooima/articles/genperspective/) — the foundational algorithm
 
+## Roadmap
+
+`v0.1.0` is the **math-only** first cut (epic [#396](https://github.com/DisplayXR/displayxr-runtime/issues/396) W2). Planned:
+
+- **W3** — adopt the pin everywhere: replace the vendored copies in the runtime test apps, both demos, and the Unreal/Unity plug-ins with a `FetchContent`-by-tag dependency on `displayxr::math`.
+- **W4** — add the `displayxr::common` C++ scaffolding target (HUD/input/window management) and migrate the C++ consumers.
+- **Deferred** — a **FOV-only, type-neutral** layer so the runtime's `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (xrt-typed, no matrices) can share this exact source instead of being hand-synced; this would also drop the OpenXR-header dependency from the core.
+
 ## License
 
 [ISC License](LICENSE) — same as the DisplayXR runtime.
 
-## Auto-Synced
+## Source of truth
 
-These files are the canonical copies from the [displayxr-runtime](https://github.com/DisplayXR/displayxr-runtime) repository (`test_apps/common/display3d_view.*` and `camera3d_view.*`). To contribute, open a PR on the runtime repo.
+This repository is the **canonical home** for the shared math. The `display3d_view.*` / `camera3d_view.*` here were reconciled from `displayxr-runtime`'s `test_apps/common/` (the most-advanced superset, with ZDP-anchored clip, `near_z/far_z` outputs, `vulkan_flip_y`, `center_view`, and `selftest`) and now lead. Consumers pin a tag; changes land here first.
