@@ -22,30 +22,38 @@ include(FetchContent)
 # (Deferred — see README "Roadmap": a type-neutral core would drop even this
 # header dep and let the runtime's FOV-only xrt-typed layer share the source.)
 # ---------------------------------------------------------------------------
-# Reuse the consumer's OpenXR if it already provides one (most consumers — the
-# runtime test apps, demos, engine plug-ins — already find_package or vendor
-# OpenXR). Re-declaring the OpenXR targets here would collide ("target already
-# exists"). Only fetch the headers when nothing is available (e.g. the
-# standalone CI selftest build).
-if(NOT TARGET OpenXR::headers AND NOT TARGET OpenXR::openxr_loader)
-    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
-    set(BUILD_LOADER OFF CACHE BOOL "" FORCE)
-    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+# OpenXR headers for the Xr* types. Three cases, in priority order:
+#
+#  1. The consumer already provides an OpenXR target (OpenXR::headers or
+#     OpenXR::openxr_loader) — reuse it.
+#  2. Nothing yet, AND the consumer find_package(OpenXR)s LATER (e.g. a demo
+#     whose apps set up OpenXR in subdirectories after add_subdirectory(common)).
+#     We must NOT create OpenXR::* targets here: OpenXR-SDK's export set defines
+#     OpenXR::headers, and the consumer's later find_package then fails with
+#     "some (but not all) targets in this export set were already defined". So
+#     we POPULATE the SDK source (its openxr.h is committed) WITHOUT running its
+#     CMake, and expose the include dir via a privately-named interface target.
+#  3. The truly standalone build (this repo's own CI selftest) also lands in (2)
+#     and just uses the populated headers.
+if(TARGET OpenXR::headers)
+    set(DISPLAYXR_MATH_OPENXR OpenXR::headers)
+elseif(TARGET OpenXR::openxr_loader)
+    set(DISPLAYXR_MATH_OPENXR OpenXR::openxr_loader)
+else()
     FetchContent_Declare(
-        OpenXR
+        openxr_sdk_headers
         GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
         GIT_TAG release-1.1.43
         GIT_SHALLOW TRUE
     )
-    FetchContent_MakeAvailable(OpenXR)
-endif()
-
-# Link whichever OpenXR target carries the headers (we only need the Xr* types).
-if(TARGET OpenXR::headers)
-    set(DISPLAYXR_MATH_OPENXR OpenXR::headers)
-else()
-    set(DISPLAYXR_MATH_OPENXR OpenXR::openxr_loader)
+    FetchContent_GetProperties(openxr_sdk_headers)
+    if(NOT openxr_sdk_headers_POPULATED)
+        FetchContent_Populate(openxr_sdk_headers)
+    endif()
+    add_library(displayxr_openxr_headers INTERFACE)
+    target_include_directories(displayxr_openxr_headers INTERFACE
+        "${openxr_sdk_headers_SOURCE_DIR}/include")
+    set(DISPLAYXR_MATH_OPENXR displayxr_openxr_headers)
 endif()
 
 # ---------------------------------------------------------------------------
