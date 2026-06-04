@@ -22,17 +22,31 @@ include(FetchContent)
 # (Deferred — see README "Roadmap": a type-neutral core would drop even this
 # header dep and let the runtime's FOV-only xrt-typed layer share the source.)
 # ---------------------------------------------------------------------------
-set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
-set(BUILD_LOADER OFF CACHE BOOL "" FORCE)
-set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    OpenXR
-    GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
-    GIT_TAG release-1.1.43
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(OpenXR)
+# Reuse the consumer's OpenXR if it already provides one (most consumers — the
+# runtime test apps, demos, engine plug-ins — already find_package or vendor
+# OpenXR). Re-declaring the OpenXR targets here would collide ("target already
+# exists"). Only fetch the headers when nothing is available (e.g. the
+# standalone CI selftest build).
+if(NOT TARGET OpenXR::headers AND NOT TARGET OpenXR::openxr_loader)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_LOADER OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        OpenXR
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
+        GIT_TAG release-1.1.43
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(OpenXR)
+endif()
+
+# Link whichever OpenXR target carries the headers (we only need the Xr* types).
+if(TARGET OpenXR::headers)
+    set(DISPLAYXR_MATH_OPENXR OpenXR::headers)
+else()
+    set(DISPLAYXR_MATH_OPENXR OpenXR::openxr_loader)
+endif()
 
 # ---------------------------------------------------------------------------
 # displayxr::math — pure-C Kooima off-axis projection (FOV + matrices)
@@ -57,7 +71,7 @@ target_include_directories(displayxr_math PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(displayxr_math PUBLIC OpenXR::headers)
+target_link_libraries(displayxr_math PUBLIC ${DISPLAYXR_MATH_OPENXR})
 set_target_properties(displayxr_math PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
 if(DISPLAYXR_COMMON_BUILD_TESTS)
