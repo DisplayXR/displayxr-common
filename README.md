@@ -6,13 +6,12 @@
 
 # displayxr-common
 
-Shared native helper code for the [DisplayXR](https://github.com/DisplayXR/displayxr-runtime) ecosystem — the **canonical, versioned home** for the off-axis Kooima projection math that was previously copy-vendored across the runtime test apps, the demos, and the Unreal/Unity plug-ins ([#396](https://github.com/DisplayXR/displayxr-runtime/issues/396)).
+Shared native helper code for the [DisplayXR](https://github.com/DisplayXR/displayxr-runtime) ecosystem — the **canonical, versioned home** for the off-axis Kooima projection math and the C++ app scaffolding that were previously copy-vendored across the runtime test apps, the demos, and the Unreal/Unity plug-ins ([#396](https://github.com/DisplayXR/displayxr-runtime/issues/396)).
 
-Today it exposes one CMake target:
+It exposes two CMake targets:
 
-- **`displayxr::math`** — pure-C off-axis Kooima projection (display-centric + camera-centric rigs, FOV + matrices). Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — perspective-correct stereoscopic 3D for physical displays with eye tracking.
-
-A second target, `displayxr::common` (C++ scaffolding: HUD/input/window management), is planned (epic W4).
+- **`displayxr::math`** — pure-C off-axis Kooima projection (display-centric + camera-centric rigs, FOV + matrices). Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — perspective-correct multiview 3D for physical displays with eye tracking. Linked by **everything**, including the Unity/Unreal engine plug-ins.
+- **`displayxr::common`** — C++17 app scaffolding (depends on `displayxr::math`): logging, Win32 input + window management, OpenXR session/swapchain/frame lifecycle, D2D/DirectWrite text + HUD rendering, the D3D11 reference renderer, window-space-layer UI helpers, the thin app-side atlas-capture helper, and the vendored stb image headers. Linked by **C++ apps only** (runtime test apps, standalone demos) — not by engines.
 
 ## What It Does
 
@@ -110,20 +109,57 @@ These factors are applied before the view/projection computation, allowing smoot
 
 > `leia_math.h` (a Windows-only, DirectXMath/C++ Leia SDK reference example) is intentionally **not** part of `displayxr::math` — it isn't portable pure-C math and stays app-local.
 
+## `displayxr::common` — C++ app scaffolding
+
+The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#393](https://github.com/DisplayXR/displayxr-runtime/issues/393)): the application plumbing that was copy-vendored (and drifting) across the runtime's `test_apps/common/` and both standalone demos. **Single target, platform-gated sources** — Windows consumers get the full stack; Apple consumers get the cross-platform subset plus the macOS HUD/capture helpers.
+
+| Component | Files | Platform |
+|-----------|-------|----------|
+| Logging (`%LOCALAPPDATA%\DisplayXR\<app>` file log) | `logging.{h,cpp}` | Windows |
+| Win32 input (WASD/mouse/mode keys → request flags) | `input_handler.{h,cpp}` | Windows |
+| Win32 window + monitor management | `window_manager.{h,cpp}` | Windows |
+| OpenXR session/swapchain/frame lifecycle (`XrSessionManager`) | `xr_session_common.{h,cpp}` | Windows |
+| D2D/DirectWrite text + buttons | `text_overlay.{h,cpp}` | Windows |
+| CPU-readable HUD (side D3D11 device — usable from GL/VK/D3D12 apps too) | `hud_renderer.{h,cpp}` | Windows |
+| CoreText/CoreGraphics HUD | `hud_renderer_macos.{h,mm}` | macOS |
+| D3D11 reference renderer (cube/grid/textures, mip chains) | `d3d11_renderer.{h,cpp}`, `mip_chain.h` | Windows |
+| Window-space-layer UI helpers (pure OpenXR) | `xr_window_space_hud.{h,cpp}` | both |
+| App-side atlas-capture helper (filename numbering, flash overlay, `RequestRuntimeAtlasCapture`) | `atlas_capture.{h,cpp}`, `atlas_capture_macos.mm` | both |
+| View parameter struct | `view_params.h` | both |
+| stb image (read+write headers + the **only** implementation TUs) | `stb_image*.h`, `stb_image_impl_macos.cpp` | both |
+| dGPU hint (`NvOptimusEnablement`, force-included into consumer EXEs) | `optimus_dgpu_hint.c` | Windows |
+| Workspace-manifest CMake helper (`displayxr_install_manifest()`) | `displayxr_manifest.cmake` | both |
+
+**Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
+
+**stb ownership:** the lib owns exactly one `STB_IMAGE_IMPLEMENTATION` and one `STB_IMAGE_WRITE_IMPLEMENTATION` TU per platform (Windows: `d3d11_renderer.cpp` / `atlas_capture.cpp`; Apple: `stb_image_impl_macos.cpp` / `atlas_capture_macos.mm`). Consumers must not define them.
+
+### DisplayXR extension headers
+
+`xr_session_common` / `xr_window_space_hud` need the DisplayXR OpenXR extension headers (`XR_EXT_display_info.h`, `XR_EXT_win32_window_binding.h`, `XR_EXT_workspace_file_dialog.h`, `XR_EXT_atlas_capture.h`, `XR_EXT_mcp_tools.h`, …), which are **not** in the Khronos SDK. Set `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` (the directory **containing** `openxr/XR_EXT_*.h`) before bringing in this project:
+
+- runtime test apps: `src/external/openxr_includes` (the source of truth)
+- demos: their vendored `openxr_includes/` (keep it refreshed from [displayxr-extensions](https://github.com/DisplayXR/displayxr-extensions))
+
+When unset (this repo's own CI), the build fetches `displayxr-extensions` at a pinned commit. When the consumer's dir also carries the full Khronos set (every current consumer's does), it wins the include order, so lib TUs and app TUs compile against the same `openxr.h`.
+
 ## Integration
 
 Consume via CMake `FetchContent`, pinned to a tag — the same pattern the DisplayXR runtime uses for its other deps. Don't vendor a copy (that's exactly the drift this repo exists to kill).
 
 ```cmake
 include(FetchContent)
+# For displayxr::common only — the dir containing openxr/XR_EXT_*.h:
+set(DISPLAYXR_EXTENSIONS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/openxr_includes" CACHE PATH "")
 FetchContent_Declare(
     displayxr_common
     GIT_REPOSITORY https://github.com/DisplayXR/displayxr-common.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.3.0
 )
 FetchContent_MakeAvailable(displayxr_common)
 
-target_link_libraries(your_app PRIVATE displayxr::math)
+target_link_libraries(your_engine_plugin PRIVATE displayxr::math)   # engines
+target_link_libraries(your_app           PRIVATE displayxr::common) # C++ apps (math comes transitively)
 ```
 
 For local co-development against a checkout, point CMake at it:
@@ -152,10 +188,11 @@ display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near_offse
 
 ## Roadmap
 
-`v0.1.0` is the **math-only** first cut (epic [#396](https://github.com/DisplayXR/displayxr-runtime/issues/396) W2). Planned:
+Epic [#396](https://github.com/DisplayXR/displayxr-runtime/issues/396) status:
 
-- **W3** — adopt the pin everywhere: replace the vendored copies in the runtime test apps, both demos, and the Unreal/Unity plug-ins with a `FetchContent`-by-tag dependency on `displayxr::math`.
-- **W4** — add the `displayxr::common` C++ scaffolding target (HUD/input/window management) and migrate the C++ consumers.
+- **W2** (`v0.1.0`) ✅ — math-only first cut.
+- **W3** (`v0.2.0`) ✅ — all 5 consumers (runtime test apps, both demos, Unreal, Unity) pin `displayxr::math` by tag; Layer 1 window/canvas resolve added.
+- **W4** (`v0.3.0`) ✅ — `displayxr::common` C++ scaffolding target; the 3 C++ consumers migrate off their vendored `common/` copies.
 - **Deferred** — a **FOV-only, type-neutral** layer so the runtime's `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (xrt-typed, no matrices) can share this exact source instead of being hand-synced; this would also drop the OpenXR-header dependency from the core.
 
 ## License
@@ -164,4 +201,4 @@ display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near_offse
 
 ## Source of truth
 
-This repository is the **canonical home** for the shared math. The `display3d_view.*` / `camera3d_view.*` here were reconciled from `displayxr-runtime`'s `test_apps/common/` (the most-advanced superset, with ZDP-anchored clip, `near_z/far_z` outputs, `vulkan_flip_y`, `center_view`, and `selftest`) and now lead. Consumers pin a tag; changes land here first.
+This repository is the **canonical home** for the shared math and scaffolding. The `display3d_view.*` / `camera3d_view.*` were reconciled from `displayxr-runtime`'s `test_apps/common/` (the most-advanced superset, with ZDP-anchored clip, `near_z/far_z` outputs, `vulkan_flip_y`, `center_view`, and `selftest`); `common/` was reconciled as the superset of the runtime test apps + both demos' forks (file-picker state machine and window-space-layer generics from the model-viewer fork, ADR-021/#441/#425/#457 features from the runtime). Both now lead: consumers pin a tag; changes land here first.
