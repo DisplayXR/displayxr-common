@@ -39,6 +39,23 @@ typedef struct Display3DScreen {
 	float height_m; //!< Physical screen height (meters)
 } Display3DScreen;
 
+/*!
+ * Where a handle app's window — or a texture app's canvas sub-rect — sits on the
+ * physical display. Fed to display3d_resolve_window_rect() to derive the Kooima
+ * `screen` dims and the window/canvas-relative eye offset (the input-prep every
+ * consumer otherwise duplicates).
+ */
+typedef struct Display3DWindowPlacement {
+	float display_width_m;    //!< Physical display width (meters)
+	float display_height_m;   //!< Physical display height (meters)
+	float display_width_px;   //!< Display resolution width (pixels)
+	float display_height_px;  //!< Display resolution height (pixels)
+	float rect_center_x_px;   //!< Window/canvas CENTER on the display, X (pixels; origin top-left, Y-down)
+	float rect_center_y_px;   //!< Window/canvas CENTER on the display, Y (pixels, Y-down)
+	float rect_width_px;      //!< Rect width (pixels): window dims for handle apps, canvas sub-rect for texture apps
+	float rect_height_px;     //!< Rect height (pixels)
+} Display3DWindowPlacement;
+
 typedef struct Display3DView {
 	float view_matrix[16];       //!< Column-major 4x4 view matrix
 	float projection_matrix[16]; //!< Column-major 4x4 projection matrix
@@ -51,6 +68,37 @@ typedef struct Display3DView {
 } Display3DView;
 
 // --- Functions ---
+
+/*!
+ * Window-relative / canvas Kooima input-prep — the "Layer 1" between the
+ * platform window code and the pure frustum core (display3d_compute_views).
+ *
+ * Resolves a window/canvas placement on the display into (a) the Kooima `screen`
+ * dimensions in meters and (b) the eye positions shifted to be relative to the
+ * rect CENTER rather than the display center. Every consumer (runtime compositor,
+ * handle/texture test apps, Unity/Unreal plug-ins) otherwise re-implements this —
+ * including the screen-Y-down -> eye-Y-up flip, which is exactly where it drifts.
+ *
+ * The platform-specific part (querying the window/canvas rect on the monitor:
+ * ClientToScreen/GetMonitorInfo, NSWindow, the engine viewport) stays caller-side;
+ * THIS owns the rect -> screen + eye-offset math. Handle apps pass the WINDOW
+ * rect; texture apps pass the CANVAS sub-rect — same call, no app-class branching.
+ *
+ * Rig-agnostic: feed out_screen + out_eyes straight into display3d_compute_views()
+ * OR camera3d_compute_views().
+ *
+ * @param placement   Window/canvas placement on the display
+ * @param raw_eyes    N raw eye positions in DISPLAY space (display-center-relative)
+ * @param count       Number of views (>= 1)
+ * @param out_screen  [out] Kooima screen dims (meters) = rect size x px-size
+ * @param out_eyes    [out] N eyes shifted to rect-center-relative (may alias raw_eyes)
+ */
+void
+display3d_resolve_window_rect(const Display3DWindowPlacement *placement,
+                              const XrVector3f *raw_eyes,
+                              uint32_t count,
+                              Display3DScreen *out_screen,
+                              XrVector3f *out_eyes);
 
 /*!
  * All-in-one: compute 3D view+projection from raw eye tracking data.
