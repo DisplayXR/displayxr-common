@@ -1,9 +1,15 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 
 project(displayxr_common
-    VERSION 0.1.0
-    DESCRIPTION "Shared off-axis Kooima projection math for DisplayXR 3D displays"
-    LANGUAGES C)
+    VERSION 0.3.0
+    DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
+    LANGUAGES C CXX)
+
+# Objective-C++ for the macOS scaffolding sources (.mm). Safe if the consumer
+# already enabled it; required for the standalone (CI) build on Apple.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 option(DISPLAYXR_COMMON_BUILD_TESTS "Build the displayxr-common selftest harness" ON)
 
@@ -81,6 +87,152 @@ target_include_directories(displayxr_math PUBLIC
 )
 target_link_libraries(displayxr_math PUBLIC ${DISPLAYXR_MATH_OPENXR})
 set_target_properties(displayxr_math PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+# ---------------------------------------------------------------------------
+# DisplayXR OpenXR extension headers (XR_EXT_display_info.h,
+# XR_EXT_win32_window_binding.h, XR_EXT_workspace_file_dialog.h,
+# XR_EXT_atlas_capture.h, XR_EXT_mcp_tools.h, …) — needed by
+# xr_session_common / xr_window_space_hud in displayxr::common. These are NOT
+# in the Khronos OpenXR-SDK; their source of truth is the runtime's
+# src/external/openxr_includes, auto-published to
+# github.com/DisplayXR/displayxr-extensions. Mirrors the OpenXR guard above,
+# in priority order:
+#
+#  1. The consumer sets DISPLAYXR_EXTENSIONS_INCLUDE_DIR (the directory
+#     CONTAINING openxr/XR_EXT_*.h) before bringing in this project —
+#     preferred: the lib then compiles against the consumer's exact header
+#     snapshot, and when that dir also carries the full Khronos set (it does
+#     for every current consumer) it wins the include order over any fetched
+#     SDK copy, so lib TUs and app TUs see the SAME openxr.h.
+#  2. Standalone (this repo's own CI): fetch displayxr-extensions at a pinned
+#     commit (the repo is untagged). Privately-named interface target — never
+#     creates OpenXR::* names, same reasoning as the guard above.
+# ---------------------------------------------------------------------------
+if(DISPLAYXR_EXTENSIONS_INCLUDE_DIR)
+    add_library(displayxr_ext_headers INTERFACE)
+    target_include_directories(displayxr_ext_headers INTERFACE
+        "${DISPLAYXR_EXTENSIONS_INCLUDE_DIR}")
+else()
+    FetchContent_Declare(
+        displayxr_extensions_headers
+        GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
+        GIT_TAG fee5d51071422ed5f08164db2bb043e2401e5980
+    )
+    FetchContent_GetProperties(displayxr_extensions_headers)
+    if(NOT displayxr_extensions_headers_POPULATED)
+        FetchContent_Populate(displayxr_extensions_headers)
+    endif()
+    add_library(displayxr_ext_headers INTERFACE)
+    target_include_directories(displayxr_ext_headers INTERFACE
+        "${displayxr_extensions_headers_SOURCE_DIR}/include")
+endif()
+
+# ---------------------------------------------------------------------------
+# displayxr::common — C++17 app scaffolding (epic #396 W4, re-scoped #393)
+#
+# The shared application plumbing that was copy-vendored (and drifting) across
+# the runtime's test_apps/common and both standalone demos: logging, Win32
+# input + window management, OpenXR session/swapchain/frame lifecycle, D2D /
+# DirectWrite text + HUD, the D3D11 reference renderer, window-space-layer UI
+# helpers, the thin app-side atlas-capture helper (filename numbering + flash
+# overlay; the GPU readback itself is the runtime's xrCaptureAtlasEXT), and
+# the vendored stb image headers (this lib owns exactly one read- and one
+# write-implementation TU per platform — consumers must not define
+# STB_IMAGE_IMPLEMENTATION / STB_IMAGE_WRITE_IMPLEMENTATION themselves).
+#
+# Single target, platform-gated sources: Windows apps get the full stack;
+# Apple consumers get the cross-platform subset + the macOS HUD / capture
+# helpers. Linked by C++ APPS only — engines (Unity/Unreal) link just
+# displayxr::math.
+#
+# Divergence policy (epic #396): parameterize/inject at the call site
+# (e.g. InputState::hudToggleRequiresShift, EndFrame's projectionLayerFlags),
+# never #ifdef APP in here.
+#
+# NOTE: leia_math.h stays app-local (see the math note above).
+# ---------------------------------------------------------------------------
+set(DISPLAYXR_COMMON_SOURCES
+    common/atlas_capture.h
+    common/view_params.h
+    common/mip_chain.h
+    common/xr_window_space_hud.cpp
+    common/xr_window_space_hud.h
+)
+if(WIN32)
+    list(APPEND DISPLAYXR_COMMON_SOURCES
+        common/logging.cpp
+        common/logging.h
+        common/input_handler.cpp
+        common/input_handler.h
+        common/window_manager.cpp
+        common/window_manager.h
+        common/xr_session_common.cpp
+        common/xr_session_common.h
+        common/atlas_capture.cpp
+        common/optimus_dgpu_hint.c
+        common/d3d11_renderer.cpp
+        common/d3d11_renderer.h
+        common/text_overlay.cpp
+        common/text_overlay.h
+        common/hud_renderer.cpp
+        common/hud_renderer.h
+    )
+elseif(APPLE)
+    list(APPEND DISPLAYXR_COMMON_SOURCES
+        common/atlas_capture_macos.mm
+        common/hud_renderer_macos.mm
+        common/hud_renderer_macos.h
+        common/stb_image_impl_macos.cpp
+    )
+endif()
+
+add_library(displayxr_common_lib STATIC ${DISPLAYXR_COMMON_SOURCES})
+add_library(displayxr::common ALIAS displayxr_common_lib)
+
+target_include_directories(displayxr_common_lib PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:common>
+)
+# displayxr_ext_headers BEFORE ${DISPLAYXR_MATH_OPENXR}: when the consumer's
+# extensions dir also carries the Khronos set, it must win the include order.
+target_link_libraries(displayxr_common_lib PUBLIC
+    displayxr::math
+    displayxr_ext_headers
+    ${DISPLAYXR_MATH_OPENXR}
+)
+set_target_properties(displayxr_common_lib PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+
+if(WIN32)
+    target_link_libraries(displayxr_common_lib PUBLIC
+        d3d11 dxgi d3dcompiler d2d1 dwrite)
+    # Hybrid-GPU dGPU hint: optimus_dgpu_hint.c defines NvOptimusEnablement /
+    # AmdPowerXpressRequestHighPerformance, but a static-library member with no
+    # referenced symbols would be discarded — force-include it into every
+    # consumer executable via an INTERFACE link option.
+    if(MSVC)
+        target_link_options(displayxr_common_lib INTERFACE
+            "/INCLUDE:NvOptimusEnablement")
+    else()
+        target_link_options(displayxr_common_lib INTERFACE
+            "-Wl,--undefined=NvOptimusEnablement")
+    endif()
+elseif(APPLE)
+    target_link_libraries(displayxr_common_lib PUBLIC
+        "-framework AppKit"
+        "-framework CoreGraphics"
+        "-framework CoreText"
+        "-framework Foundation"
+        "-framework QuartzCore"
+    )
+endif()
+
+# Workspace-app manifest helper (displayxr_install_manifest()). Function
+# definitions are global once this include runs, so any consumer that
+# FetchContent_MakeAvailable's this project can call it directly.
+include(common/displayxr_manifest.cmake)
 
 if(DISPLAYXR_COMMON_BUILD_TESTS)
     enable_testing()
