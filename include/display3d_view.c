@@ -116,6 +116,34 @@ display3d_default_tunables(void)
 }
 
 void
+display3d_resolve_window_rect(const Display3DWindowPlacement *p,
+                              const XrVector3f *raw_eyes,
+                              uint32_t count,
+                              Display3DScreen *out_screen,
+                              XrVector3f *out_eyes)
+{
+	float px = (p->display_width_px  != 0.0f) ? p->display_width_m  / p->display_width_px  : 0.0f;
+	float py = (p->display_height_px != 0.0f) ? p->display_height_m / p->display_height_px : 0.0f;
+
+	// Kooima screen = the rect's physical size in meters.
+	out_screen->width_m  = p->rect_width_px  * px;
+	out_screen->height_m = p->rect_height_px * py;
+
+	// Rect-center -> display-center offset (meters). Display/screen pixels are
+	// Y-down with the origin top-left; display/eye space is Y-up, so the Y
+	// component is negated. Eyes are shifted so they read relative to the rect
+	// center instead of the display center.
+	float off_x =  (p->rect_center_x_px - p->display_width_px  * 0.5f) * px;
+	float off_y = -((p->rect_center_y_px - p->display_height_px * 0.5f) * py);
+
+	for (uint32_t i = 0; i < count; i++) {
+		out_eyes[i].x = raw_eyes[i].x - off_x;
+		out_eyes[i].y = raw_eyes[i].y - off_y;
+		out_eyes[i].z = raw_eyes[i].z;
+	}
+}
+
+void
 display3d_apply_eye_factors(const XrVector3f *raw_left,
                             const XrVector3f *raw_right,
                             const XrVector3f *nominal_viewer,
