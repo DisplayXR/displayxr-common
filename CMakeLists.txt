@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(displayxr_common
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -13,7 +13,62 @@ endif()
 
 option(DISPLAYXR_COMMON_BUILD_TESTS "Build the displayxr-common selftest harness" ON)
 
+# #396 W7: lets a consumer take ONLY the type-neutral math core (and the
+# optional xrt wrapper below) with ZERO OpenXR provisioning — the DisplayXR
+# runtime's core build sets this OFF so FetchContent-ing this project pulls
+# no OpenXR-SDK headers and no displayxr-extensions fetch. Defaults preserve
+# existing consumer behavior (app consumers keep math + common as before).
+option(DISPLAYXR_BUILD_MATH_OPENXR "Build the OpenXR-typed displayxr::math wrapper (+ displayxr::common)" ON)
+
+# Directory containing xrt/xrt_defines.h (the DisplayXR runtime's
+# src/xrt/include). When set, the xrt-typed FOV-only wrapper target
+# displayxr::math_xrt is built — mirrors the DISPLAYXR_EXTENSIONS_INCLUDE_DIR
+# mechanism below. Standalone builds (this repo's CI) leave it empty; the
+# runtime CI compiles the wrapper on every PR.
+set(DISPLAYXR_XRT_INCLUDE_DIR "" CACHE PATH
+    "Directory containing xrt/xrt_defines.h — enables displayxr::math_xrt")
+
 include(FetchContent)
+
+# ---------------------------------------------------------------------------
+# displayxr::math_core — the type-neutral math core (#396 W7)
+#
+# THE implementation of the Kooima display-centric + camera-centric rig math,
+# on its own dxr_* POD types. Zero dependencies (no OpenXR, no xrt). Both
+# typed wrappers (displayxr::math below, displayxr::math_xrt) are pure
+# pointer-casts over this target — which is exactly what makes the runtime's
+# render-ready output and an app's computed-from-raw output the same function
+# by construction (XR_EXT_view_rig equivalence guarantee).
+# ---------------------------------------------------------------------------
+add_library(displayxr_math_core STATIC
+    include/dxr_view_math.c
+)
+add_library(displayxr::math_core ALIAS displayxr_math_core)
+target_include_directories(displayxr_math_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+set_target_properties(displayxr_math_core PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+# ---------------------------------------------------------------------------
+# displayxr::math_xrt — xrt-typed FOV-only wrapper for the DisplayXR runtime
+# (#396 W7). Built only when the consumer provides the xrt core headers.
+# ---------------------------------------------------------------------------
+if(DISPLAYXR_XRT_INCLUDE_DIR)
+    add_library(displayxr_math_xrt STATIC
+        include/displayxr_math_xrt.c
+    )
+    add_library(displayxr::math_xrt ALIAS displayxr_math_xrt)
+    target_include_directories(displayxr_math_xrt PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+        "${DISPLAYXR_XRT_INCLUDE_DIR}"
+    )
+    target_link_libraries(displayxr_math_xrt PUBLIC displayxr::math_core)
+    set_target_properties(displayxr_math_xrt PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+endif()
+
+if(DISPLAYXR_BUILD_MATH_OPENXR)
 
 # ---------------------------------------------------------------------------
 # OpenXR headers
@@ -25,8 +80,9 @@ include(FetchContent)
 # apps, demos, Unreal, Unity) already builds against OpenXR, so this avoids the
 # type-redefinition that a vendored copy of those structs would risk.
 #
-# (Deferred — see README "Roadmap": a type-neutral core would drop even this
-# header dep and let the runtime's FOV-only xrt-typed layer share the source.)
+# (The math itself no longer needs OpenXR: it lives in the type-neutral
+# core above. This whole block provisions headers for the Xr-typed WRAPPER
+# and displayxr::common only, hence the DISPLAYXR_BUILD_MATH_OPENXR gate.)
 # ---------------------------------------------------------------------------
 # OpenXR headers for the Xr* types. Three cases, in priority order:
 #
@@ -65,15 +121,15 @@ endif()
 # ---------------------------------------------------------------------------
 # displayxr::math — pure-C Kooima off-axis projection (FOV + matrices)
 #
-# Members (reconciled superset, seeded from displayxr-runtime test_apps/common):
+# OpenXR-typed wrapper over displayxr::math_core (#396 W7) — the .c members
+# are pure pointer-casts; the math itself lives in dxr_view_math.c:
 #   display3d_view.{c,h}   display-centric rig + projection + center-view + selftest
 #   camera3d_view.{c,h}    camera-centric rig
 #   projection_depth.h     GL [-1,1] -> [0,1] clip-depth remap for D3D/VK/Metal
 #
 # NOTE: leia_math.h is intentionally NOT here — it is a Windows-only
 # (DirectXMath, C++) Leia SDK reference example, not portable math; it stays
-# app-local. The runtime's FOV-only xrt-typed ports (m_camera3d_view /
-# m_display3d_view / m_multiview) are a separate layer, deferred (see README).
+# app-local.
 # ---------------------------------------------------------------------------
 add_library(displayxr_math STATIC
     include/display3d_view.c
@@ -85,7 +141,7 @@ target_include_directories(displayxr_math PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(displayxr_math PUBLIC ${DISPLAYXR_MATH_OPENXR})
+target_link_libraries(displayxr_math PUBLIC displayxr_math_core ${DISPLAYXR_MATH_OPENXR})
 set_target_properties(displayxr_math PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
 # ---------------------------------------------------------------------------
@@ -234,7 +290,11 @@ endif()
 # FetchContent_MakeAvailable's this project can call it directly.
 include(common/displayxr_manifest.cmake)
 
-if(DISPLAYXR_COMMON_BUILD_TESTS)
+endif() # DISPLAYXR_BUILD_MATH_OPENXR
+
+# The selftest harness exercises the OpenXR-typed wrapper (and through it the
+# core), so it needs the full math target.
+if(DISPLAYXR_COMMON_BUILD_TESTS AND DISPLAYXR_BUILD_MATH_OPENXR)
     enable_testing()
     add_subdirectory(tests)
 endif()

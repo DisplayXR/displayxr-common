@@ -193,7 +193,7 @@ Epic [#396](https://github.com/DisplayXR/displayxr-runtime/issues/396) status:
 - **W2** (`v0.1.0`) ✅ — math-only first cut.
 - **W3** (`v0.2.0`) ✅ — all 5 consumers (runtime test apps, both demos, Unreal, Unity) pin `displayxr::math` by tag; Layer 1 window/canvas resolve added.
 - **W4** (`v0.3.0`) ✅ — `displayxr::common` C++ scaffolding target; the 3 C++ consumers migrate off their vendored `common/` copies.
-- **Deferred** — a **FOV-only, type-neutral** layer so the runtime's `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (xrt-typed, no matrices) can share this exact source instead of being hand-synced; this would also drop the OpenXR-header dependency from the core.
+- **W7** (`v0.4.0`) ✅ — **type-neutral core** (`displayxr::math_core`, own `dxr_*` POD types, zero OpenXR dep, `include/dxr_view_math.{h,c}`) now holds ALL the math; `displayxr::math` is a byte-compatible cast-wrapper over it (existing pins unaffected). New **`displayxr::math_xrt`** — the xrt-typed FOV-only wrapper the DisplayXR runtime links in place of its hand-synced `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (gated on `DISPLAYXR_XRT_INCLUDE_DIR`, the dir containing `xrt/xrt_defines.h`; set `DISPLAYXR_BUILD_MATH_OPENXR=OFF` to skip all OpenXR provisioning). Runtime render-ready output ≡ app-from-raw output **by construction** — the `XR_EXT_view_rig` equivalence guarantee.
 
 ## License
 

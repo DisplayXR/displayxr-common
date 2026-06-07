@@ -2,3 +2,4 @@ build/
 _deps/
 *.user
 .vs/
+build-*/
