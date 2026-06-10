@@ -204,16 +204,24 @@ void RenderButton(
     rt->FillRoundedRectangle(rr, fillBrush.Get());
     rt->DrawRoundedRectangle(rr, strokeBrush.Get(), 1.0f);
 
-    // Centered label
+    // Centered label. A button is a fixed-size pill, so the label must stay on
+    // one line — a label wider than the button (e.g. "Mode: Foo [locked]") is
+    // clipped to the button rect rather than wrapped to a second line that would
+    // spill outside it. The format is shared with the multi-line body text, so
+    // save/restore the wrapping mode the same way the alignment is saved below.
     IDWriteTextFormat* fmt = useSmallFont ? overlay.smallTextFormat.Get() : overlay.textFormat.Get();
     DWRITE_TEXT_ALIGNMENT prevTA = fmt->GetTextAlignment();
     DWRITE_PARAGRAPH_ALIGNMENT prevPA = fmt->GetParagraphAlignment();
+    DWRITE_WORD_WRAPPING prevWrap = fmt->GetWordWrapping();
     fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     rt->DrawText(label.c_str(), (UINT32)label.length(), fmt,
-        D2D1::RectF(x, y, x + width, y + height), textBrush.Get());
+        D2D1::RectF(x, y, x + width, y + height), textBrush.Get(),
+        D2D1_DRAW_TEXT_OPTIONS_CLIP);
     fmt->SetTextAlignment(prevTA);
     fmt->SetParagraphAlignment(prevPA);
+    fmt->SetWordWrapping(prevWrap);
 
     rt->EndDraw();
 }
