@@ -838,6 +838,76 @@ dxr_display3d_selftest(void)
 		}
 	}
 
+	// (d) INDEPENDENT ground truth: start from a CAMERA rig, convert it to a
+	//     display rig, and check the converted display rig reproduces the
+	//     camera rig's OWN output (fov + eye_world) at the reference eye
+	//     (0,0,N) — the untracked/centred viewer. Unlike (c), this does not
+	//     round-trip through a display rig first, so it catches a converter
+	//     that is self-consistent (round-trips) yet wrong against the camera
+	//     it claims to mirror. The vH value is asserted separately because at
+	//     the reference eye vH cancels out of both fov and eye_world (only its
+	//     stored VALUE matters — e.g. for a disturbance-free qwerty P-toggle).
+	{
+		struct {
+			float invd, ht, m2v, H, aspect, N, want_vH;
+		} cases[] = {
+		    // qwerty default: 0.5 dp / 36° vFOV → display default vH = 1.30 m.
+		    {0.5f, 0.3249f, 1.0f, 0.194f, 1.7783f, 0.6f, 1.2996f},
+		    // a wide + a narrow convergence, different panel/distance.
+		    {1.0f, 0.4f, 1.0f, 0.30f, 1.6f, 0.8f, 0.8f},
+		    {0.25f, 0.2f, 2.0f, 0.20f, 1.5f, 0.5f, 1.6f},
+		};
+		for (int ci = 0; ci < 3; ci++) {
+			float H = cases[ci].H, N = cases[ci].N, aspect = cases[ci].aspect;
+			dxr_screen scr = {H * aspect, H};
+			dxr_rig_display_info info = {H, aspect, N};
+			dxr_pose pcam = {{0, 0, 0, 1}, {0, 0, 0}};
+			dxr_camera_rig cam = {pcam, 1.0f, 1.0f, cases[ci].invd, cases[ci].ht, cases[ci].m2v};
+
+			// Camera ground truth at the reference (centred) eye.
+			dxr_vec3 eye = {0, 0, N};
+			dxr_camera3d_tunables ct = {cam.ipd_factor, cam.parallax_factor,
+			                            cam.inv_convergence_distance, cam.half_tan_vfov, cam.m2v};
+			dxr_camera3d_view cv;
+			dxr_camera3d_compute_view(&eye, N, &scr, &ct, &cam.pose, 0.1f, 100.0f, &cv);
+
+			// Convert → display, then compute the same eye through the display rig.
+			dxr_display_rig dr;
+			dxr_view_rig_camera_to_display(&cam, &info, &dr);
+			dxr_display3d_tunables dt = {dr.ipd_factor, dr.parallax_factor, dr.perspective_factor,
+			                             dr.virtual_display_height};
+			dxr_display3d_view dv;
+			dxr_display3d_compute_view(&eye, &scr, &dt, &dr.pose, 0.05f, 100.0f, &dv);
+
+			if (fabsf(dr.virtual_display_height - cases[ci].want_vH) > 1.0e-3f) {
+				fails++;
+				fprintf(stderr,
+				        "[dxr_display3d_selftest] camera→display vH=%.4f, want %.4f (case %d)\n",
+				        dr.virtual_display_height, cases[ci].want_vH, ci);
+			}
+
+			float dfov[4] = {dv.fov.angle_left - cv.fov.angle_left, dv.fov.angle_right - cv.fov.angle_right,
+			                 dv.fov.angle_up - cv.fov.angle_up, dv.fov.angle_down - cv.fov.angle_down};
+			for (int k = 0; k < 4; k++) {
+				if (fabsf(dfov[k]) > 1.0e-3f) {
+					fails++;
+					fprintf(stderr,
+					        "[dxr_display3d_selftest] camera→display FOV[%d] diff=%.2e (case %d)\n", k,
+					        dfov[k], ci);
+				}
+			}
+			float dex = dv.eye_world.x - cv.eye_world.x;
+			float dey = dv.eye_world.y - cv.eye_world.y;
+			float dez = dv.eye_world.z - cv.eye_world.z;
+			if (fabsf(dex) > 1.0e-3f || fabsf(dey) > 1.0e-3f || fabsf(dez) > 1.0e-3f) {
+				fails++;
+				fprintf(stderr,
+				        "[dxr_display3d_selftest] camera→display eye_world diff=(%.2e,%.2e,%.2e) (case %d)\n",
+				        dex, dey, dez, ci);
+			}
+		}
+	}
+
 	return fails;
 }
 
@@ -992,12 +1062,30 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	out->ipd_factor = in->ipd_factor;
 	out->parallax_factor = in->parallax_factor;
 	out->perspective_factor = persp;
-	out->virtual_display_height = (in->m2v / persp) * H; // m2v_d * H
 
-	// Display plane sits D_world behind (-Z) the camera.
-	float d_world = (in->inv_convergence_distance > 0.0f) ? (1.0f / in->inv_convergence_distance) : 0.0f;
+	// Virtual display height = the world-space height of the virtual screen at
+	// the convergence plane: vH = 2 * tan(vFOV/2) * D_world = 2 * half_tan_vfov /
+	// invd. This is the camera frustum's own geometry in world units (m2v scales
+	// the eye, NOT the frustum base, so it does not appear here). The earlier
+	// (m2v/persp)*H form equals this ONLY when the convergence sits at the
+	// nominal distance (a display-compatible rig, invd = 1/(m2v*N)); for any
+	// other convergence it drifted — e.g. the 0.5 dp / 36° camera default came
+	// out 0.39 m instead of the intended 1.30 m, popping the qwerty P-toggle.
+	float invd = in->inv_convergence_distance;
+	float safe_invd = (invd > 1.0e-6f) ? invd : 1.0e-6f; // invd→0 = convergence at infinity
+	out->virtual_display_height = 2.0f * in->half_tan_vfov / safe_invd;
+
+	// Pose: place the display plane so the display rig's eye_world coincides with
+	// the camera rig's at the reference eye (0,0,N). The display rig scales the
+	// eye by es = persp * vH / H, so its reference eye_scaled = (0,0,es*N) while
+	// the camera's eye_local = (0,0,0); the offset that cancels the difference is
+	// R*(eye_local - eye_scaled) = R*(0,0,-es*N). (This reduces to -D_world only
+	// for a display-compatible rig, where es*N == 1/invd; the old code hard-coded
+	// -1/invd and so misplaced the plane — and hence eye_world — by es*N - 1/invd
+	// for every off-nominal convergence.)
+	float es = persp * out->virtual_display_height / H;
 	out->pose.orientation = in->pose.orientation;
-	dxr_vec3 back = quat_rotate(in->pose.orientation, (dxr_vec3){0.0f, 0.0f, -d_world});
+	dxr_vec3 back = quat_rotate(in->pose.orientation, (dxr_vec3){0.0f, 0.0f, -es * N});
 	out->pose.position.x = in->pose.position.x + back.x;
 	out->pose.position.y = in->pose.position.y + back.y;
 	out->pose.position.z = in->pose.position.z + back.z;
