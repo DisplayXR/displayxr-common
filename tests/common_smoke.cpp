@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "atlas_capture.h"
+#include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "view_params.h"
 #include "xr_window_space_hud.h"
@@ -185,12 +186,21 @@ static void test_stb_symbols_link()
 }
 #endif
 
+// Off-axis projection self-test: display-rig math, plus display<->camera rig
+// equivalence (frustum + view matrix match at any perspective, round-trip
+// identity). Pure, GPU-free.
+static void test_rig_math()
+{
+    CHECK(dxr_display3d_selftest() == 0, "dxr_display3d_selftest (incl. rig equivalence) reported failures");
+}
+
 int main()
 {
     test_capture_numbering();
     test_mip_chain();
     test_view_params_defaults();
     test_window_space_hud_types();
+    test_rig_math();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();

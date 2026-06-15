@@ -781,6 +781,63 @@ dxr_display3d_selftest(void)
 		        roR.x + rdR.x, roL.x + rdL.x);
 	}
 
+	// (c) Rig equivalence: a display rig and its camera-rig twin must produce
+	//     the SAME frustum + view matrix for every viewer position, at any
+	//     perspective; and the round-trip back to a display rig must be
+	//     identity. (Frustum elements [0],[5],[8],[9] are near/far-independent,
+	//     so the two rigs' differing near/far conventions don't matter here.)
+	dxr_rig_display_info info = {screen.height_m, screen.width_m / screen.height_m, 0.6f};
+	float persps[3] = {0.5f, 1.0f, 2.0f};
+	dxr_vec3 test_eyes[5] = {
+	    {0, 0, 0.6f}, {0.05f, 0, 0.6f}, {0, 0.04f, 0.6f}, {-0.04f, 0.03f, 0.5f}, {0.02f, -0.02f, 0.8f}};
+	for (int pi = 0; pi < 3; pi++) {
+		dxr_display_rig dr = {{{0, 0, 0, 1}, {0, 0, 0}}, 0.20f, 1.0f, 1.0f, persps[pi]};
+		dxr_camera_rig cr;
+		dxr_view_rig_display_to_camera(&dr, &info, &cr);
+
+		// Round-trip identity (also asserts residual ~ 0 → exact).
+		dxr_display_rig dr2;
+		float residual = dxr_view_rig_camera_to_display(&cr, &info, &dr2);
+		if (fabsf(residual) > 1e-4f || fabsf(dr2.virtual_display_height - dr.virtual_display_height) > 1e-4f ||
+		    fabsf(dr2.perspective_factor - dr.perspective_factor) > 1e-4f) {
+			fails++;
+			fprintf(stderr, "[dxr_display3d_selftest] rig round-trip drift at persp=%.2f (resid=%.2e vH=%.4f persp=%.4f)\n",
+			        persps[pi], residual, dr2.virtual_display_height, dr2.perspective_factor);
+		}
+
+		// All-positions frustum + view-matrix match.
+		dxr_display3d_tunables dt = {dr.ipd_factor, dr.parallax_factor, dr.perspective_factor,
+		                             dr.virtual_display_height};
+		dxr_camera3d_tunables ct = {cr.ipd_factor, cr.parallax_factor, cr.inv_convergence_distance,
+		                            cr.half_tan_vfov, cr.m2v};
+		for (int e = 0; e < 5; e++) {
+			dxr_display3d_view dv;
+			dxr_camera3d_view cv;
+			dxr_display3d_compute_view(&test_eyes[e], &screen, &dt, &dr.pose, 0.05f, 100.0f, &dv);
+			dxr_camera3d_compute_view(&test_eyes[e], info.nominal_distance_m, &screen, &ct, &cr.pose, 0.1f,
+			                          100.0f, &cv);
+			int idx[4] = {0, 5, 8, 9};
+			for (int k = 0; k < 4; k++) {
+				float d = fabsf(dv.projection_matrix[idx[k]] - cv.projection_matrix[idx[k]]);
+				if (d > 1e-3f) {
+					fails++;
+					fprintf(stderr,
+					        "[dxr_display3d_selftest] frustum mismatch persp=%.2f eye=%d elem=%d diff=%.2e\n",
+					        persps[pi], e, idx[k], d);
+				}
+			}
+			for (int k = 0; k < 16; k++) {
+				float d = fabsf(dv.view_matrix[k] - cv.view_matrix[k]);
+				if (d > 1e-3f) {
+					fails++;
+					fprintf(stderr, "[dxr_display3d_selftest] view-matrix mismatch persp=%.2f eye=%d k=%d diff=%.2e\n",
+					        persps[pi], e, k, d);
+					break;
+				}
+			}
+		}
+	}
+
 	return fails;
 }
 
@@ -796,6 +853,7 @@ dxr_camera3d_default_tunables(void)
 	t.parallax_factor = 1.0f;
 	t.inv_convergence_distance = 1.0f;
 	t.half_tan_vfov = 0.32491969623f; // tan(18 deg) → 36° vFOV
+	t.m2v = 1.0f;
 	return t;
 }
 
@@ -822,12 +880,18 @@ dxr_camera3d_compute_view(const dxr_vec3 *processed_eye,
 	float ro = t.half_tan_vfov * aspect;
 	float uo = t.half_tan_vfov;
 	float invd = t.inv_convergence_distance;
+	float m2v = t.m2v > 0.0f ? t.m2v : 1.0f; // meters→world; <=0 (e.g. unset) means identity
 
-	// eye_local = displacement from nominal screen plane
+	// eye_local = physical displacement from the nominal screen plane (meters),
+	// scaled to world units by m2v. This single world-space eye drives BOTH the
+	// modelview (eye_world) and the projection shear, so head motion scales into
+	// world units. invd is in 1/world-units, so m2v cancels in the shear for a
+	// converted frustum (no visual effect there) — its real effect is the
+	// modelview translation. m2v == 1 reproduces the pre-m2v behavior exactly.
 	dxr_vec3 eye_local;
-	eye_local.x = processed_eye->x;
-	eye_local.y = processed_eye->y;
-	eye_local.z = processed_eye->z - nominal_z;
+	eye_local.x = m2v * processed_eye->x;
+	eye_local.y = m2v * processed_eye->y;
+	eye_local.z = m2v * (processed_eye->z - nominal_z);
 
 	// Transform to world space
 	dxr_vec3 eye_world = quat_rotate(cam_ori, eye_local);
@@ -841,10 +905,10 @@ dxr_camera3d_compute_view(const dxr_vec3 *processed_eye,
 	out->orientation = cam_ori;
 
 	// Camera-centric mapping onto the canonical off-axis frustum: the base
-	// half-tangents are the camera's vFOV directly, and the eye displacement
-	// from the convergence plane scaled by invd is the shear. invd == 0
-	// (convergence at infinity) yields symmetric, parallel views with no
-	// special-casing. See dxr_offaxis_projection.
+	// half-tangents are the camera's vFOV directly, and the world-space eye
+	// displacement scaled by invd is the shear. invd == 0 (convergence at
+	// infinity) yields symmetric, parallel views with no special-casing. See
+	// dxr_offaxis_projection.
 	dxr_vec3 shear = {eye_local.x * invd, eye_local.y * invd, eye_local.z * invd};
 	dxr_offaxis_projection(ro, uo, shear, near_z, far_z, out->projection_matrix, &out->fov);
 }
@@ -879,4 +943,66 @@ dxr_camera3d_compute_views(const dxr_vec3 *raw_eyes,
 
 	if (count > 8)
 		free(processed);
+}
+
+// ============================================================================
+// Rig equivalence / conversion
+// ============================================================================
+//
+// Notation: H = physical_height_m, N = nominal_distance_m,
+//           tan(physFOV_v/2) = H/(2N), m2v_d = vHeight/H.
+// The world-space convergence distance is D_world = persp * m2v_d * N, and the
+// camera scene-scale is m2v_c = persp * m2v_d (forced by the modelview match —
+// the display rig scales the eye XYZ by perspective, so the camera rig must
+// carry the same factor for off-centre/ moving viewers to coincide).
+
+void
+dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_info *info, dxr_camera_rig *out)
+{
+	float H = info->physical_height_m;
+	float N = info->nominal_distance_m;
+	float persp = in->perspective_factor;
+	float m2v_d = in->virtual_display_height / H;
+	float tan_half_phys = H / (2.0f * N);
+
+	out->ipd_factor = in->ipd_factor;
+	out->parallax_factor = in->parallax_factor;
+	out->m2v = persp * m2v_d;                       // = persp * vHeight / H
+	out->half_tan_vfov = tan_half_phys / persp;     // tan(vFOV/2) = tan(physFOV/2)/persp
+
+	float d_world = out->m2v * N;                   // = persp * m2v_d * N
+	out->inv_convergence_distance = 1.0f / d_world; // = H / (N * persp * vHeight)
+
+	// Camera sits D_world in front (+Z) of the convergence plane (= display).
+	out->pose.orientation = in->pose.orientation;
+	dxr_vec3 fwd = quat_rotate(in->pose.orientation, (dxr_vec3){0.0f, 0.0f, d_world});
+	out->pose.position.x = in->pose.position.x + fwd.x;
+	out->pose.position.y = in->pose.position.y + fwd.y;
+	out->pose.position.z = in->pose.position.z + fwd.z;
+}
+
+float
+dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_info *info, dxr_display_rig *out)
+{
+	float H = info->physical_height_m;
+	float N = info->nominal_distance_m;
+	float tan_half_phys = H / (2.0f * N);
+	float persp = tan_half_phys / in->half_tan_vfov; // tan(physFOV/2)/tan(vFOV/2)
+
+	out->ipd_factor = in->ipd_factor;
+	out->parallax_factor = in->parallax_factor;
+	out->perspective_factor = persp;
+	out->virtual_display_height = (in->m2v / persp) * H; // m2v_d * H
+
+	// Display plane sits D_world behind (-Z) the camera.
+	float d_world = (in->inv_convergence_distance > 0.0f) ? (1.0f / in->inv_convergence_distance) : 0.0f;
+	out->pose.orientation = in->pose.orientation;
+	dxr_vec3 back = quat_rotate(in->pose.orientation, (dxr_vec3){0.0f, 0.0f, -d_world});
+	out->pose.position.x = in->pose.position.x + back.x;
+	out->pose.position.y = in->pose.position.y + back.y;
+	out->pose.position.z = in->pose.position.z + back.z;
+
+	// Exact iff convergence is at the nominal distance (display-compatible).
+	float compatible_invd = 1.0f / (in->m2v * N);
+	return in->inv_convergence_distance - compatible_invd;
 }
