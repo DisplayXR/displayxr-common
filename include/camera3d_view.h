@@ -35,8 +35,9 @@ extern "C" {
 typedef struct Camera3DTunables {
 	float ipd_factor;                //!< [0, 1] — scales inter-eye distance (0=mono, 1=full)
 	float parallax_factor;           //!< [0, 1] — lerps eye center toward nominal (0=no tracking, 1=full)
-	float inv_convergence_distance;  //!< 1/convergence_dist (1/meters)
+	float inv_convergence_distance;  //!< 1/convergence_dist, in 1/world-units (0 = infinity)
 	float half_tan_vfov;             //!< tan(vFOV/2) — divide by zoom at call site
+	float m2v;                       //!< meters→world scale on the eye (default 1; <=0 treated as 1)
 } Camera3DTunables;
 
 typedef struct Camera3DView {

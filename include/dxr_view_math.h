@@ -99,8 +99,9 @@ typedef struct dxr_display3d_view {
 typedef struct dxr_camera3d_tunables {
 	float ipd_factor;               //!< [0, 1] — scales inter-eye distance (0=mono, 1=full)
 	float parallax_factor;          //!< [0, 1] — lerps eye center toward nominal (0=no tracking, 1=full)
-	float inv_convergence_distance; //!< 1/convergence_dist (1/meters)
+	float inv_convergence_distance; //!< 1/convergence_dist, in 1/world-units (0 = infinity)
 	float half_tan_vfov;            //!< tan(vFOV/2) — divide by zoom at call site
+	float m2v;                      //!< meters→world scale on the eye (default 1; <=0 treated as 1)
 } dxr_camera3d_tunables;
 
 typedef struct dxr_camera3d_view {
@@ -228,6 +229,51 @@ dxr_camera3d_compute_views(const dxr_vec3 *raw_eyes,
                            float near_z,
                            float far_z,
                            dxr_camera3d_view *out_views);
+
+// --- Rig equivalence / conversion -------------------------------------------
+//
+// The display-centric and camera-centric rigs are two parameterizations of one
+// off-axis view state. The camera rig is a strict superset by one DOF (its
+// convergence is free; the display rig pins convergence to the display plane,
+// i.e. the nominal viewing distance). These converters let an app switch rig
+// type with no visual disturbance and then animate the new rig's parameters.
+
+// Physical display facts (straight from XR_EXT_display_info).
+typedef struct dxr_rig_display_info {
+	float physical_height_m;  //!< physical display/canvas height (meters)
+	float aspect;             //!< width / height
+	float nominal_distance_m; //!< nominal viewing distance (meters)
+} dxr_rig_display_info;
+
+// Full display-rig description (params + pose), mirrors XrDisplayRigEXT.
+typedef struct dxr_display_rig {
+	dxr_pose pose;                //!< virtual display plane pose
+	float virtual_display_height; //!< app/world units
+	float ipd_factor;
+	float parallax_factor;
+	float perspective_factor;
+} dxr_display_rig;
+
+// Full camera-rig description (params + pose), mirrors XrCameraRigEXT.
+typedef struct dxr_camera_rig {
+	dxr_pose pose;                  //!< camera pose
+	float ipd_factor;
+	float parallax_factor;
+	float inv_convergence_distance; //!< 1/world-units (0 = infinity)
+	float half_tan_vfov;            //!< tan(vFOV/2)
+	float m2v;                      //!< meters→world scale
+} dxr_camera_rig;
+
+// Display → camera. Always exact (the camera rig is a superset).
+void
+dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_info *info, dxr_camera_rig *out);
+
+// Camera → display. Exact iff the camera convergence sits at the nominal
+// distance (inv_convergence_distance == 1/(m2v*nominal_distance_m)). Returns
+// the convergence residual in 1/world-units (0 => exact); to switch with no
+// disturbance, animate convergence to that value before converting.
+float
+dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_info *info, dxr_display_rig *out);
 
 #ifdef __cplusplus
 }

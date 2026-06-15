@@ -29,6 +29,7 @@ camera3d_default_tunables(void)
 	out.parallax_factor = t.parallax_factor;
 	out.inv_convergence_distance = t.inv_convergence_distance;
 	out.half_tan_vfov = t.half_tan_vfov;
+	out.m2v = t.m2v;
 	return out;
 }
 
