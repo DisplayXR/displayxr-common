@@ -125,6 +125,45 @@ build_projection_from_tangents(
 	out[14] = -(2.0f * far_z * near_z) / (far_z - near_z);
 }
 
+// Canonical off-axis (Kooima) frustum — homogeneous form. This is the single
+// source of truth that both the display-centric and camera-centric pipelines
+// build their projection through.
+//
+// All asymmetry comes from `shear` = eye_offset * invd (dimensionless), so the
+// convergence distance D = 1/invd lives in the numerator, never the
+// denominator. That makes invd == 0 (convergence at infinity) a regular case:
+// shear == 0 => denom == 1 => a symmetric frustum with half-tangents (ro, uo),
+// i.e. parallel views. The older affine form (dxr_display3d_compute_projection)
+// divides by an absolute eye depth ez and therefore degenerates as the
+// convergence distance grows; this form does not. The two are the *same*
+// projection for any finite convergence — see dxr_display3d_compute_projection,
+// which now maps its (eye, screen) inputs onto this helper.
+//
+//   ro, uo : half-FOV tangents of the symmetric frustum measured at the
+//            convergence plane (horizontal, vertical).
+//   shear  : eye_offset * invd. shear.xy bias the lateral asymmetry, shear.z
+//            biases the common depth (denom = 1 + shear.z).
+//   out_fov: optional (may be NULL) signed FOV angles for the built frustum.
+static void
+dxr_offaxis_projection(
+    float ro, float uo, dxr_vec3 shear, float near_z, float far_z, float *out_matrix, dxr_fov *out_fov)
+{
+	float denom = 1.0f + shear.z;
+	float tan_right = (ro - shear.x) / denom;
+	float tan_left = (ro + shear.x) / denom;
+	float tan_up = (uo - shear.y) / denom;
+	float tan_down = (uo + shear.y) / denom;
+
+	build_projection_from_tangents(tan_left, tan_right, tan_down, tan_up, near_z, far_z, out_matrix);
+
+	if (out_fov) {
+		out_fov->angle_left = -atanf(tan_left);
+		out_fov->angle_right = atanf(tan_right);
+		out_fov->angle_up = atanf(tan_up);
+		out_fov->angle_down = -atanf(tan_down);
+	}
+}
+
 // ── The single Vulkan-render Y-mirror ───────────────────────────────────────
 // This is the ONE place the +Y-up world frame is mirrored into the Vulkan
 // render frame (Y-down NDC). The render path passes vulkan_flip_y=1 here; the
@@ -305,29 +344,19 @@ dxr_display3d_compute_projection(
 	if (ez <= 0.001f)
 		ez = 0.65f;
 
-	float half_w = screen_width_m / 2.0f;
-	float half_h = screen_height_m / 2.0f;
-	float ex = eye_pos.x;
-	float ey = eye_pos.y;
+	// Display-centric mapping onto the canonical off-axis frustum: the
+	// convergence plane is the screen (z=0), so the convergence distance is the
+	// eye-to-screen distance ez (invd = 1/ez) and the base half-tangents are the
+	// screen half-extents seen from the eye. shear.z = 0 because the reference is
+	// taken at the eye's own depth. Mathematically identical to the former inline
+	// similar-triangle form — now expressed through the shared helper so there is
+	// one matrix builder, not two. See dxr_offaxis_projection.
+	float invd = 1.0f / ez;
+	float ro = (screen_width_m * 0.5f) * invd;
+	float uo = (screen_height_m * 0.5f) * invd;
+	dxr_vec3 shear = {eye_pos.x * invd, eye_pos.y * invd, 0.0f};
 
-	// Near-plane edge distances (similar triangles: project screen edges through eye)
-	float left = near_z * (-half_w - ex) / ez;
-	float right = near_z * (half_w - ex) / ez;
-	float bottom = near_z * (-half_h - ey) / ez;
-	float top = near_z * (half_h - ey) / ez;
-
-	float w = right - left;
-	float h = top - bottom;
-
-	// Column-major asymmetric frustum projection matrix
-	memset(out_matrix, 0, 16 * sizeof(float));
-	out_matrix[0] = 2.0f * near_z / w;
-	out_matrix[5] = 2.0f * near_z / h;
-	out_matrix[8] = (right + left) / w;
-	out_matrix[9] = (top + bottom) / h;
-	out_matrix[10] = -(far_z + near_z) / (far_z - near_z);
-	out_matrix[11] = -1.0f;
-	out_matrix[14] = -(2.0f * far_z * near_z) / (far_z - near_z);
+	dxr_offaxis_projection(ro, uo, shear, near_z, far_z, out_matrix, NULL);
 }
 
 void
@@ -811,26 +840,13 @@ dxr_camera3d_compute_view(const dxr_vec3 *processed_eye,
 	build_view_matrix(out->view_matrix, cam_ori, eye_world);
 	out->orientation = cam_ori;
 
-	// Scale by inv_convergence_distance for projection shifts
-	float dx = eye_local.x * invd;
-	float dy = eye_local.y * invd;
-	float dz = eye_local.z * invd;
-
-	// Asymmetric frustum tangent half-angles
-	float denom = 1.0f + dz;
-	float tan_right = (ro - dx) / denom;
-	float tan_left = (ro + dx) / denom;
-	float tan_up = (uo - dy) / denom;
-	float tan_down = (uo + dy) / denom;
-
-	// Build projection matrix
-	build_projection_from_tangents(tan_left, tan_right, tan_down, tan_up, near_z, far_z, out->projection_matrix);
-
-	// Convert tangents to signed FOV angles
-	out->fov.angle_left = -atanf(tan_left);
-	out->fov.angle_right = atanf(tan_right);
-	out->fov.angle_up = atanf(tan_up);
-	out->fov.angle_down = -atanf(tan_down);
+	// Camera-centric mapping onto the canonical off-axis frustum: the base
+	// half-tangents are the camera's vFOV directly, and the eye displacement
+	// from the convergence plane scaled by invd is the shear. invd == 0
+	// (convergence at infinity) yields symmetric, parallel views with no
+	// special-casing. See dxr_offaxis_projection.
+	dxr_vec3 shear = {eye_local.x * invd, eye_local.y * invd, eye_local.z * invd};
+	dxr_offaxis_projection(ro, uo, shear, near_z, far_z, out->projection_matrix, &out->fov);
 }
 
 void
