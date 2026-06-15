@@ -88,6 +88,26 @@ struct InputState {
     bool cameraMode = false;
     float nominalViewerZ = 0.5f;  // Cached from runtime for camera-mode init
 
+    // Disturbance-free rig round-trip toggle (C key). The keyboard handler sets
+    // the request; UpdateCameraMovement converts the CURRENT rig to its exact
+    // equivalent in the other parameterization (display<->camera) so the
+    // rendered view is unchanged across the toggle. display->camera->display is
+    // an identity, so pressing C repeatedly never moves the scene.
+    bool rigModeToggleRequested = false;
+
+    // Physical CANVAS size in meters (window client area the runtime renders
+    // into) — from XR_EXT_view_rig XrViewDisplayRawEXT::canvasSizeMeters, set by
+    // the app each frame. The rig math runs on the canvas, NOT the full display,
+    // so the C-toggle converter uses this as physical_height_m (else display<->
+    // camera diverge in any non-fullscreen window). 0 = falls back to display.
+    float canvasWidthM = 0.0f;
+    float canvasHeightM = 0.0f;
+
+    // Initial virtual display height, set once by the app at startup. SPACE
+    // resets the rig to exactly this initial display-centric state. 0 = unset
+    // (SPACE then preserves the current vHeight, pre-absolute-reset behavior).
+    float initialVirtualDisplayHeight = 0.0f;
+
     // Eye tracking mode toggle (T key)
     bool eyeTrackingModeToggleRequested = false;
 

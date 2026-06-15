@@ -22,4 +22,7 @@ struct ViewParams {
     // Camera-centric mode
     float invConvergenceDistance = 0.5f; // [0.1, 10] — 1/convergence_dist (default 0.5 = 2m)
     float zoomFactor = 1.0f;            // [0.1, 10] — divides half_tan_vfov
+    float cameraM2v = 1.0f;             // meters→world scale (XrCameraRigEXT::metersToVirtual);
+                                        // derived by the C-toggle converter so the camera rig
+                                        // reproduces the display rig's eye scaling exactly
 };

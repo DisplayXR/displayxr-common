@@ -213,6 +213,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/mip_chain.h
     common/xr_window_space_hud.cpp
     common/xr_window_space_hud.h
+    common/rig_mode.cpp   # platform-neutral display<->camera rig toggle + reset
+    common/rig_mode.h
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

@@ -7,6 +7,7 @@
 
 #include "input_handler.h"
 #include "display3d_view.h"
+#include "rig_mode.h"  // shared display<->camera rig toggle + reset (C / SPACE)
 #include <DirectXMath.h>
 #include <chrono>
 #include <cmath>
@@ -281,23 +282,11 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
             state.eyeTrackingModeToggleRequested = true;
             break;
         case 'C':
-            state.cameraMode = !state.cameraMode;
-            if (state.cameraMode) {
-                state.cameraPosX = 0.0f;
-                state.cameraPosY = 0.0f;
-                state.cameraPosZ = state.nominalViewerZ;
-                state.yaw = 0.0f;
-                state.pitch = 0.0f;
-                if (state.nominalViewerZ > 0.0f)
-                    state.viewParams.invConvergenceDistance = 1.0f / state.nominalViewerZ;
-                state.viewParams.zoomFactor = 1.0f;
-            } else {
-                state.cameraPosX = 0.0f;
-                state.cameraPosY = 0.0f;
-                state.cameraPosZ = 0.0f;
-                state.yaw = 0.0f;
-                state.pitch = 0.0f;
-            }
+            // Request a disturbance-free rig round-trip. The actual conversion
+            // runs in UpdateCameraMovement, which has the canvas dimensions and
+            // converts the CURRENT rig to its exact equivalent in the other
+            // parameterization (no jump). Replaces the former flip-and-reset.
+            state.rigModeToggleRequested = true;
             break;
         }
         return true;
@@ -320,31 +309,43 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 void UpdateCameraMovement(InputState& state, float deltaTime, float displayHeightM) {
-    // Handle view reset (spacebar)
+    // Handle view reset (spacebar) — absolute, drift-free: snap back to the
+    // app's initial DISPLAY-centric state (pose at origin / identity, the
+    // initial vHeight, every tunable at its default incl. cameraM2v=1). Dumb and
+    // absolute by design (no conversion, no dependence on the current rig) so
+    // there is no room for drift. (The former reset preserved cameraMode/vHeight
+    // and left cameraM2v stale, which skewed the scene after a camera-mode C.)
     if (state.resetViewRequested) {
-        state.yaw = 0.0f;
-        state.pitch = 0.0f;
-        float savedVDH = state.viewParams.virtualDisplayHeight;
-        bool savedCameraMode = state.cameraMode;
-        state.viewParams = ViewParams{};
-        state.viewParams.virtualDisplayHeight = savedVDH;
-        state.cameraMode = savedCameraMode;
-        if (state.cameraMode) {
-            state.cameraPosX = 0.0f;
-            state.cameraPosY = 0.0f;
-            state.cameraPosZ = state.nominalViewerZ;
-            if (state.nominalViewerZ > 0.0f)
-                state.viewParams.invConvergenceDistance = 1.0f / state.nominalViewerZ;
-        } else {
-            state.cameraPosX = 0.0f;
-            state.cameraPosY = 0.0f;
-            state.cameraPosZ = 0.0f;
-        }
         state.resetViewRequested = false;
+        float pos[3] = {state.cameraPosX, state.cameraPosY, state.cameraPosZ};
+        dxr::RigResetToInitial(state.viewParams, state.cameraMode, pos, state.yaw, state.pitch,
+                               state.initialVirtualDisplayHeight);
+        state.cameraPosX = pos[0];
+        state.cameraPosY = pos[1];
+        state.cameraPosZ = pos[2];
         state.teleportAnimating = false;
         state.transitioning = false;
         state.animateEnabled = false;
         state.animationActive = false;
+        state.lastInputTimeSec = NowSec();
+        return;
+    }
+
+    // Disturbance-free rig round-trip toggle (C key) — delegate to the shared
+    // converter so Windows and macOS apps behave identically. Pass the same
+    // orientation quaternion the app submits to the runtime, plus the CANVAS
+    // size the runtime renders into (NOT the full display).
+    if (state.rigModeToggleRequested) {
+        state.rigModeToggleRequested = false;
+        XMFLOAT4 rq;
+        XMStoreFloat4(&rq, XMQuaternionRotationRollPitchYaw(state.pitch, state.yaw, 0.0f));
+        const float quat[4] = {rq.x, rq.y, rq.z, rq.w};
+        float pos[3] = {state.cameraPosX, state.cameraPosY, state.cameraPosZ};
+        dxr::RigToggleMode(state.viewParams, state.cameraMode, pos, quat, state.canvasWidthM,
+                           state.canvasHeightM, state.nominalViewerZ, displayHeightM);
+        state.cameraPosX = pos[0];
+        state.cameraPosY = pos[1];
+        state.cameraPosZ = pos[2];
         state.lastInputTimeSec = NowSec();
         return;
     }
