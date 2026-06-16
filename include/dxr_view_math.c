@@ -908,6 +908,48 @@ dxr_display3d_selftest(void)
 		}
 	}
 
+	// (e) OFF-EYE disparity: a reconverged (non-display-compatible) camera rig
+	//     must still convert EXACTLY through the N-view path (which applies the
+	//     ipd/parallax factors) — the ipd-rescale makes per-eye disparity match,
+	//     not just the cyclopean framing part (d) checks. Without it, far/near
+	//     convergence drifts the off-eye frustum + eye_world (the "stereo jump on
+	//     toggle"). f>1 (near) wants ipd>1, which is fine here (no clamp).
+	{
+		float H = 0.194f, N = 0.6f, aspect = 1.7783f, ipd = 0.063f;
+		dxr_screen scr = {H * aspect, H};
+		dxr_rig_display_info info = {H, aspect, N};
+		dxr_vec3 eyes[2] = {{-ipd * 0.5f, 0, N}, {ipd * 0.5f, 0, N}};
+		dxr_vec3 nomv = {0, 0, N};
+		float invds[3] = {0.5f, 1.0f / 0.6f, 2.5f}; // far, compatible, near
+		for (int ci = 0; ci < 3; ci++) {
+			dxr_camera_rig cam = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.0f, 1.0f, invds[ci], 0.3249f, 1.0f};
+			dxr_camera3d_tunables ct = {cam.ipd_factor, cam.parallax_factor, cam.inv_convergence_distance,
+			                            cam.half_tan_vfov, cam.m2v};
+			dxr_camera3d_view cv[2];
+			dxr_camera3d_compute_views(eyes, 2, &nomv, &scr, &ct, &cam.pose, 0.1f, 100.0f, cv);
+
+			dxr_display_rig dr;
+			dxr_view_rig_camera_to_display(&cam, &info, &dr);
+			dxr_display3d_tunables dt = {dr.ipd_factor, dr.parallax_factor, dr.perspective_factor,
+			                             dr.virtual_display_height};
+			dxr_display3d_view dv[2];
+			dxr_display3d_compute_views(eyes, 2, &nomv, &scr, &dt, &dr.pose, 0.05f, 100.0f, 0, dv);
+
+			for (int e = 0; e < 2; e++) {
+				float d = fabsf(dv[e].fov.angle_left - cv[e].fov.angle_left);
+				d = fmaxf(d, fabsf(dv[e].fov.angle_right - cv[e].fov.angle_right));
+				d = fmaxf(d, fabsf(dv[e].eye_world.x - cv[e].eye_world.x));
+				d = fmaxf(d, fabsf(dv[e].eye_world.z - cv[e].eye_world.z));
+				if (d > 1.0e-3f) {
+					fails++;
+					fprintf(stderr,
+					        "[dxr_display3d_selftest] reconverged off-eye mismatch invd=%.2f eye=%d diff=%.2e\n",
+					        invds[ci], e, d);
+				}
+			}
+		}
+	}
+
 	return fails;
 }
 
@@ -1059,9 +1101,28 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	float tan_half_phys = H / (2.0f * N);
 	float persp = tan_half_phys / in->half_tan_vfov; // tan(physFOV/2)/tan(vFOV/2)
 
-	out->ipd_factor = in->ipd_factor;
-	out->parallax_factor = in->parallax_factor;
 	out->perspective_factor = persp;
+
+	// IPD / parallax rescale — this is what makes the conversion EXACT for any
+	// convergence, not just the display-compatible one. The display rig couples
+	// convergence distance and eye-separation through one scale es = persp*vH/H
+	// (eye_scaled = es*eye); the camera rig has them independent (invd sets
+	// convergence, m2v scales the eye). Matching vH to the convergence distance
+	// (below) forces es != m2v for an off-nominal convergence, which would rescale
+	// the per-eye disparity — the "stereo jump after reconverging then toggling"
+	// we saw. Both factors only act on the modelview eye, so absorb that disparity
+	// rescale into ipd/parallax: with f = m2v*invd*N, the display eye-separation
+	// es*(ipd*f) == m2v*ipd (the camera's), so every eye's frustum + eye_world
+	// match exactly. f == 1 for a compatible rig (no change). The reverse
+	// (display->camera) needs no mirror: it emits m2v = es, which re-absorbs the
+	// factor, so display<->camera round-trips render identically (the rig's m2v/
+	// ipd numbers converge to a compatible split after one round trip).
+	// NOTE: f > 1 (convergence NEARER than nominal) wants ipd_factor > 1; callers
+	// that clamp ipd to [0,1] will fall short of exact there — far convergence
+	// (f <= 1, incl. the 0.5 dp default) is always exact.
+	float f = in->m2v * in->inv_convergence_distance * N;
+	out->ipd_factor = in->ipd_factor * f;
+	out->parallax_factor = in->parallax_factor * f;
 
 	// Virtual display height = the world-space height of the virtual screen at
 	// the convergence plane: vH = 2 * tan(vFOV/2) * D_world = 2 * half_tan_vfov /
@@ -1090,7 +1151,10 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	out->pose.position.y = in->pose.position.y + back.y;
 	out->pose.position.z = in->pose.position.z + back.z;
 
-	// Exact iff convergence is at the nominal distance (display-compatible).
+	// Convergence delta from the display-compatible value. With the ipd/parallax
+	// rescale above the conversion is now exact for any convergence (modulo a
+	// caller ipd clamp for f>1), so this is informational — how far the camera's
+	// convergence sits from the nominal distance — not a "lossy" flag.
 	float compatible_invd = 1.0f / (in->m2v * N);
 	return in->inv_convergence_distance - compatible_invd;
 }

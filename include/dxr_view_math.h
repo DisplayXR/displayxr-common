@@ -268,10 +268,15 @@ typedef struct dxr_camera_rig {
 void
 dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_info *info, dxr_camera_rig *out);
 
-// Camera → display. Exact iff the camera convergence sits at the nominal
-// distance (inv_convergence_distance == 1/(m2v*nominal_distance_m)). Returns
-// the convergence residual in 1/world-units (0 => exact); to switch with no
-// disturbance, animate convergence to that value before converting.
+// Camera → display. Exact for ANY convergence: vH carries the convergence
+// distance and the ipd/parallax factors are rescaled by f = m2v*invd*N so the
+// per-eye disparity matches too (the display rig couples convergence and eye-
+// scale through one factor; ipd supplies the missing DOF). The reverse emits
+// m2v = es which re-absorbs f, so display<->camera round-trips render
+// identically. Caveat: f > 1 (convergence nearer than nominal) yields
+// ipd_factor > 1; a caller that clamps ipd to [0,1] will fall short of exact
+// there — far convergence (f <= 1) is always exact. Returns the convergence
+// delta from the compatible value (informational, not a lossy flag).
 float
 dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_info *info, dxr_display_rig *out);
 
