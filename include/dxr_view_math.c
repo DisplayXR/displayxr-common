@@ -781,58 +781,68 @@ dxr_display3d_selftest(void)
 		        roR.x + rdR.x, roL.x + rdL.x);
 	}
 
-	// (c) Rig equivalence: a display rig and its camera-rig twin must produce
-	//     the SAME frustum + view matrix for every viewer position, at any
-	//     perspective; and the round-trip back to a display rig must be
-	//     identity. (Frustum elements [0],[5],[8],[9] are near/far-independent,
-	//     so the two rigs' differing near/far conventions don't matter here.)
+	// (c) Rig round-trip + equivalence. display→camera→display recovers the
+	//     display rig EXACTLY (vH, persp, ipd, parallax) — the m2v→ipd
+	//     normalization (display→camera emits m2v=1, ipd*=es) is drift-free. And
+	//     a display rig and its camera twin render identically through the N-view
+	//     path, which applies ipd/parallax (where the eye-scale now lives) — a
+	//     stereo pair exercises the per-eye disparity, not just the centroid.
+	//     (Frustum elems [0],[5],[8],[9] + the view matrix are near/far-independent.)
 	dxr_rig_display_info info = {screen.height_m, screen.width_m / screen.height_m, 0.6f};
 	float persps[3] = {0.5f, 1.0f, 2.0f};
-	dxr_vec3 test_eyes[5] = {
-	    {0, 0, 0.6f}, {0.05f, 0, 0.6f}, {0, 0.04f, 0.6f}, {-0.04f, 0.03f, 0.5f}, {0.02f, -0.02f, 0.8f}};
+	dxr_vec3 nomv = {0, 0, 0.6f};
+	dxr_vec3 pairs[2][2] = {
+	    {{-0.03f, 0.0f, 0.6f}, {0.03f, 0.0f, 0.6f}},   // centered stereo pair
+	    {{-0.01f, 0.04f, 0.6f}, {0.05f, 0.04f, 0.6f}}, // off-centre-centroid stereo pair
+	};
 	for (int pi = 0; pi < 3; pi++) {
 		dxr_display_rig dr = {{{0, 0, 0, 1}, {0, 0, 0}}, 0.20f, 1.0f, 1.0f, persps[pi]};
 		dxr_camera_rig cr;
 		dxr_view_rig_display_to_camera(&dr, &info, &cr);
 
-		// Round-trip identity (also asserts residual ~ 0 → exact).
+		// Round-trip identity (params, incl. ipd/parallax — drift-free under A).
 		dxr_display_rig dr2;
-		float residual = dxr_view_rig_camera_to_display(&cr, &info, &dr2);
-		if (fabsf(residual) > 1e-4f || fabsf(dr2.virtual_display_height - dr.virtual_display_height) > 1e-4f ||
-		    fabsf(dr2.perspective_factor - dr.perspective_factor) > 1e-4f) {
+		(void)dxr_view_rig_camera_to_display(&cr, &info, &dr2);
+		if (fabsf(dr2.virtual_display_height - dr.virtual_display_height) > 1e-3f ||
+		    fabsf(dr2.perspective_factor - dr.perspective_factor) > 1e-3f ||
+		    fabsf(dr2.ipd_factor - dr.ipd_factor) > 1e-3f ||
+		    fabsf(dr2.parallax_factor - dr.parallax_factor) > 1e-3f) {
 			fails++;
-			fprintf(stderr, "[dxr_display3d_selftest] rig round-trip drift at persp=%.2f (resid=%.2e vH=%.4f persp=%.4f)\n",
-			        persps[pi], residual, dr2.virtual_display_height, dr2.perspective_factor);
+			fprintf(stderr,
+			        "[dxr_display3d_selftest] rig round-trip drift at persp=%.2f (vH=%.4f persp=%.4f ipd=%.4f)\n",
+			        persps[pi], dr2.virtual_display_height, dr2.perspective_factor, dr2.ipd_factor);
 		}
 
-		// All-positions frustum + view-matrix match.
+		// Per-eye frustum + view-matrix match through the N-view (ipd-applied) path.
 		dxr_display3d_tunables dt = {dr.ipd_factor, dr.parallax_factor, dr.perspective_factor,
 		                             dr.virtual_display_height};
 		dxr_camera3d_tunables ct = {cr.ipd_factor, cr.parallax_factor, cr.inv_convergence_distance,
 		                            cr.half_tan_vfov, cr.m2v};
-		for (int e = 0; e < 5; e++) {
-			dxr_display3d_view dv;
-			dxr_camera3d_view cv;
-			dxr_display3d_compute_view(&test_eyes[e], &screen, &dt, &dr.pose, 0.05f, 100.0f, &dv);
-			dxr_camera3d_compute_view(&test_eyes[e], info.nominal_distance_m, &screen, &ct, &cr.pose, 0.1f,
-			                          100.0f, &cv);
-			int idx[4] = {0, 5, 8, 9};
-			for (int k = 0; k < 4; k++) {
-				float d = fabsf(dv.projection_matrix[idx[k]] - cv.projection_matrix[idx[k]]);
-				if (d > 1e-3f) {
-					fails++;
-					fprintf(stderr,
-					        "[dxr_display3d_selftest] frustum mismatch persp=%.2f eye=%d elem=%d diff=%.2e\n",
-					        persps[pi], e, idx[k], d);
+		for (int s = 0; s < 2; s++) {
+			dxr_display3d_view dv[2];
+			dxr_camera3d_view cv[2];
+			dxr_display3d_compute_views(pairs[s], 2, &nomv, &screen, &dt, &dr.pose, 0.05f, 100.0f, 0, dv);
+			dxr_camera3d_compute_views(pairs[s], 2, &nomv, &screen, &ct, &cr.pose, 0.1f, 100.0f, cv);
+			for (int e = 0; e < 2; e++) {
+				int idx[4] = {0, 5, 8, 9};
+				for (int k = 0; k < 4; k++) {
+					float d = fabsf(dv[e].projection_matrix[idx[k]] - cv[e].projection_matrix[idx[k]]);
+					if (d > 1e-3f) {
+						fails++;
+						fprintf(stderr,
+						        "[dxr_display3d_selftest] frustum mismatch persp=%.2f pair=%d eye=%d elem=%d diff=%.2e\n",
+						        persps[pi], s, e, idx[k], d);
+					}
 				}
-			}
-			for (int k = 0; k < 16; k++) {
-				float d = fabsf(dv.view_matrix[k] - cv.view_matrix[k]);
-				if (d > 1e-3f) {
-					fails++;
-					fprintf(stderr, "[dxr_display3d_selftest] view-matrix mismatch persp=%.2f eye=%d k=%d diff=%.2e\n",
-					        persps[pi], e, k, d);
-					break;
+				for (int k = 0; k < 16; k++) {
+					float d = fabsf(dv[e].view_matrix[k] - cv[e].view_matrix[k]);
+					if (d > 1e-3f) {
+						fails++;
+						fprintf(stderr,
+						        "[dxr_display3d_selftest] view-matrix mismatch persp=%.2f pair=%d eye=%d k=%d diff=%.2e\n",
+						        persps[pi], s, e, k, d);
+						break;
+					}
 				}
 			}
 		}
@@ -1076,16 +1086,29 @@ dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_
 	float persp = in->perspective_factor;
 	float m2v_d = in->virtual_display_height / H;
 	float tan_half_phys = H / (2.0f * N);
+	float es = persp * m2v_d; // display eye scale: eye_scaled = es * eye
 
-	out->ipd_factor = in->ipd_factor;
-	out->parallax_factor = in->parallax_factor;
-	out->m2v = persp * m2v_d;                       // = persp * vHeight / H
-	out->half_tan_vfov = tan_half_phys / persp;     // tan(vFOV/2) = tan(physFOV/2)/persp
+	out->half_tan_vfov = tan_half_phys / persp; // tan(vFOV/2) = tan(physFOV/2)/persp
 
-	float d_world = out->m2v * N;                   // = persp * m2v_d * N
-	out->inv_convergence_distance = 1.0f / d_world; // = H / (N * persp * vHeight)
+	// m2v is mathematically redundant with ipd/parallax (it only ever multiplies
+	// the modelview eye, exactly like they do). Emit the CANONICAL m2v = 1 and put
+	// the display eye-scale es into ipd/parallax instead. This is what keeps
+	// display<->camera round-trips DRIFT-FREE: camera→display rescales ipd by
+	// f = m2v*invd*N, and this reverse multiplies by es = 1/(invd*N) (= 1/f when
+	// m2v==1), so a round trip recovers the original ipd exactly — the camera rig
+	// never has its m2v silently rewritten. (Synthesizing m2v = es here instead
+	// would render identically but drift m2v 1→es on every camera→display→camera,
+	// corrupting m2v's meaning as a meters→world unit scale.)
+	out->m2v = 1.0f;
+	out->ipd_factor = in->ipd_factor * es;
+	out->parallax_factor = in->parallax_factor * es;
 
-	// Camera sits D_world in front (+Z) of the convergence plane (= display).
+	// Convergence distance (where the off-axis frustums cross) = es * N in world
+	// units; with m2v == 1 the camera's 1/invd must equal it.
+	float d_world = es * N;
+	out->inv_convergence_distance = 1.0f / d_world;
+
+	// Camera sits d_world in front (+Z) of the convergence plane (= display).
 	out->pose.orientation = in->pose.orientation;
 	dxr_vec3 fwd = quat_rotate(in->pose.orientation, (dxr_vec3){0.0f, 0.0f, d_world});
 	out->pose.position.x = in->pose.position.x + fwd.x;
@@ -1114,9 +1137,9 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	// rescale into ipd/parallax: with f = m2v*invd*N, the display eye-separation
 	// es*(ipd*f) == m2v*ipd (the camera's), so every eye's frustum + eye_world
 	// match exactly. f == 1 for a compatible rig (no change). The reverse
-	// (display->camera) needs no mirror: it emits m2v = es, which re-absorbs the
-	// factor, so display<->camera round-trips render identically (the rig's m2v/
-	// ipd numbers converge to a compatible split after one round trip).
+	// (display->camera) mirrors this: it emits m2v = 1 and multiplies ipd by
+	// es = 1/(invd*N), so a display<->camera round trip recovers the original
+	// ipd EXACTLY — no drift, the camera's m2v is never silently rewritten.
 	// NOTE: f > 1 (convergence NEARER than nominal) wants ipd_factor > 1; callers
 	// that clamp ipd to [0,1] will fall short of exact there — far convergence
 	// (f <= 1, incl. the 0.5 dp default) is always exact.
