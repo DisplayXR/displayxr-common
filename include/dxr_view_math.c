@@ -960,6 +960,90 @@ dxr_display3d_selftest(void)
 		}
 	}
 
+	// (f) RIG TRANSITION (convert-then-lerp) + comfort — see dxr_rig_transition.
+	{
+		float H = 0.194f, N = 0.6f, aspect = 1.7783f, ipd = 0.063f;
+		dxr_screen scr = {H * aspect, H};
+		dxr_rig_display_info info = {H, aspect, N};
+		dxr_vec3 eyes[2] = {{-ipd * 0.5f, 0, N}, {ipd * 0.5f, 0, N}};
+		dxr_vec3 nomv = {0, 0, N};
+
+		// (f.1) Disturbance-free at t=0: a cross-type transition's first frame is
+		//       the exact converted `from`, so it renders identically to `from`.
+		dxr_rig from = {.type = DXR_RIG_DISPLAY, .u.display = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.30f, 1.0f, 1.0f, 1.0f}};
+		dxr_rig to = {.type = DXR_RIG_CAMERA, .u.camera = {{{0, 0, 0, 1}, {0.1f, 0.05f, 0.2f}}, 1.0f, 1.0f, 0.5f,
+		                                                   0.40f, 1.0f}};
+		dxr_rig out;
+		dxr_rig_transition(&from, &to, &info, 0.0f, 0.0f, &out); // t=0 → converted `from`
+		dxr_display3d_tunables dft = {from.u.display.ipd_factor, from.u.display.parallax_factor,
+		                              from.u.display.perspective_factor, from.u.display.virtual_display_height};
+		dxr_display3d_view dfv[2];
+		dxr_display3d_compute_views(eyes, 2, &nomv, &scr, &dft, &from.u.display.pose, 0.05f, 100.0f, 0, dfv);
+		dxr_camera3d_tunables oct = {out.u.camera.ipd_factor, out.u.camera.parallax_factor,
+		                             out.u.camera.inv_convergence_distance, out.u.camera.half_tan_vfov,
+		                             out.u.camera.m2v};
+		dxr_camera3d_view ocv[2];
+		dxr_camera3d_compute_views(eyes, 2, &nomv, &scr, &oct, &out.u.camera.pose, 0.1f, 100.0f, ocv);
+		for (int e = 0; e < 2; e++) {
+			float d = fabsf(dfv[e].fov.angle_left - ocv[e].fov.angle_left);
+			d = fmaxf(d, fabsf(dfv[e].fov.angle_right - ocv[e].fov.angle_right));
+			d = fmaxf(d, fabsf(dfv[e].eye_world.x - ocv[e].eye_world.x));
+			d = fmaxf(d, fabsf(dfv[e].eye_world.z - ocv[e].eye_world.z));
+			if (d > 1.0e-3f) {
+				fails++;
+				fprintf(stderr, "[dxr_display3d_selftest] (f) transition t=0 not disturbance-free eye=%d diff=%.2e\n",
+				        e, d);
+			}
+		}
+
+		// (f.2) Endpoint t=1 lands exactly on `to` (which is comfortable here).
+		dxr_rig_transition(&from, &to, &info, 1.0f, 0.0f, &out);
+		const dxr_camera_rig *tc = &to.u.camera, *oc = &out.u.camera;
+		if (out.type != DXR_RIG_CAMERA || fabsf(oc->inv_convergence_distance - tc->inv_convergence_distance) > 1e-5f ||
+		    fabsf(oc->half_tan_vfov - tc->half_tan_vfov) > 1e-5f || fabsf(oc->ipd_factor - tc->ipd_factor) > 1e-5f ||
+		    fabsf(oc->pose.position.x - tc->pose.position.x) > 1e-5f) {
+			fails++;
+			fprintf(stderr, "[dxr_display3d_selftest] (f) transition t=1 != target\n");
+		}
+
+		// (f.3) virtual_display_height lerps log/multiplicatively: t=0.5 = geometric mean.
+		dxr_rig da = {.type = DXR_RIG_DISPLAY, .u.display = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.0f, 1.0f, 1.0f, 1.0f}};
+		dxr_rig db = {.type = DXR_RIG_DISPLAY, .u.display = {{{0, 0, 0, 1}, {0, 0, 0}}, 4.0f, 1.0f, 1.0f, 1.0f}};
+		dxr_rig dm;
+		dxr_rig_transition(&da, &db, &info, 0.5f, 0.0f, &dm);
+		float want = sqrtf(1.0f * 4.0f); // 2.0
+		if (fabsf(dm.u.display.virtual_display_height - want) > 1e-4f) {
+			fails++;
+			fprintf(stderr, "[dxr_display3d_selftest] (f) vHeight not geometric mean: %.4f want %.4f\n",
+			        dm.u.display.virtual_display_height, want);
+		}
+
+		// (f.4) Comfort. comfort_factor at the 1/(m2v*N) clamp == ipd.
+		dxr_camera_rig cc = {{{0, 0, 0, 1}, {0, 0, 0}}, 0.8f, 1.0f, 1.0f / (1.0f * N), 0.3249f, 1.0f};
+		if (fabsf(dxr_rig_comfort_factor(&cc, &info) - 0.8f) > 1e-4f) {
+			fails++;
+			fprintf(stderr, "[dxr_display3d_selftest] (f) comfort_factor at limit != ipd\n");
+		}
+		// A camera `to` converging too near is clamped; the whole transition stays <= 1.
+		dxr_rig cfrom = {.type = DXR_RIG_CAMERA, .u.camera = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.0f, 1.0f, 0.5f, 0.3249f, 1.0f}};
+		dxr_rig nearto = {.type = DXR_RIG_CAMERA, .u.camera = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.0f, 1.0f, 5.0f, 0.3249f, 1.0f}};
+		for (int s = 0; s <= 10; s++) {
+			dxr_rig ev;
+			dxr_rig_transition(&cfrom, &nearto, &info, s * 0.1f, 0.0f, &ev);
+			if (dxr_rig_comfort_factor(&ev.u.camera, &info) > 1.0f + 1e-4f) {
+				fails++;
+				fprintf(stderr, "[dxr_display3d_selftest] (f) transition exceeded comfort at t=%.1f\n", s * 0.1f);
+			}
+		}
+		// A depth-aware far plane allows a strictly nearer comfortable convergence.
+		float inf_max = dxr_rig_max_convergence(&cfrom.u.camera, &info, 0.0f);
+		float dep_max = dxr_rig_max_convergence(&cfrom.u.camera, &info, 2.0f);
+		if (!(dep_max > inf_max)) {
+			fails++;
+			fprintf(stderr, "[dxr_display3d_selftest] (f) depth budget did not allow nearer convergence\n");
+		}
+	}
+
 	return fails;
 }
 
@@ -1180,4 +1264,135 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	// convergence sits from the nominal distance — not a "lossy" flag.
 	float compatible_invd = 1.0f / (in->m2v * N);
 	return in->inv_convergence_distance - compatible_invd;
+}
+
+// ============================================================================
+// Rig transition (convert-then-lerp) + stereo comfort
+// ============================================================================
+
+static float
+rig_lerpf(float a, float b, float t)
+{
+	return a + (b - a) * t;
+}
+
+// Multiplicative / log-space lerp: the geometric path a -> b (perceptually
+// uniform for zoom-like quantities; t=0.5 is the geometric mean). Falls back to
+// linear if either endpoint is non-positive (log undefined).
+static float
+rig_loglerpf(float a, float b, float t)
+{
+	if (a > 0.0f && b > 0.0f) {
+		return a * powf(b / a, t);
+	}
+	return rig_lerpf(a, b, t);
+}
+
+// Lerp a half-tangent FOV in ANGLE space: interpolate the angle, then re-tan.
+static float
+rig_htan_lerp(float a, float b, float t)
+{
+	return tanf(rig_lerpf(atanf(a), atanf(b), t));
+}
+
+float
+dxr_rig_comfort_factor(const dxr_camera_rig *cam, const dxr_rig_display_info *info)
+{
+	float N = info->nominal_distance_m;
+	float m2v = (cam->m2v > 0.0f) ? cam->m2v : 1.0f;
+	float f = m2v * cam->inv_convergence_distance * N; // = ipd_eff / ipd
+	return cam->ipd_factor * f;
+}
+
+float
+dxr_rig_max_convergence(const dxr_camera_rig *cam, const dxr_rig_display_info *info, float far_z)
+{
+	float N = info->nominal_distance_m;
+	float m2v = (cam->m2v > 0.0f) ? cam->m2v : 1.0f;
+	// Comfort is the PRODUCT comfort_factor = ipd*m2v*invd*N <= 1, enforced via the
+	// convergence knob: invd <= 1/(ipd*m2v*N). For ipd <= 1 that ceiling sits at or
+	// above the nominal-distance floor 1/(m2v*N), so take max(1, ipd): the clamp is
+	// then 1/(m2v*N) (zero-parallax no nearer than nominal — the qwerty conv_max),
+	// which also keeps the rig in the converter's always-exact f<=1 regime. For
+	// ipd > 1 (e.g. a display->camera conversion with large eye-scale) the binding
+	// term is 1/(ipd*m2v*N); that is < 1/(m2v*N) so it stays f<=1 too. Either way
+	// comfort_factor <= 1. We clamp invd, NEVER ipd — a rig with ipd>1 but tiny
+	// invd is already comfortable and is left untouched.
+	float ipd = (cam->ipd_factor > 1.0f) ? cam->ipd_factor : 1.0f;
+	float invd_inf = 1.0f / (ipd * m2v * N);
+	if (far_z <= 0.0f) {
+		return invd_inf;
+	}
+	// Depth-aware: with no content past far_z (world distance from the eye), the
+	// binding disparity is the parallax at far_z, not at infinity, so convergence
+	// may move nearer by 1/far_z: invd_max = 1/(ipd*m2v*N) + 1/far_z. Collapses to
+	// the infinity case as far_z -> inf. (Here convergence may go nearer than
+	// nominal, i.e. f>1 — the depth-aware caller accepts that trade.)
+	return invd_inf + 1.0f / far_z;
+}
+
+void
+dxr_rig_clamp_for_comfort(dxr_camera_rig *cam, const dxr_rig_display_info *info, float far_z)
+{
+	float invd_max = dxr_rig_max_convergence(cam, info, far_z);
+	if (cam->inv_convergence_distance > invd_max) {
+		cam->inv_convergence_distance = invd_max;
+	}
+}
+
+void
+dxr_rig_transition(const dxr_rig *from,
+                   const dxr_rig *to,
+                   const dxr_rig_display_info *info,
+                   float t,
+                   float comfort_far_z,
+                   dxr_rig *out)
+{
+	out->type = to->type;
+
+	// Land exactly on the target at t >= 1.
+	if (t >= 1.0f) {
+		*out = *to;
+		if (out->type == DXR_RIG_CAMERA) {
+			dxr_rig_clamp_for_comfort(&out->u.camera, info, comfort_far_z);
+		}
+		return;
+	}
+
+	float tt = (t < 0.0f) ? 0.0f : t; // t <= 0 emits the converted `from`.
+
+	// Bring `from` into the target type's space — exact converters, so the
+	// converted rig renders identically to `from` (disturbance-free at tt=0).
+	if (out->type == DXR_RIG_DISPLAY) {
+		dxr_display_rig a;
+		if (from->type == DXR_RIG_DISPLAY) {
+			a = from->u.display;
+		} else {
+			(void)dxr_view_rig_camera_to_display(&from->u.camera, info, &a);
+		}
+		const dxr_display_rig *b = &to->u.display;
+		dxr_display_rig *o = &out->u.display;
+		dxr_display3d_pose_slerp(&a.pose, &b->pose, tt, &o->pose);
+		o->virtual_display_height = rig_loglerpf(a.virtual_display_height, b->virtual_display_height, tt);
+		o->perspective_factor = rig_loglerpf(a.perspective_factor, b->perspective_factor, tt);
+		o->ipd_factor = rig_lerpf(a.ipd_factor, b->ipd_factor, tt);
+		o->parallax_factor = rig_lerpf(a.parallax_factor, b->parallax_factor, tt);
+	} else {
+		dxr_camera_rig a;
+		if (from->type == DXR_RIG_CAMERA) {
+			a = from->u.camera;
+		} else {
+			dxr_view_rig_display_to_camera(&from->u.display, info, &a);
+		}
+		const dxr_camera_rig *b = &to->u.camera;
+		dxr_camera_rig *o = &out->u.camera;
+		dxr_display3d_pose_slerp(&a.pose, &b->pose, tt, &o->pose);
+		o->inv_convergence_distance = rig_lerpf(a.inv_convergence_distance, b->inv_convergence_distance, tt);
+		o->half_tan_vfov = rig_htan_lerp(a.half_tan_vfov, b->half_tan_vfov, tt);
+		o->m2v = rig_lerpf(a.m2v, b->m2v, tt);
+		o->ipd_factor = rig_lerpf(a.ipd_factor, b->ipd_factor, tt);
+		o->parallax_factor = rig_lerpf(a.parallax_factor, b->parallax_factor, tt);
+		// Keep the whole path comfortable (clamp the evaluated convergence).
+		dxr_rig_clamp_for_comfort(o, info, comfort_far_z);
+	}
 }

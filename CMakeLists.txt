@@ -215,6 +215,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/xr_window_space_hud.h
     common/rig_mode.cpp   # platform-neutral display<->camera rig toggle + reset
     common/rig_mode.h
+    common/rig_transition.cpp # platform-neutral convert-then-lerp rig transition
+    common/rig_transition.h
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

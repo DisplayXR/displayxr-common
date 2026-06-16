@@ -280,6 +280,72 @@ dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_
 float
 dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_info *info, dxr_display_rig *out);
 
+// --- Rig transition (convert-then-lerp) -------------------------------------
+//
+// A tagged rig: either parameterization. The transition helper lerps between
+// two of these over a normalized parameter t; if the types differ it does the
+// exact (disturbance-free) type conversion first, then lerps in the target
+// type's space. PURE — the caller owns time + easing (so it is testable and
+// interruptible: snapshot the current eval as a new `from` and restart t).
+
+typedef enum dxr_rig_type {
+	DXR_RIG_DISPLAY = 0,
+	DXR_RIG_CAMERA = 1,
+} dxr_rig_type;
+
+typedef struct dxr_rig {
+	dxr_rig_type type;
+	union {
+		dxr_display_rig display;
+		dxr_camera_rig camera;
+	} u;
+} dxr_rig;
+
+// out->type == to->type. If from->type != to->type, `from` is converted into
+// to->type FIRST (exact converters → t<=0 is disturbance-free), then each
+// parameter is lerped in its chosen space: inv_convergence_distance linear (in
+// diopters — sails through infinite convergence); virtual_display_height &
+// perspective_factor log/multiplicative; FOV lerped in angle; ipd/parallax
+// linear; pose = slerp orientation + linear position. t<=0 emits the converted
+// `from`; t>=1 copies `to`. When the output is camera-type its convergence is
+// clamped for stereo comfort (see dxr_rig_clamp_for_comfort) using comfort_far_z
+// (<=0 → conservative infinity clamp). `t` is raw [0,1]; easing is the caller's.
+void
+dxr_rig_transition(const dxr_rig *from,
+                   const dxr_rig *to,
+                   const dxr_rig_display_info *info,
+                   float t,
+                   float comfort_far_z,
+                   dxr_rig *out);
+
+// --- Stereo comfort -----------------------------------------------------------
+//
+// The display-equivalent ipd_factor is the canonical comfort metric: it bounds
+// the screen disparity of far content. comfort_factor = ipd_factor * f, with
+// f = m2v * invd * N. <= 1 comfortable; == 1 divergence limit (infinity exactly
+// at parallel); > 1 the eyes DIVERGE for far content (uncomfortable/unsafe).
+// Only ipd matters here — parallax (head-tracking response) and vHeight
+// (framing) do not change infinity disparity.
+float
+dxr_rig_comfort_factor(const dxr_camera_rig *cam, const dxr_rig_display_info *info);
+
+// Maximum comfortable convergence (1/world-units), enforcing comfort_factor <= 1
+// via the convergence knob (never by clamping ipd). far_z <= 0 → the conservative
+// infinity case 1/(max(1,ipd)*m2v*N): for ipd<=1 that is 1/(m2v*N) (zero-parallax
+// no nearer than nominal, also the converter's exact f<=1 regime); for ipd>1 the
+// binding term 1/(ipd*m2v*N). A depth-aware caller passes its scene far plane
+// (world distance from the eye) to allow converging nearer (far-content disparity
+// scales with 1/far_z, so a shallow scene has headroom).
+float
+dxr_rig_max_convergence(const dxr_camera_rig *cam, const dxr_rig_display_info *info, float far_z);
+
+// Clamp convergence for comfort in place: invd = min(invd, max_convergence).
+// Enforce comfort HERE (at the convergence knob), never by clamping ipd_factor —
+// comfort is the product ipd*m2v*invd*N, so a rig with ipd>1 but tiny invd is
+// perfectly comfortable and clamping its ipd would wrongly distort it.
+void
+dxr_rig_clamp_for_comfort(dxr_camera_rig *cam, const dxr_rig_display_info *info, float far_z);
+
 #ifdef __cplusplus
 }
 #endif
