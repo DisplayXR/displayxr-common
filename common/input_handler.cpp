@@ -8,6 +8,7 @@
 #include "input_handler.h"
 #include "display3d_view.h"
 #include "rig_mode.h"  // shared display<->camera rig toggle + reset (C / SPACE)
+#include "dxr_view_math.h"  // dxr_rig_max_ipd_factor (camera-rig IPD comfort ceiling)
 #include <DirectXMath.h>
 #include <chrono>
 #include <cmath>
@@ -139,7 +140,11 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
             // and the macOS demo's behaviour.
             float v = state.viewParams.ipdFactor * factor;
             if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
+            // Camera mode: the comfortable ceiling is M = 1/f (display-equivalent
+            // 1), which needs display info not available in this WndProc — it's
+            // enforced per-frame in UpdateCameraMovement. Only the display rig is
+            // hard-capped at 1 here.
+            if (!state.cameraMode && v > 1.0f) v = 1.0f;
             state.viewParams.ipdFactor = v;
             state.viewParams.parallaxFactor = v;
         } else if (ctrl) {
@@ -207,7 +212,9 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case VK_OEM_PLUS: {
             float v = state.viewParams.ipdFactor + 0.1f;
-            if (v > 1.0f) v = 1.0f;
+            // Camera mode: clamped to M per-frame in UpdateCameraMovement; only the
+            // display rig is hard-capped at 1 here (see the shift+wheel note above).
+            if (!state.cameraMode && v > 1.0f) v = 1.0f;
             state.viewParams.ipdFactor = v;
             state.viewParams.parallaxFactor = v;
             break;
@@ -452,6 +459,23 @@ void UpdateCameraMovement(InputState& state, float deltaTime, float displayHeigh
         }
     } else {
         state.animationActive = false;
+    }
+
+    // Camera-rig IPD/parallax comfort ceiling. The display rig is bounded to [0,1],
+    // but the camera rig's comfortable maximum is M = 1/f — the factor whose
+    // DISPLAY-centric equivalent is exactly 1 (f = m2v*invd*N). M depends on the live
+    // convergence / m2v / nominal distance, available only here, so the IPD knobs in
+    // UpdateInputState don't cap camera-mode IPD at 1 — we enforce M per-frame. This
+    // keeps IPD correct as convergence changes (M>1 far, <1 near, +inf at infinity →
+    // no ceiling). Display mode is left at its own [0,1] clamp.
+    if (state.cameraMode) {
+        dxr_rig_display_info info = {displayHeightM, 1.0f, state.nominalViewerZ};
+        dxr_camera_rig cam = {};
+        cam.m2v = state.viewParams.cameraM2v;
+        cam.inv_convergence_distance = state.viewParams.invConvergenceDistance;
+        float ipdMax = dxr_rig_max_ipd_factor(&cam, &info);
+        if (state.viewParams.ipdFactor > ipdMax) state.viewParams.ipdFactor = ipdMax;
+        if (state.viewParams.parallaxFactor > ipdMax) state.viewParams.parallaxFactor = ipdMax;
     }
 }
 
