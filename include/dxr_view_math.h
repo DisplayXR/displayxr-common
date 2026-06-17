@@ -339,6 +339,18 @@ dxr_rig_comfort_factor(const dxr_camera_rig *cam, const dxr_rig_display_info *in
 float
 dxr_rig_max_convergence(const dxr_camera_rig *cam, const dxr_rig_display_info *info, float far_z);
 
+// Maximum camera ipd_factor whose DISPLAY-centric equivalent is exactly 1, at the
+// rig's CURRENT convergence: M = 1/f, f = m2v*invd*N. The dual of
+// dxr_rig_max_convergence (which bounds invd at fixed ipd); this bounds ipd at
+// fixed convergence. The display rig clamps ipd to [0,1]; the camera rig's
+// comfortable ceiling is this M — >1 for far convergence (f<1), <1 for near (f>1).
+// cam->ipd_factor is NOT read. f<=0 (convergence at/behind infinity, or degenerate
+// params) → no ceiling → returns +infinity (HUGE_VALF). Use when a caller bounds an
+// IPD knob at fixed convergence; the library's own comfort enforcement clamps
+// convergence instead (dxr_rig_clamp_for_comfort), never ipd.
+float
+dxr_rig_max_ipd_factor(const dxr_camera_rig *cam, const dxr_rig_display_info *info);
+
 // Clamp convergence for comfort in place: invd = min(invd, max_convergence).
 // Enforce comfort HERE (at the convergence knob), never by clamping ipd_factor —
 // comfort is the product ipd*m2v*invd*N, so a rig with ipd>1 but tiny invd is

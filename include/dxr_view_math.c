@@ -915,6 +915,28 @@ dxr_display3d_selftest(void)
 				        "[dxr_display3d_selftest] camera→display eye_world diff=(%.2e,%.2e,%.2e) (case %d)\n",
 				        dex, dey, dez, ci);
 			}
+
+			// dxr_rig_max_ipd_factor: M = 1/f is the camera ipd whose display
+			// equivalent is exactly 1. cam.ipd_factor==1 here, so dr.ipd_factor == f
+			// and M must equal 1/dr.ipd_factor; converting a rig at ipd=M must then
+			// yield a display ipd of 1.
+			float M = dxr_rig_max_ipd_factor(&cam, &info);
+			if (fabsf(M - 1.0f / dr.ipd_factor) > 1.0e-3f * M) {
+				fails++;
+				fprintf(stderr,
+				        "[dxr_display3d_selftest] max_ipd_factor=%.4f, want %.4f (case %d)\n", M,
+				        1.0f / dr.ipd_factor, ci);
+			}
+			dxr_camera_rig camM = cam;
+			camM.ipd_factor = M;
+			dxr_display_rig drM;
+			dxr_view_rig_camera_to_display(&camM, &info, &drM);
+			if (fabsf(drM.ipd_factor - 1.0f) > 1.0e-3f) {
+				fails++;
+				fprintf(stderr,
+				        "[dxr_display3d_selftest] display ipd at M=%.4f is %.4f, want 1 (case %d)\n", M,
+				        drM.ipd_factor, ci);
+			}
 		}
 	}
 
@@ -1329,6 +1351,28 @@ dxr_rig_max_convergence(const dxr_camera_rig *cam, const dxr_rig_display_info *i
 	// the infinity case as far_z -> inf. (Here convergence may go nearer than
 	// nominal, i.e. f>1 — the depth-aware caller accepts that trade.)
 	return invd_inf + 1.0f / far_z;
+}
+
+float
+dxr_rig_max_ipd_factor(const dxr_camera_rig *cam, const dxr_rig_display_info *info)
+{
+	// Dual of dxr_rig_max_convergence: the largest ipd_factor whose DISPLAY-centric
+	// equivalent (comfort_factor = ipd*f, f = m2v*invd*N) is exactly 1, at the rig's
+	// CURRENT convergence — i.e. M = 1/f. cam->ipd_factor itself is NOT read. For far
+	// convergence (f<1) M>1, so the camera rig legitimately exceeds the display rig's
+	// [0,1]; for near convergence (f>1) M<1. f<=0 (convergence at/behind infinity, or
+	// degenerate m2v/N) imposes no comfort ceiling, so return +infinity — callers pass
+	// it straight into a clamp as an unbounded upper limit. NOTE the library enforces
+	// comfort at the CONVERGENCE knob (dxr_rig_clamp_for_comfort), never by clamping
+	// ipd; this helper is for callers that deliberately bound an ipd knob at fixed
+	// convergence (e.g. a UI/keyboard IPD control).
+	float N = info->nominal_distance_m;
+	float m2v = (cam->m2v > 0.0f) ? cam->m2v : 1.0f;
+	float f = m2v * cam->inv_convergence_distance * N;
+	if (f <= 0.0f) {
+		return HUGE_VALF; // +infinity: no comfort ceiling from this term
+	}
+	return 1.0f / f;
 }
 
 void
