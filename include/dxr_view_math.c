@@ -1385,6 +1385,18 @@ dxr_rig_clamp_for_comfort(dxr_camera_rig *cam, const dxr_rig_display_info *info,
 }
 
 void
+dxr_rig_toggle(const dxr_rig *in, const dxr_rig_display_info *info, dxr_rig *out)
+{
+	if (in->type == DXR_RIG_CAMERA) {
+		out->type = DXR_RIG_DISPLAY;
+		dxr_view_rig_camera_to_display(&in->u.camera, info, &out->u.display);
+	} else {
+		out->type = DXR_RIG_CAMERA;
+		dxr_view_rig_display_to_camera(&in->u.display, info, &out->u.camera);
+	}
+}
+
+void
 dxr_rig_transition(const dxr_rig *from,
                    const dxr_rig *to,
                    const dxr_rig_display_info *info,

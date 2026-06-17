@@ -41,18 +41,22 @@ RigToggleMode(ViewParams &vp,
 	const dxr_quat q = {quat[0], quat[1], quat[2], quat[3]};
 	const dxr_vec3 p = {pos[0], pos[1], pos[2]};
 
+	// The conversion runs through the shared dxr_rig_toggle so the runtime qwerty
+	// driver and this app-side wrapper use one toggle definition; only the
+	// ViewParams<->rig field mapping is local.
+	dxr_rig in = {}, out = {};
 	if (!cameraMode) {
 		// Display -> camera.
-		dxr_display_rig disp;
-		disp.pose.orientation = q;
-		disp.pose.position = p;
-		disp.virtual_display_height = vp.virtualDisplayHeight / vp.scaleFactor;
-		disp.ipd_factor = vp.ipdFactor;
-		disp.parallax_factor = vp.parallaxFactor;
-		disp.perspective_factor = vp.perspectiveFactor;
+		in.type = DXR_RIG_DISPLAY;
+		in.u.display.pose.orientation = q;
+		in.u.display.pose.position = p;
+		in.u.display.virtual_display_height = vp.virtualDisplayHeight / vp.scaleFactor;
+		in.u.display.ipd_factor = vp.ipdFactor;
+		in.u.display.parallax_factor = vp.parallaxFactor;
+		in.u.display.perspective_factor = vp.perspectiveFactor;
 
-		dxr_camera_rig cam;
-		dxr_view_rig_display_to_camera(&disp, &info, &cam);
+		dxr_rig_toggle(&in, &info, &out);
+		const dxr_camera_rig &cam = out.u.camera;
 
 		vp.invConvergenceDistance = cam.inv_convergence_distance;
 		vp.zoomFactor = kCameraHalfTanVfov / cam.half_tan_vfov;
@@ -65,17 +69,17 @@ RigToggleMode(ViewParams &vp,
 		cameraMode = true;
 	} else {
 		// Camera -> display.
-		dxr_camera_rig cam;
-		cam.pose.orientation = q;
-		cam.pose.position = p;
-		cam.ipd_factor = vp.ipdFactor;
-		cam.parallax_factor = vp.parallaxFactor;
-		cam.inv_convergence_distance = vp.invConvergenceDistance;
-		cam.half_tan_vfov = kCameraHalfTanVfov / vp.zoomFactor;
-		cam.m2v = vp.cameraM2v;
+		in.type = DXR_RIG_CAMERA;
+		in.u.camera.pose.orientation = q;
+		in.u.camera.pose.position = p;
+		in.u.camera.ipd_factor = vp.ipdFactor;
+		in.u.camera.parallax_factor = vp.parallaxFactor;
+		in.u.camera.inv_convergence_distance = vp.invConvergenceDistance;
+		in.u.camera.half_tan_vfov = kCameraHalfTanVfov / vp.zoomFactor;
+		in.u.camera.m2v = vp.cameraM2v;
 
-		dxr_display_rig disp;
-		dxr_view_rig_camera_to_display(&cam, &info, &disp);
+		dxr_rig_toggle(&in, &info, &out);
+		const dxr_display_rig &disp = out.u.display;
 
 		// Preserve the user's display-mode scaleFactor (the rig submits
 		// virtualDisplayHeight / scaleFactor).

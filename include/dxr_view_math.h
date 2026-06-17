@@ -301,6 +301,17 @@ typedef struct dxr_rig {
 	} u;
 } dxr_rig;
 
+// Disturbance-free camera<->display toggle: convert the source rig `in` into its
+// exact equivalent in the OTHER parameterization (out->type = opposite of
+// in->type). display->camera->display is an identity, so repeated toggles never
+// move the scene. PURE conversion — no comfort clamp (callers wanting comfort run
+// dxr_rig_clamp_for_comfort on the result, or dxr_rig_transition which clamps a
+// camera-typed output). This is the single shared toggle definition for the
+// runtime qwerty driver and the app-side rig_mode/ViewParams wrapper; the per-rig
+// field mapping stays with each caller (their state structs differ).
+void
+dxr_rig_toggle(const dxr_rig *in, const dxr_rig_display_info *info, dxr_rig *out);
+
 // out->type == to->type. If from->type != to->type, `from` is converted into
 // to->type FIRST (exact converters → t<=0 is disturbance-free), then each
 // parameter is lerped in its chosen space: inv_convergence_distance linear (in
