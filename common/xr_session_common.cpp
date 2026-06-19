@@ -405,11 +405,16 @@ void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt
 
     if (target >= 0 && xr.session != XR_NULL_HANDLE &&
         xr.pfnRequestDisplayRenderingModeEXT != nullptr) {
-        // Hand the switch to the sequencer. currentIpd = the value in effect right
-        // now (last ramp output, == steady when idle); steadyIpd = the tuned target.
+        // Hand the switch to the sequencer. currentIpd = the disparity actually on
+        // screen right now: the last ramp output while a ramp is in flight, else
+        // the steady value (what the idle branch below renders). Do NOT use the
+        // bare modeSwitch.ipd() — it is 0 until the first ramp ever runs, so the
+        // FIRST 3D->2D switch would ramp 0->0 and fire immediately = a one-time
+        // snap from full disparity. steadyIpd = the tuned target to restore to.
+        const float currentIpd = xr.modeSwitch.active() ? xr.modeSwitch.ipd() : steady;
         xr.modeSwitch.request((uint32_t)target, vcOf((uint32_t)target),
                               xr.currentModeIndex, vcOf(xr.currentModeIndex),
-                              xr.modeSwitch.ipd(), steady);
+                              currentIpd, steady);
     }
 
     if (xr.modeSwitch.active()) {
