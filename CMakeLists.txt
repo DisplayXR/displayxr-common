@@ -217,6 +217,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/rig_mode.h
     common/rig_transition.cpp # platform-neutral convert-then-lerp rig transition
     common/rig_transition.h
+    common/mode_switch.cpp # platform-neutral smooth 2D<->3D mode-switch sequencer
+    common/mode_switch.h
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
