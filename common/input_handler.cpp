@@ -137,14 +137,18 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
         if (shift) {
             // ipd and parallax are conceptually a single "3D effect strength"
             // knob — driving them in lockstep matches the +/- key bindings
-            // and the macOS demo's behaviour.
-            float v = state.viewParams.ipdFactor * factor;
+            // and the macOS demo's behaviour. steadyIpdFactor is the tuned full-3D
+            // target the ModeSwitch sequencer ramps toward; ipdFactor is seeded in
+            // lockstep so apps NOT yet wired to ModeSwitch (which read ipdFactor
+            // directly) still respond — the sequencer overwrites ipdFactor per frame.
+            float v = state.viewParams.steadyIpdFactor * factor;
             if (v < 0.0f) v = 0.0f;
             // Camera mode: the comfortable ceiling is M = 1/f (display-equivalent
             // 1), which needs display info not available in this WndProc — it's
             // enforced per-frame in UpdateCameraMovement. Only the display rig is
             // hard-capped at 1 here.
             if (!state.cameraMode && v > 1.0f) v = 1.0f;
+            state.viewParams.steadyIpdFactor = v;
             state.viewParams.ipdFactor = v;
             state.viewParams.parallaxFactor = v;
         } else if (ctrl) {
@@ -204,17 +208,21 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
             state.playPauseRequested = true;
             break;
         case VK_OEM_MINUS: {
-            float v = state.viewParams.ipdFactor - 0.1f;
+            // Edit steadyIpdFactor (the ramp target); seed ipdFactor in lockstep
+            // for apps not yet wired to ModeSwitch (see the shift+wheel note above).
+            float v = state.viewParams.steadyIpdFactor - 0.1f;
             if (v < 0.1f) v = 0.1f;
+            state.viewParams.steadyIpdFactor = v;
             state.viewParams.ipdFactor = v;
             state.viewParams.parallaxFactor = v;
             break;
         }
         case VK_OEM_PLUS: {
-            float v = state.viewParams.ipdFactor + 0.1f;
+            float v = state.viewParams.steadyIpdFactor + 0.1f;
             // Camera mode: clamped to M per-frame in UpdateCameraMovement; only the
             // display rig is hard-capped at 1 here (see the shift+wheel note above).
             if (!state.cameraMode && v > 1.0f) v = 1.0f;
+            state.viewParams.steadyIpdFactor = v;
             state.viewParams.ipdFactor = v;
             state.viewParams.parallaxFactor = v;
             break;
@@ -474,6 +482,11 @@ void UpdateCameraMovement(InputState& state, float deltaTime, float displayHeigh
         cam.m2v = state.viewParams.cameraM2v;
         cam.inv_convergence_distance = state.viewParams.invConvergenceDistance;
         float ipdMax = dxr_rig_max_ipd_factor(&cam, &info);
+        // Clamp the tuned target (steadyIpdFactor) — that is what the ModeSwitch
+        // ramp converges to. ipdFactor is clamped too so apps not yet wired to the
+        // sequencer (which render ipdFactor directly) stay bounded; for wired apps
+        // the ramped ipdFactor is always <= steady <= ceiling, so this never clips it.
+        if (state.viewParams.steadyIpdFactor > ipdMax) state.viewParams.steadyIpdFactor = ipdMax;
         if (state.viewParams.ipdFactor > ipdMax) state.viewParams.ipdFactor = ipdMax;
         if (state.viewParams.parallaxFactor > ipdMax) state.viewParams.parallaxFactor = ipdMax;
     }

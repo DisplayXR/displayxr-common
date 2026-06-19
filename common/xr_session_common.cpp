@@ -7,6 +7,7 @@
 
 #include "xr_session_common.h"
 #include "display3d_view.h"
+#include "input_handler.h" // InputState — consumed by XrSessionUpdateModeSwitch
 #include "logging.h"
 #include <cstring>
 #include <cmath>
@@ -371,6 +372,60 @@ bool ReleaseQuadSwapchainImage(XrSessionManager& xr) {
 
     XrSwapchainImageReleaseInfo releaseInfo = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     return XR_SUCCEEDED(xrReleaseSwapchainImage(xr.quadSwapchain.swapchain, &releaseInfo));
+}
+
+void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt) {
+    // One-time configure of the sequencer (0.18 s SmoothStep ease).
+    if (!xr.modeSwitchConfigured) {
+        xr.modeSwitch.configure(0.18f, dxr::ModeSwitchEasing::SmoothStep);
+        xr.modeSwitchConfigured = true;
+    }
+
+    const float steady = state.viewParams.steadyIpdFactor;
+
+    // Active view count of a mode (1 = 2D/mono, >1 = 3D); clamp empty/OOB to 1.
+    auto vcOf = [&](uint32_t m) -> uint32_t {
+        return (m < xr.renderingModeCount && xr.renderingModeViewCounts[m] > 0)
+                   ? xr.renderingModeViewCounts[m] : 1;
+    };
+
+    // Funnel the V-cycle and the 0-8 absolute requests into one target. Absolute
+    // wins if both fired the same frame. Clear the flags as we consume them.
+    int32_t target = -1;
+    if (state.cycleRenderingModeRequested) {
+        state.cycleRenderingModeRequested = false;
+        if (xr.renderingModeCount > 0)
+            target = (int32_t)((xr.currentModeIndex + 1) % xr.renderingModeCount);
+    }
+    if (state.absoluteRenderingModeRequested >= 0) {
+        int32_t a = state.absoluteRenderingModeRequested;
+        state.absoluteRenderingModeRequested = -1;
+        if ((uint32_t)a < xr.renderingModeCount) target = a;
+    }
+
+    if (target >= 0 && xr.session != XR_NULL_HANDLE &&
+        xr.pfnRequestDisplayRenderingModeEXT != nullptr) {
+        // Hand the switch to the sequencer. currentIpd = the value in effect right
+        // now (last ramp output, == steady when idle); steadyIpd = the tuned target.
+        xr.modeSwitch.request((uint32_t)target, vcOf((uint32_t)target),
+                              xr.currentModeIndex, vcOf(xr.currentModeIndex),
+                              xr.modeSwitch.ipd(), steady);
+    }
+
+    if (xr.modeSwitch.active()) {
+        float ipd = steady;
+        bool fire = false;
+        uint32_t mode = xr.currentModeIndex;
+        xr.modeSwitch.update(dt, &ipd, &fire, &mode);
+        state.viewParams.ipdFactor = ipd; // the rig render value this frame
+        if (fire && mode != xr.currentModeIndex && xr.session != XR_NULL_HANDLE &&
+            xr.pfnRequestDisplayRenderingModeEXT != nullptr) {
+            xr.pfnRequestDisplayRenderingModeEXT(xr.session, mode);
+        }
+    } else {
+        // Idle: render the tuned steady value (tracks +/- adjustments immediately).
+        state.viewParams.ipdFactor = steady;
+    }
 }
 
 bool PollEvents(XrSessionManager& xr) {
