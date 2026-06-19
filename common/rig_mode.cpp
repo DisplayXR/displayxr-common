@@ -51,7 +51,7 @@ RigToggleMode(ViewParams &vp,
 		in.u.display.pose.orientation = q;
 		in.u.display.pose.position = p;
 		in.u.display.virtual_display_height = vp.virtualDisplayHeight / vp.scaleFactor;
-		in.u.display.ipd_factor = vp.ipdFactor;
+		in.u.display.ipd_factor = vp.steadyIpdFactor; // convert the tuned target
 		in.u.display.parallax_factor = vp.parallaxFactor;
 		in.u.display.perspective_factor = vp.perspectiveFactor;
 
@@ -61,7 +61,8 @@ RigToggleMode(ViewParams &vp,
 		vp.invConvergenceDistance = cam.inv_convergence_distance;
 		vp.zoomFactor = kCameraHalfTanVfov / cam.half_tan_vfov;
 		vp.cameraM2v = cam.m2v;
-		vp.ipdFactor = cam.ipd_factor;
+		vp.steadyIpdFactor = cam.ipd_factor; // re-seed the ramp target post-toggle
+		vp.ipdFactor = cam.ipd_factor;       // and the per-frame render value (no ramp in flight)
 		vp.parallaxFactor = cam.parallax_factor;
 		pos[0] = cam.pose.position.x;
 		pos[1] = cam.pose.position.y;
@@ -72,7 +73,7 @@ RigToggleMode(ViewParams &vp,
 		in.type = DXR_RIG_CAMERA;
 		in.u.camera.pose.orientation = q;
 		in.u.camera.pose.position = p;
-		in.u.camera.ipd_factor = vp.ipdFactor;
+		in.u.camera.ipd_factor = vp.steadyIpdFactor; // convert the tuned target
 		in.u.camera.parallax_factor = vp.parallaxFactor;
 		in.u.camera.inv_convergence_distance = vp.invConvergenceDistance;
 		in.u.camera.half_tan_vfov = kCameraHalfTanVfov / vp.zoomFactor;
@@ -85,7 +86,8 @@ RigToggleMode(ViewParams &vp,
 		// virtualDisplayHeight / scaleFactor).
 		vp.virtualDisplayHeight = disp.virtual_display_height * vp.scaleFactor;
 		vp.perspectiveFactor = disp.perspective_factor;
-		vp.ipdFactor = disp.ipd_factor;
+		vp.steadyIpdFactor = disp.ipd_factor; // re-seed the ramp target post-toggle
+		vp.ipdFactor = disp.ipd_factor;       // and the per-frame render value (no ramp in flight)
 		vp.parallaxFactor = disp.parallax_factor;
 		pos[0] = disp.pose.position.x;
 		pos[1] = disp.pose.position.y;

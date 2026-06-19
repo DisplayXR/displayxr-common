@@ -35,6 +35,9 @@
 #include <string>
 
 #include "view_params.h"
+#include "mode_switch.h"  // dxr::ModeSwitch — smooth 2D<->3D disparity sequencer
+
+struct InputState; // fwd-decl: XrSessionUpdateModeSwitch consumes the input flags
 
 // [Commented out — will be reused for 3D-positioned HUD later]
 // struct ConvergencePlane {
@@ -182,6 +185,12 @@ struct XrSessionManager {
     // Apps use this to gate mode-toggle UI ("Mode locked by workspace").
     bool renderingModeIsRequestable[8] = {};
 
+    // Smooth 2D<->3D disparity ramp on a mode switch. One sequencer per session;
+    // driven by XrSessionUpdateModeSwitch() each frame. modeSwitchConfigured gates
+    // the one-time configure() so the helper stays a single self-contained call.
+    dxr::ModeSwitch modeSwitch;
+    bool modeSwitchConfigured = false;
+
     // Window handle for session target (used by ext app, ignored by non-ext app)
     HWND windowHandle = nullptr;
 
@@ -215,6 +224,16 @@ bool CreateQuadLayerSwapchain(XrSessionManager& xr, uint32_t width, uint32_t hei
 // Acquire/release quad layer swapchain image
 bool AcquireQuadSwapchainImage(XrSessionManager& xr, uint32_t& imageIndex);
 bool ReleaseQuadSwapchainImage(XrSessionManager& xr);
+
+// Consume the V/0-8 mode-switch requests and drive the smooth 2D<->3D disparity
+// ramp for ONE frame. Replaces the hand-rolled "if (cycleRenderingModeRequested)
+// pfnRequestDisplayRenderingModeEXT(...)" consume block: funnels both the cycle
+// (V) and absolute (0-8) requests through xr.modeSwitch, writes the ramped value
+// into state.viewParams.ipdFactor (the rig render value), and issues the runtime
+// request on the single frame the sequencer says to fire. steadyIpd comes from
+// state.viewParams.steadyIpdFactor (the user-tuned target). dt is wall-clock
+// seconds. Safe to call every frame; idle is a no-op beyond writing the steady ipd.
+void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt);
 
 // Poll for OpenXR events and update session state
 bool PollEvents(XrSessionManager& xr);

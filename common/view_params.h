@@ -11,7 +11,14 @@
 #pragma once
 
 struct ViewParams {
-    float ipdFactor = 1.0f;             // [0, 1] — 0=mono, 1=normal IPD
+    float ipdFactor = 1.0f;             // [0, 1] — 0=mono, 1=normal IPD. Per-frame
+                                        // RENDER output: the ModeSwitch sequencer
+                                        // writes the ramped disparity here each
+                                        // frame; equals steadyIpdFactor when idle.
+    float steadyIpdFactor = 1.0f;       // [0, 1] — user-tuned full-3D target. The
+                                        // +/- keys and shift+wheel edit THIS (and the
+                                        // camera ceiling clamp clips THIS); ModeSwitch
+                                        // ramps ipdFactor toward it on a 2D↔3D switch.
     float parallaxFactor = 1.0f;        // [0, 1] — 0=no head tracking, 1=full
 
     // Display-centric mode
