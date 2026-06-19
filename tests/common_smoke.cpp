@@ -22,6 +22,7 @@
 #include "atlas_capture.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
+#include "mode_switch.h"
 #include "view_params.h"
 #include "xr_window_space_hud.h"
 
@@ -186,6 +187,125 @@ static void test_stb_symbols_link()
 }
 #endif
 
+// Smooth 2D<->3D mode-switch sequencer (mode_switch.h). Pure, deterministic.
+static void test_mode_switch()
+{
+    const float DT = 0.06f; // 3 frames spans the default 0.18 s ramp.
+
+    // --- 3D -> 2D: ramp disparity to 0 FIRST, then fire on landing. ---
+    {
+        dxr::ModeSwitch ms;
+        ms.configure(0.18f, dxr::ModeSwitchEasing::SmoothStep);
+        ms.request(/*targetMode*/ 0, /*targetVC*/ 1, /*curMode*/ 1, /*curVC*/ 2,
+                   /*curIpd*/ 1.0f, /*steadyIpd*/ 1.0f);
+        CHECK(ms.active(), "3D->2D should be active after request");
+
+        float ipd = 1.0f, prev = 2.0f;
+        bool fired = false;
+        uint32_t firedMode = 999, fireCount = 0;
+        for (int i = 0; i < 4; i++) {
+            bool fire = false;
+            uint32_t mode = 999;
+            ms.update(DT, &ipd, &fire, &mode);
+            CHECK(ipd <= prev + 1e-4f, "3D->2D disparity must be monotonically non-increasing");
+            prev = ipd;
+            if (fire) { fired = true; firedMode = mode; fireCount++; }
+        }
+        CHECK(fired && firedMode == 0, "3D->2D must fire the 2D mode exactly once, on landing");
+        CHECK(fireCount == 1, "3D->2D fire must be edge (one frame only)");
+        CHECK(ipd < 1e-3f, "3D->2D must land at zero disparity");
+        CHECK(!ms.active(), "3D->2D should be idle after landing");
+    }
+
+    // --- 2D -> 3D: fire IMMEDIATELY (flat first frame), then ramp up. ---
+    {
+        dxr::ModeSwitch ms;
+        ms.configure(0.18f);
+        ms.request(/*target*/ 1, /*tVC*/ 2, /*curMode*/ 0, /*curVC*/ 1,
+                   /*curIpd*/ 0.0f, /*steady*/ 1.0f);
+
+        float ipd = -1.0f, prev = -1.0f;
+        uint32_t fireCount = 0, firedMode = 999;
+        int fireFrame = -1;
+        for (int i = 0; i < 4; i++) {
+            bool fire = false;
+            uint32_t mode = 999;
+            ms.update(DT, &ipd, &fire, &mode);
+            if (fire) { fireCount++; firedMode = mode; if (fireFrame < 0) fireFrame = i; }
+            CHECK(ipd >= prev - 1e-4f, "2D->3D disparity must be monotonically non-decreasing");
+            prev = ipd;
+        }
+        CHECK(fireCount == 1 && fireFrame == 0, "2D->3D must fire once, on the FIRST frame");
+        CHECK(firedMode == 1, "2D->3D must fire the requested 3D mode");
+        CHECK(ipd > 0.99f, "2D->3D must ramp up to the steady disparity");
+        CHECK(!ms.active(), "2D->3D should be idle after landing");
+    }
+
+    // --- Interruption: reverse a NOT-YET-FIRED ->2D back to 3D. Must never
+    //     fire a mode switch and must restore steady disparity. ---
+    {
+        dxr::ModeSwitch ms;
+        ms.configure(0.18f);
+        ms.request(0, 1, 1, 2, 1.0f, 1.0f); // start 3D->2D
+
+        float ipd = 1.0f;
+        bool everFired = false;
+        // Advance partway (not enough to land/fire).
+        for (int i = 0; i < 2; i++) {
+            bool fire = false;
+            ms.update(DT, &ipd, &fire, nullptr);
+            if (fire) everFired = true;
+        }
+        CHECK(!everFired && ipd > 0.0f && ipd < 1.0f, "mid ramp-down: not fired, partially flat");
+
+        // Runtime is still in 3D (the 2D switch never fired) → reverse to 3D.
+        ms.request(/*target*/ 1, /*tVC*/ 2, /*curMode*/ 1, /*curVC*/ 2, ipd, 1.0f);
+        for (int i = 0; i < 4; i++) {
+            bool fire = false;
+            ms.update(DT, &ipd, &fire, nullptr);
+            if (fire) everFired = true;
+        }
+        CHECK(!everFired, "reversing an un-fired ->2D must NEVER issue a mode switch");
+        CHECK(ipd > 0.99f, "reversal must restore steady disparity");
+        CHECK(!ms.active(), "reversal should settle to idle");
+    }
+
+    // --- Instant (duration 0): fire + reach endpoint on the first update. ---
+    {
+        dxr::ModeSwitch ms;
+        ms.configure(0.0f);
+        ms.request(1, 2, 0, 1, 0.0f, 1.0f); // 2D->3D instant
+        float ipd = -1.0f;
+        bool fire = false;
+        uint32_t mode = 999;
+        ms.update(0.016f, &ipd, &fire, &mode);
+        CHECK(fire && mode == 1 && ipd > 0.99f && !ms.active(),
+              "instant 2D->3D must fire and reach steady in one frame");
+
+        ms.request(0, 1, 1, 2, 1.0f, 1.0f); // 3D->2D instant
+        ms.update(0.016f, &ipd, &fire, &mode);
+        CHECK(fire && mode == 0 && ipd < 1e-3f && !ms.active(),
+              "instant 3D->2D must fire and flatten in one frame");
+    }
+
+    // --- Same-dimensionality 3D->3D (real mode change): fire once, no flatten. ---
+    {
+        dxr::ModeSwitch ms;
+        ms.configure(0.18f);
+        ms.request(/*target*/ 2, /*tVC*/ 2, /*curMode*/ 1, /*curVC*/ 2, 1.0f, 1.0f);
+        float ipd = 0.0f;
+        uint32_t fireCount = 0, firedMode = 999;
+        for (int i = 0; i < 4; i++) {
+            bool fire = false;
+            uint32_t mode = 999;
+            ms.update(DT, &ipd, &fire, &mode);
+            if (fire) { fireCount++; firedMode = mode; }
+            CHECK(ipd > 0.99f, "3D->3D must keep full disparity throughout (no flatten)");
+        }
+        CHECK(fireCount == 1 && firedMode == 2, "3D->3D must fire the new mode once");
+    }
+}
+
 // Off-axis projection self-test: display-rig math, plus display<->camera rig
 // equivalence (frustum + view matrix match at any perspective, round-trip
 // identity). Pure, GPU-free.
@@ -200,6 +320,7 @@ int main()
     test_mip_chain();
     test_view_params_defaults();
     test_window_space_hud_types();
+    test_mode_switch();
     test_rig_math();
 #ifdef _WIN32
     test_input_state_defaults();
