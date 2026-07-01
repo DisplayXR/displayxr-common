@@ -1,4 +1,4 @@
-# Copyright 2026, Leia Inc.
+# Copyright 2026, The DisplayXR Project and its contributors
 # SPDX-License-Identifier: BSL-1.0
 #
 # displayxr_install_manifest(target manifest_dir)
