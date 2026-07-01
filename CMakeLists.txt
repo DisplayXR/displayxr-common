@@ -127,7 +127,7 @@ endif()
 #   camera3d_view.{c,h}    camera-centric rig
 #   projection_depth.h     GL [-1,1] -> [0,1] clip-depth remap for D3D/VK/Metal
 #
-# NOTE: leia_math.h is intentionally NOT here — it is a Windows-only
+# NOTE: dxr_math.h is intentionally NOT here — it is a Windows-only
 # (DirectXMath, C++) Leia SDK reference example, not portable math; it stays
 # app-local.
 # ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ endif()
 # (e.g. InputState::hudToggleRequiresShift, EndFrame's projectionLayerFlags),
 # never #ifdef APP in here.
 #
-# NOTE: leia_math.h stays app-local (see the math note above).
+# NOTE: dxr_math.h stays app-local (see the math note above).
 # ---------------------------------------------------------------------------
 set(DISPLAYXR_COMMON_SOURCES
     common/atlas_capture.h
