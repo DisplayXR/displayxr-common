@@ -217,8 +217,11 @@ bool CreateSpaces(XrSessionManager& xr) {
     return true;
 }
 
-bool CreateSwapchain(XrSessionManager& xr) {
-    LOG_INFO("Creating single swapchain...");
+bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize) {
+    if (arraySize < 1) arraySize = 1;
+    const bool layered = arraySize > 1;
+    LOG_INFO("Creating single swapchain (%s, arraySize=%u)...",
+             layered ? "LAYERED/array" : "tiled", arraySize);
 
     // Query supported swapchain formats
     LOG_INFO("Enumerating swapchain formats...");
@@ -250,31 +253,39 @@ bool CreateSwapchain(XrSessionManager& xr) {
     // window size — but the swapchain has to accommodate full-screen so the
     // app can resize / fullscreen at any time without reallocating. Falls
     // back to recommended × (2,1) if display info is unavailable.
+    // Worst-case sizing across all rendering modes. TILED: the largest atlas
+    // (cols·scaleX·displayW × rows·scaleY·displayH) — one image holding all
+    // views. LAYERED: the largest single per-view tile (scaleX·displayW ×
+    // scaleY·displayH) — the atlas is expressed as array slices instead, so the
+    // image is one view wide, not `cols` wide.
     uint32_t width, height;
     if (xr.displayPixelWidth > 0 && xr.displayPixelHeight > 0) {
-        width = xr.displayPixelWidth;
-        height = xr.displayPixelHeight;
+        width = layered ? 0 : xr.displayPixelWidth;
+        height = layered ? 0 : xr.displayPixelHeight;
         if (xr.renderingModeCount > 0) {
-            uint32_t maxAtlasW = 0, maxAtlasH = 0;
+            uint32_t maxW = 0, maxH = 0;
             for (uint32_t i = 0; i < xr.renderingModeCount; i++) {
-                uint32_t aw = (uint32_t)((double)xr.renderingModeTileColumns[i] *
-                                          xr.renderingModeScaleX[i] *
-                                          (double)xr.displayPixelWidth);
-                uint32_t ah = (uint32_t)((double)xr.renderingModeTileRows[i] *
-                                          xr.renderingModeScaleY[i] *
-                                          (double)xr.displayPixelHeight);
-                if (aw > maxAtlasW) maxAtlasW = aw;
-                if (ah > maxAtlasH) maxAtlasH = ah;
+                const double cols = layered ? 1.0 : (double)xr.renderingModeTileColumns[i];
+                const double rows = layered ? 1.0 : (double)xr.renderingModeTileRows[i];
+                uint32_t aw = (uint32_t)(cols * xr.renderingModeScaleX[i] * (double)xr.displayPixelWidth);
+                uint32_t ah = (uint32_t)(rows * xr.renderingModeScaleY[i] * (double)xr.displayPixelHeight);
+                if (aw > maxW) maxW = aw;
+                if (ah > maxH) maxH = ah;
             }
-            if (maxAtlasW > width)  width  = maxAtlasW;
-            if (maxAtlasH > height) height = maxAtlasH;
+            if (maxW > width)  width  = maxW;
+            if (maxH > height) height = maxH;
         }
-        LOG_INFO("Swapchain at max-atlas %ux%u (display %ux%u, %u modes)",
-                 width, height, xr.displayPixelWidth, xr.displayPixelHeight, xr.renderingModeCount);
+        // LAYERED with no per-mode info: fall back to a single recommended view.
+        if (width == 0)  width  = view.recommendedImageRectWidth;
+        if (height == 0) height = view.recommendedImageRectHeight;
+        LOG_INFO("Swapchain at max-%s %ux%u (display %ux%u, %u modes, arraySize=%u)",
+                 layered ? "view" : "atlas", width, height,
+                 xr.displayPixelWidth, xr.displayPixelHeight, xr.renderingModeCount, arraySize);
     } else {
-        width = view.recommendedImageRectWidth * 2;
+        width = layered ? view.recommendedImageRectWidth : (view.recommendedImageRectWidth * 2);
         height = view.recommendedImageRectHeight;
-        LOG_INFO("Swapchain at recommended %ux%u (no display info)", width, height);
+        LOG_INFO("Swapchain at recommended %ux%u (no display info, arraySize=%u)",
+                 width, height, arraySize);
     }
 
     XrSwapchainCreateInfo swapchainInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -284,13 +295,13 @@ bool CreateSwapchain(XrSessionManager& xr) {
     swapchainInfo.width = width;
     swapchainInfo.height = height;
     swapchainInfo.faceCount = 1;
-    swapchainInfo.arraySize = 1;
+    swapchainInfo.arraySize = arraySize;
     swapchainInfo.mipCount = 1;
 
-    LOG_INFO("  Size: %ux%u (max %ux%u), samples: %u",
+    LOG_INFO("  Size: %ux%u (max %ux%u), samples: %u, arraySize: %u",
              swapchainInfo.width, swapchainInfo.height,
              view.maxImageRectWidth, view.maxImageRectHeight,
-             swapchainInfo.sampleCount);
+             swapchainInfo.sampleCount, swapchainInfo.arraySize);
 
     XR_CHECK_LOG(xrCreateSwapchain(xr.session, &swapchainInfo, &xr.swapchain.swapchain));
     LOG_INFO("  Swapchain created: 0x%p", (void*)xr.swapchain.swapchain);
@@ -298,6 +309,7 @@ bool CreateSwapchain(XrSessionManager& xr) {
     xr.swapchain.format = selectedFormat;
     xr.swapchain.width = swapchainInfo.width;
     xr.swapchain.height = swapchainInfo.height;
+    xr.swapchain.arraySize = arraySize;
 
     // Count swapchain images (API-specific enumeration is done by each app)
     uint32_t imageCount = 0;

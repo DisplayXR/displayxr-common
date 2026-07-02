@@ -53,6 +53,10 @@ struct SwapchainInfo {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t imageCount = 0;
+    //! Array (layer) count. 1 = a normal tiled swapchain (the app packs views
+    //! side-by-side by imageRect). >1 = a layered / single-pass-instanced
+    //! swapchain sized per-view, with each view in array slice imageArrayIndex.
+    uint32_t arraySize = 1;
 };
 
 struct XrSessionManager {
@@ -208,10 +212,23 @@ struct XrSessionManager {
 // Create reference spaces
 bool CreateSpaces(XrSessionManager& xr);
 
-// Create a single SBS swapchain.
+// Create the app's projection swapchain.
+//
+// arraySize == 1 (default): a single TILED swapchain sized to the worst-case
+// atlas across all rendering modes (the app packs its N views side-by-side and
+// submits each with imageRect.offset; imageArrayIndex = 0). This is the layout
+// native/tool apps use and the only one that can host view_count > 2 content.
+//
+// arraySize > 1: a LAYERED / single-pass-instanced swapchain sized to the
+// worst-case PER-VIEW tile (not the atlas), with `arraySize` slices. The app
+// renders view vi into array slice vi and submits it with imageArrayIndex = vi
+// (imageRect covers the whole slice). This is the layout engine SPI/instanced
+// stereo produces; it is capped at the engine's efficient multiview count
+// (typically 2), so it only drives modes whose view_count <= arraySize.
+//
 // Ext apps (win32_window_binding): native display resolution from XR_EXT_display_info.
 // Non-ext / unmodified apps: recommendedImageRectWidth*2 x recommendedImageRectHeight.
-bool CreateSwapchain(XrSessionManager& xr);
+bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize = 1);
 
 // Create quad layer swapchain for UI overlay
 bool CreateQuadLayerSwapchain(XrSessionManager& xr, uint32_t width, uint32_t height);
