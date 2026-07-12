@@ -11,7 +11,7 @@ namespace dxr {
 
 // Reference camera vertical-FOV half-tangent (tan(18°) → 36° vFOV). The toggle
 // maps zoomFactor <-> camera half_tan_vfov through this; apps submit
-// XrCameraRigEXT::verticalFov = 2*atan(this / zoomFactor) with the same value.
+// XrCameraRigDXR::verticalFov = 2*atan(this / zoomFactor) with the same value.
 static const float kCameraHalfTanVfov = 0.32491969623f;
 
 void

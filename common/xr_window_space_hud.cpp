@@ -96,8 +96,8 @@ bool SubmitWindowSpaceHudFrame(
     projLayer.viewCount = viewCount;
     projLayer.views = projViews;
 
-    XrCompositionLayerWindowSpaceEXT hudLayer = {};
-    hudLayer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_EXT;
+    XrCompositionLayerWindowSpaceDXR hudLayer = {};
+    hudLayer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_DXR;
     hudLayer.next = nullptr;
     hudLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     hudLayer.subImage.swapchain = hud.swapchain;
@@ -141,7 +141,7 @@ bool SubmitWindowSpaceLayersFrame(
 
     // Storage must outlive the xrEndFrame call — the runtime reads these
     // structs by pointer during submission.
-    std::vector<XrCompositionLayerWindowSpaceEXT> wsLayers;
+    std::vector<XrCompositionLayerWindowSpaceDXR> wsLayers;
     wsLayers.reserve(count);
     std::vector<const XrCompositionLayerBaseHeader*> headers;
     headers.reserve(count + 1);
@@ -155,8 +155,8 @@ bool SubmitWindowSpaceLayersFrame(
         int32_t srcW = (d.srcW < 0) ? (int32_t)d.sc->width : d.srcW;
         int32_t srcH = (d.srcH < 0) ? (int32_t)d.sc->height : d.srcH;
 
-        XrCompositionLayerWindowSpaceEXT layer = {};
-        layer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_EXT;
+        XrCompositionLayerWindowSpaceDXR layer = {};
+        layer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_DXR;
         layer.next = nullptr;
         layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         layer.subImage.swapchain = d.sc->swapchain;

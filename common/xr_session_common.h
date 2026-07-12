@@ -25,11 +25,11 @@
 #define XR_USE_PLATFORM_WIN32
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
-#include <openxr/XR_EXT_win32_window_binding.h>
-#include <openxr/XR_EXT_display_info.h>
-#include <openxr/XR_EXT_workspace_file_dialog.h>
-#include <openxr/XR_EXT_atlas_capture.h>
-#include <openxr/XR_EXT_mcp_tools.h>
+#include <openxr/XR_DXR_win32_window_binding.h>
+#include <openxr/XR_DXR_display_info.h>
+#include <openxr/XR_DXR_workspace_file_dialog.h>
+#include <openxr/XR_DXR_atlas_capture.h>
+#include <openxr/XR_DXR_mcp_tools.h>
 #include <DirectXMath.h>
 #include <vector>
 #include <string>
@@ -91,43 +91,43 @@ struct XrSessionManager {
     // Extension support (used by ext app, ignored by non-ext app)
     bool hasWin32WindowBindingExt = false;
     bool hasDisplayInfoExt = false;
-    // XR_EXT_workspace_file_dialog (#228 Tier 1 spatial file picker). When
+    // XR_DXR_workspace_file_dialog (#228 Tier 1 spatial file picker). When
     // the runtime + active workspace controller advertise this, an app can
-    // route its file-open UI through xrRequestFilePickerEXT and let a spatial
+    // route its file-open UI through xrRequestFilePickerDXR and let a spatial
     // picker appear in the workspace, falling back to GetOpenFileNameA
     // otherwise. PollEvents fills the filePicker* completion state below.
     bool hasFileDialogExt = false;
-    // PFN resolved when XR_EXT_workspace_file_dialog is enabled. nullptr if
+    // PFN resolved when XR_DXR_workspace_file_dialog is enabled. nullptr if
     // the runtime didn't expose the extension. #228 Tier 1.
-    PFN_xrRequestFilePickerEXT pfnRequestFilePickerEXT = nullptr;
-    bool filePickerInFlight = false;             //!< Set when xrRequestFilePickerEXT returned SUCCESS; cleared on event arrival.
+    PFN_xrRequestFilePickerDXR pfnRequestFilePickerEXT = nullptr;
+    bool filePickerInFlight = false;             //!< Set when xrRequestFilePickerDXR returned SUCCESS; cleared on event arrival.
     bool filePickerHasResult = false;            //!< Set by PollEvents when the completion event arrives; consumed + cleared by the main loop.
-    XrAsyncRequestIdEXT filePickerRequestId = 0;
-    XrFilePickerResultEXT filePickerLastResult = (XrFilePickerResultEXT)0;
-    char filePickerLastPath[XR_MAX_FILE_PICKER_PATH_LENGTH_EXT] = {};
+    XrAsyncRequestIdDXR filePickerRequestId = 0;
+    XrFilePickerResultDXR filePickerLastResult = (XrFilePickerResultDXR)0;
+    char filePickerLastPath[XR_MAX_FILE_PICKER_PATH_LENGTH_DXR] = {};
 
-    // XR_EXT_atlas_capture (W6 of #396): the runtime owns the atlas readback,
+    // XR_DXR_atlas_capture (W6 of #396): the runtime owns the atlas readback,
     // so the app drops its per-API CaptureAtlasRegion* glue for one call.
     bool hasAtlasCaptureExt = false;
-    PFN_xrCaptureAtlasEXT pfnCaptureAtlasEXT = nullptr;
+    PFN_xrCaptureAtlasDXR pfnCaptureAtlasEXT = nullptr;
 
-    // XR_EXT_mcp_tools (#457): reference adoption — the app registers its own
+    // XR_DXR_mcp_tools (#457): reference adoption — the app registers its own
     // agent tools (set_spin/get_status). Each app's xr_session.cpp detects the
     // extension, resolves these PFNs after xrCreateSession, and declares its
     // per-app appId (matching the manifest `id`, INV-10.1); the shared
-    // PollEvents answers XrEventDataMCPToolCallEXT. Inert when the extension /
+    // PollEvents answers XrEventDataMCPToolCallDXR. Inert when the extension /
     // MCP capability is absent.
     bool hasMcpToolsExt = false;
-    PFN_xrSetMCPAppInfoEXT pfnSetMCPAppInfoEXT = nullptr;
-    PFN_xrRegisterMCPToolEXT pfnRegisterMCPToolEXT = nullptr;
-    PFN_xrGetMCPToolCallArgsEXT pfnGetMCPToolCallArgsEXT = nullptr;
-    PFN_xrSubmitMCPToolResultEXT pfnSubmitMCPToolResultEXT = nullptr;
+    PFN_xrSetMCPAppInfoDXR pfnSetMCPAppInfoEXT = nullptr;
+    PFN_xrRegisterMCPToolDXR pfnRegisterMCPToolEXT = nullptr;
+    PFN_xrGetMCPToolCallArgsDXR pfnGetMCPToolCallArgsEXT = nullptr;
+    PFN_xrSubmitMCPToolResultDXR pfnSubmitMCPToolResultEXT = nullptr;
 
     //! Cube spin speed in rad/s — historically hardcoded 0.5; now agent-settable
     //! via the set_spin MCP tool. Apps pass it to their renderer's UpdateScene.
     float spinSpeed = 0.5f;
 
-    // Display info from XR_EXT_display_info (static display properties)
+    // Display info from XR_DXR_display_info (static display properties)
     float recommendedViewScaleX = 1.0f;
     float recommendedViewScaleY = 1.0f;
     float displayWidthM = 0.0f;
@@ -136,27 +136,27 @@ struct XrSessionManager {
     float nominalViewerY = 0.0f;
     float nominalViewerZ = 0.5f;
 
-    // Native display pixel dimensions (XR_EXT_display_info v5)
+    // Native display pixel dimensions (XR_DXR_display_info v5)
     uint32_t displayPixelWidth = 0;
     uint32_t displayPixelHeight = 0;
 
-    // Display mode switching (XR_EXT_display_info v4)
-    PFN_xrRequestDisplayModeEXT pfnRequestDisplayModeEXT = nullptr;
+    // Display mode switching (XR_DXR_display_info v4)
+    PFN_xrRequestDisplayModeDXR pfnRequestDisplayModeEXT = nullptr;
 
-    // Eye tracking mode control (XR_EXT_display_info v6)
+    // Eye tracking mode control (XR_DXR_display_info v6)
     uint32_t supportedEyeTrackingModes = 0;   // bitmask: MANAGED_BIT=1, MANUAL_BIT=2
     uint32_t defaultEyeTrackingMode = 0;      // 0=MANAGED, 1=MANUAL
     bool isEyeTracking = false;               // per-frame: true if eyes actively tracked
     uint32_t activeEyeTrackingMode = 0;       // per-frame: currently active mode
-    PFN_xrRequestEyeTrackingModeEXT pfnRequestEyeTrackingModeEXT = nullptr;
+    PFN_xrRequestEyeTrackingModeDXR pfnRequestEyeTrackingModeEXT = nullptr;
 
-    // Display rendering mode control (XR_EXT_display_info v7)
-    PFN_xrRequestDisplayRenderingModeEXT pfnRequestDisplayRenderingModeEXT = nullptr;
-    PFN_xrEnumerateDisplayRenderingModesEXT pfnEnumerateDisplayRenderingModesEXT = nullptr;
+    // Display rendering mode control (XR_DXR_display_info v7)
+    PFN_xrRequestDisplayRenderingModeDXR pfnRequestDisplayRenderingModeEXT = nullptr;
+    PFN_xrEnumerateDisplayRenderingModesDXR pfnEnumerateDisplayRenderingModesEXT = nullptr;
 
     // (Removed in ADR-031: the legacy surround / output-rect entry points
     // xrSetSharedTexture{OutputRect,Surround2D,Surround2DFence}EXT — regions are
-    // now expressed via XR_EXT_display_zones; see displayxr-runtime ADR-031.)
+    // now expressed via XR_DXR_display_zones; see displayxr-runtime ADR-031.)
 
     // Environment blend modes advertised by the runtime. Populated at session
     // create time via xrEnumerateEnvironmentBlendModes. Used to pick the
@@ -168,7 +168,7 @@ struct XrSessionManager {
 
     // Enumerated rendering mode info. `currentModeIndex` is initialized to
     // mode 1 as a fallback for runtimes that don't expose `isActive`; on
-    // runtimes with XR_EXT_display_info v13+ the enumerate step replaces
+    // runtimes with XR_DXR_display_info v13+ the enumerate step replaces
     // this with the runtime-reported active mode (initial-mode-sync, #234).
     uint32_t currentModeIndex = 1;
     uint32_t renderingModeCount = 0;
@@ -226,7 +226,7 @@ bool CreateSpaces(XrSessionManager& xr);
 // stereo produces; it is capped at the engine's efficient multiview count
 // (typically 2), so it only drives modes whose view_count <= arraySize.
 //
-// Ext apps (win32_window_binding): native display resolution from XR_EXT_display_info.
+// Ext apps (win32_window_binding): native display resolution from XR_DXR_display_info.
 // Non-ext / unmodified apps: recommendedImageRectWidth*2 x recommendedImageRectHeight.
 bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize = 1);
 
@@ -326,7 +326,7 @@ bool ReleaseWindowSpaceImage(SwapchainInfo& sc);
 // number of extra pre-built window-space layers (each its own swapchain, placed
 // independently via x/y/width/height/disparity). EndFrameWithWindowSpaceHud is
 // the extraCount==0 case. `uiLayers` may alias the caller's stack array of
-// XrCompositionLayerWindowSpaceEXT.
+// XrCompositionLayerWindowSpaceDXR.
 bool EndFrameWithWindowSpaceLayers(
     XrSessionManager& xr,
     XrTime displayTime,

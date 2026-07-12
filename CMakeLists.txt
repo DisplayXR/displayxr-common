@@ -38,7 +38,7 @@ include(FetchContent)
 # typed wrappers (displayxr::math below, displayxr::math_xrt) are pure
 # pointer-casts over this target — which is exactly what makes the runtime's
 # render-ready output and an app's computed-from-raw output the same function
-# by construction (XR_EXT_view_rig equivalence guarantee).
+# by construction (XR_DXR_view_rig equivalence guarantee).
 # ---------------------------------------------------------------------------
 add_library(displayxr_math_core STATIC
     include/dxr_view_math.c
@@ -145,9 +145,9 @@ target_link_libraries(displayxr_math PUBLIC displayxr_math_core ${DISPLAYXR_MATH
 set_target_properties(displayxr_math PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
 # ---------------------------------------------------------------------------
-# DisplayXR OpenXR extension headers (XR_EXT_display_info.h,
-# XR_EXT_win32_window_binding.h, XR_EXT_workspace_file_dialog.h,
-# XR_EXT_atlas_capture.h, XR_EXT_mcp_tools.h, …) — needed by
+# DisplayXR OpenXR extension headers (XR_DXR_display_info.h,
+# XR_DXR_win32_window_binding.h, XR_DXR_workspace_file_dialog.h,
+# XR_DXR_atlas_capture.h, XR_DXR_mcp_tools.h, …) — needed by
 # xr_session_common / xr_window_space_hud in displayxr::common. These are NOT
 # in the Khronos OpenXR-SDK; their source of truth is the runtime's
 # src/external/openxr_includes, auto-published to
@@ -172,7 +172,7 @@ else()
     FetchContent_Declare(
         displayxr_extensions_headers
         GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
-        GIT_TAG fee5d51071422ed5f08164db2bb043e2401e5980
+        GIT_TAG 809377c5b04988dfb7a56d902ed0c027bc4b4391
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
@@ -191,7 +191,7 @@ endif()
 # input + window management, OpenXR session/swapchain/frame lifecycle, D2D /
 # DirectWrite text + HUD, the D3D11 reference renderer, window-space-layer UI
 # helpers, the thin app-side atlas-capture helper (filename numbering + flash
-# overlay; the GPU readback itself is the runtime's xrCaptureAtlasEXT), and
+# overlay; the GPU readback itself is the runtime's xrCaptureAtlasDXR), and
 # the vendored stb image headers (this lib owns exactly one read- and one
 # write-implementation TU per platform — consumers must not define
 # STB_IMAGE_IMPLEMENTATION / STB_IMAGE_WRITE_IMPLEMENTATION themselves).

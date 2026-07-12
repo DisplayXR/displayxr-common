@@ -99,7 +99,7 @@ std::string MakeCapturePath(const std::string& stem,
                             uint32_t cols,
                             uint32_t rows);
 
-// Path PREFIX (no extension) for xrCaptureAtlasEXT, which appends
+// Path PREFIX (no extension) for xrCaptureAtlasDXR, which appends
 // "_atlas_<viewCount>_<cols>x<rows>.png" (viewCount == cols*rows). Numbers
 // against existing "<stem>-<N>_atlas_<viewCount>_<cols>x<rows>.png" files (the
 // runtime-produced names) so repeat captures accumulate instead of overwriting.
@@ -139,10 +139,10 @@ inline void PostFlashRequest(HWND hwnd) {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-owned atlas capture (XR_EXT_atlas_capture). The single, graphics-
+// Runtime-owned atlas capture (XR_DXR_atlas_capture). The single, graphics-
 // API-agnostic capture path: the runtime does the GPU readback, so apps no
 // longer need a per-API CaptureAtlasRegion* helper. Handles the 3D-mode guard,
-// filename numbering (MakeCaptureAtlasPrefix), the xrCaptureAtlasEXT call
+// filename numbering (MakeCaptureAtlasPrefix), the xrCaptureAtlasDXR call
 // (PROJECTION_ONLY = the app's own projection atlas), the flash overlay, and
 // logging. Call from the render loop when the 'I' key flag is set.
 //
@@ -167,7 +167,7 @@ void TriggerCaptureFlash(void* nsviewBridged);
 // All per-API readback helpers (CaptureAtlasRegion{D3D11,D3D12,GL,VK,Metal})
 // have been removed (#396 W6). Atlas capture is runtime-owned now: the Windows
 // cube_handle apps call dxr_capture::RequestRuntimeAtlasCapture (above) and the
-// macOS cube_handle apps call xrCaptureAtlasEXT inline — no app does its own
+// macOS cube_handle apps call xrCaptureAtlasDXR inline — no app does its own
 // GPU readback. (The D3D / Vulkan handle forward-declarations near the top are
 // now unused leftovers; harmless, kept to minimize churn.)
 // ---------------------------------------------------------------------------

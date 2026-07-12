@@ -16,9 +16,9 @@
 #include <openxr/openxr_platform.h>
 
 #ifdef __APPLE__
-#  include <openxr/XR_EXT_cocoa_window_binding.h>
+#  include <openxr/XR_DXR_cocoa_window_binding.h>
 #else
-#  include <openxr/XR_EXT_win32_window_binding.h>
+#  include <openxr/XR_DXR_win32_window_binding.h>
 #endif
 
 #include <stdint.h>

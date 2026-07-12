@@ -22,7 +22,7 @@
 #include "stb_image_write.h"
 
 #include "atlas_capture.h"
-#include "xr_session_common.h"  // XrSessionManager + XR_EXT_atlas_capture
+#include "xr_session_common.h"  // XrSessionManager + XR_DXR_atlas_capture
 #include "logging.h"
 
 #pragma comment(lib, "shell32.lib")
@@ -48,7 +48,7 @@ std::string PicturesDirectory() {
 }
 
 // Scan `dir` for files named "<stem>-<N><suffix>" with an all-digit <N> and
-// return max(N)+1 (1 if none). Shared by the legacy and the xrCaptureAtlasEXT
+// return max(N)+1 (1 if none). Shared by the legacy and the xrCaptureAtlasDXR
 // naming, which differ only in the trailing suffix.
 static int NextCaptureNumSuffix(const std::string& dir,
                                 const std::string& stem,
@@ -165,7 +165,7 @@ void TickCaptureFlash(HWND parent) {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-owned atlas capture (XR_EXT_atlas_capture) — the unified path.
+// Runtime-owned atlas capture (XR_DXR_atlas_capture) — the unified path.
 // ---------------------------------------------------------------------------
 
 bool RequestRuntimeAtlasCapture(const ::XrSessionManager& xr,
@@ -174,7 +174,7 @@ bool RequestRuntimeAtlasCapture(const ::XrSessionManager& xr,
                                 uint32_t tileRows,
                                 HWND flashHwnd) {
     if (xr.pfnCaptureAtlasEXT == nullptr || xr.session == XR_NULL_HANDLE) {
-        LOG_WARN("Atlas capture unavailable: XR_EXT_atlas_capture not active");
+        LOG_WARN("Atlas capture unavailable: XR_DXR_atlas_capture not active");
         return false;
     }
     // Captures the app's projection atlas; meaningless for a mono (1×1) layout.
@@ -184,9 +184,9 @@ bool RequestRuntimeAtlasCapture(const ::XrSessionManager& xr,
     }
 
     std::string prefix = MakeCaptureAtlasPrefix(appName ? appName : "capture", tileColumns, tileRows);
-    XrAtlasCaptureInfoEXT info = {XR_TYPE_ATLAS_CAPTURE_INFO_EXT};
+    XrAtlasCaptureInfoDXR info = {XR_TYPE_ATLAS_CAPTURE_INFO_DXR};
     info.next = nullptr;
-    info.stage = XR_ATLAS_CAPTURE_STAGE_PROJECTION_ONLY_EXT;
+    info.stage = XR_ATLAS_CAPTURE_STAGE_PROJECTION_ONLY_DXR;
     strncpy_s(info.pathPrefix, prefix.c_str(), _TRUNCATE);
 
     XrResult cr = xr.pfnCaptureAtlasEXT(xr.session, &info, nullptr);
@@ -196,7 +196,7 @@ bool RequestRuntimeAtlasCapture(const ::XrSessionManager& xr,
         PostFlashRequest(flashHwnd);
         return true;
     }
-    LOG_WARN("xrCaptureAtlasEXT failed: 0x%x", (unsigned)cr);
+    LOG_WARN("xrCaptureAtlasDXR failed: 0x%x", (unsigned)cr);
     return false;
 }
 

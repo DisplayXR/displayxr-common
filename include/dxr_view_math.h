@@ -20,7 +20,7 @@
  *
  * Because both wrappers run THIS code, "runtime render-ready output" and
  * "app-computed-from-raw output" are the same function by construction —
- * the equivalence guarantee of XR_EXT_view_rig
+ * the equivalence guarantee of XR_DXR_view_rig
  * (docs/roadmap/raw-vs-render-ready-views.md in displayxr-runtime).
  *
  * Reference: Robert Kooima, "Generalized Perspective Projection" (2009).
@@ -238,14 +238,14 @@ dxr_camera3d_compute_views(const dxr_vec3 *raw_eyes,
 // i.e. the nominal viewing distance). These converters let an app switch rig
 // type with no visual disturbance and then animate the new rig's parameters.
 
-// Physical display facts (straight from XR_EXT_display_info).
+// Physical display facts (straight from XR_DXR_display_info).
 typedef struct dxr_rig_display_info {
 	float physical_height_m;  //!< physical display/canvas height (meters)
 	float aspect;             //!< width / height
 	float nominal_distance_m; //!< nominal viewing distance (meters)
 } dxr_rig_display_info;
 
-// Full display-rig description (params + pose), mirrors XrDisplayRigEXT.
+// Full display-rig description (params + pose), mirrors XrDisplayRigDXR.
 typedef struct dxr_display_rig {
 	dxr_pose pose;                //!< virtual display plane pose
 	float virtual_display_height; //!< app/world units
@@ -254,7 +254,7 @@ typedef struct dxr_display_rig {
 	float perspective_factor;
 } dxr_display_rig;
 
-// Full camera-rig description (params + pose), mirrors XrCameraRigEXT.
+// Full camera-rig description (params + pose), mirrors XrCameraRigDXR.
 typedef struct dxr_camera_rig {
 	dxr_pose pose;                  //!< camera pose
 	float ipd_factor;
