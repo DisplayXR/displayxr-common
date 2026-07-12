@@ -76,11 +76,11 @@ struct InputState {
 
     // Rendering mode REQUESTS (single source of truth lives on the runtime
     // side — read back as `xr.currentModeIndex` after the runtime's
-    // XrEventDataRenderingModeChangedEXT lands). The keyboard handler emits
+    // XrEventDataRenderingModeChangedDXR lands). The keyboard handler emits
     // transient requests that the main loop translates into
-    // xrRequestDisplayRenderingModeEXT calls; the actual current mode is
+    // xrRequestDisplayRenderingModeDXR calls; the actual current mode is
     // never mirrored here.
-    uint32_t renderingModeCount = 0;            // Set from xrEnumerateDisplayRenderingModesEXT
+    uint32_t renderingModeCount = 0;            // Set from xrEnumerateDisplayRenderingModesDXR
     bool cycleRenderingModeRequested = false;   // V key / mode button: cycle to next mode
     int32_t absoluteRenderingModeRequested = -1; // 0-8 keys / config: jump to this mode (-1 = none)
 
@@ -96,7 +96,7 @@ struct InputState {
     bool rigModeToggleRequested = false;
 
     // Physical CANVAS size in meters (window client area the runtime renders
-    // into) — from XR_EXT_view_rig XrViewDisplayRawEXT::canvasSizeMeters, set by
+    // into) — from XR_DXR_view_rig XrViewDisplayRawDXR::canvasSizeMeters, set by
     // the app each frame. The rig math runs on the canvas, NOT the full display,
     // so the C-toggle converter uses this as physical_height_m (else display<->
     // camera diverge in any non-fullscreen window). 0 = falls back to display.
@@ -136,7 +136,7 @@ struct InputState {
     // See u_capture_intent.h and issue #210.
     bool captureAtlasRequested = false;
 
-    // 'B' key: smoke-test xrRequestFilePickerEXT (#228 Tier 1 spatial picker).
+    // 'B' key: smoke-test xrRequestFilePickerDXR (#228 Tier 1 spatial picker).
     // Main loop sees the flag, resolves the PFN, makes the call, polls events
     // for completion, and logs both. Falls through silently when the extension
     // is not enabled / not available.

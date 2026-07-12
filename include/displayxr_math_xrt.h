@@ -19,7 +19,7 @@
  *
  * Because this and the OpenXR-typed app wrapper run the SAME core
  * (dxr_view_math.c), runtime render-ready output and app-computed-from-raw
- * output are the same function by construction — the XR_EXT_view_rig
+ * output are the same function by construction — the XR_DXR_view_rig
  * equivalence guarantee.
  */
 

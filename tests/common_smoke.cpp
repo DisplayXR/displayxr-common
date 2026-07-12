@@ -105,8 +105,8 @@ static void test_window_space_hud_types()
 {
     XrHudSwapchain sc;
     CHECK(sc.swapchain == XR_NULL_HANDLE, "XrHudSwapchain default should be null");
-    XrCompositionLayerWindowSpaceEXT layer = {};
-    layer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_EXT;
+    XrCompositionLayerWindowSpaceDXR layer = {};
+    layer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_DXR;
     CHECK(layer.width == 0.0f, "window-space layer zero-init");
 }
 
@@ -126,7 +126,7 @@ static void test_input_state_defaults()
 static void test_session_manager_defaults()
 {
     // Instantiating XrSessionManager compiles the whole extension-header chain
-    // (XR_EXT_win32_window_binding / display_info / workspace_file_dialog /
+    // (XR_DXR_win32_window_binding / display_info / workspace_file_dialog /
     // atlas_capture / mcp_tools). NOTE: deliberately no call into
     // xr_session_common.obj — that TU references OpenXR *loader* symbols
     // (xrEndFrame, …) which the headers-only standalone build cannot link;

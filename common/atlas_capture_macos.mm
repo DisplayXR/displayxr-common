@@ -44,7 +44,7 @@ std::string PicturesDirectory() {
 }
 
 // Scan `dir` for files named "<stem>-<N><suffix>" with an all-digit <N> and
-// return max(N)+1 (1 if none). Shared by the legacy and the xrCaptureAtlasEXT
+// return max(N)+1 (1 if none). Shared by the legacy and the xrCaptureAtlasDXR
 // naming, which differ only in the trailing suffix.
 static int NextCaptureNumSuffix(const std::string& dir,
                                 const std::string& stem,

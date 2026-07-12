@@ -252,7 +252,7 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
         case 'V':
             // Request a cycle to the next mode. Main loop reads the runtime's
             // current mode index (xr.currentModeIndex) to compute the target
-            // and calls xrRequestDisplayRenderingModeEXT.
+            // and calls xrRequestDisplayRenderingModeDXR.
             state.cycleRenderingModeRequested = true;
             break;
         case 'I':
@@ -263,7 +263,7 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
         case 'B':
             // #228 smoke test: ask the runtime for a Tier 1 spatial file
             // picker. Main loop consumes the flag, calls
-            // xrRequestFilePickerEXT, polls events for the completion.
+            // xrRequestFilePickerDXR, polls events for the completion.
             state.filePickerRequestRequested = true;
             break;
         case '0':

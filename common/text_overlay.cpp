@@ -372,7 +372,7 @@ std::wstring FormatMode(int outputMode, bool simDisplayAvailable, const char* mo
     if (modeCount > 1) {
         oss << L" [1-" << modeCount << L"]";
     }
-    // XR_EXT_display_info v13: surface workspace mode lock so the user knows
+    // XR_DXR_display_info v13: surface workspace mode lock so the user knows
     // local V / 0-8 keypresses are no-ops under a workspace controller.
     if (!isRequestable) {
         oss << L" [locked by workspace]";

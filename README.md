@@ -136,7 +136,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 
 ### DisplayXR extension headers
 
-`xr_session_common` / `xr_window_space_hud` need the DisplayXR OpenXR extension headers (`XR_EXT_display_info.h`, `XR_EXT_win32_window_binding.h`, `XR_EXT_workspace_file_dialog.h`, `XR_EXT_atlas_capture.h`, `XR_EXT_mcp_tools.h`, …), which are **not** in the Khronos SDK. Set `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` (the directory **containing** `openxr/XR_EXT_*.h`) before bringing in this project:
+`xr_session_common` / `xr_window_space_hud` need the DisplayXR OpenXR extension headers (`XR_DXR_display_info.h`, `XR_DXR_win32_window_binding.h`, `XR_DXR_workspace_file_dialog.h`, `XR_DXR_atlas_capture.h`, `XR_DXR_mcp_tools.h`, …), which are **not** in the Khronos SDK. Set `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` (the directory **containing** `openxr/XR_EXT_*.h`) before bringing in this project:
 
 - runtime test apps: `src/external/openxr_includes` (the source of truth)
 - demos: their vendored `openxr_includes/` (keep it refreshed from [displayxr-extensions](https://github.com/DisplayXR/displayxr-extensions))
@@ -193,7 +193,7 @@ Epic [#396](https://github.com/DisplayXR/displayxr-runtime/issues/396) status:
 - **W2** (`v0.1.0`) ✅ — math-only first cut.
 - **W3** (`v0.2.0`) ✅ — all 5 consumers (runtime test apps, both demos, Unreal, Unity) pin `displayxr::math` by tag; Layer 1 window/canvas resolve added.
 - **W4** (`v0.3.0`) ✅ — `displayxr::common` C++ scaffolding target; the 3 C++ consumers migrate off their vendored `common/` copies.
-- **W7** (`v0.4.0`) ✅ — **type-neutral core** (`displayxr::math_core`, own `dxr_*` POD types, zero OpenXR dep, `include/dxr_view_math.{h,c}`) now holds ALL the math; `displayxr::math` is a byte-compatible cast-wrapper over it (existing pins unaffected). New **`displayxr::math_xrt`** — the xrt-typed FOV-only wrapper the DisplayXR runtime links in place of its hand-synced `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (gated on `DISPLAYXR_XRT_INCLUDE_DIR`, the dir containing `xrt/xrt_defines.h`; set `DISPLAYXR_BUILD_MATH_OPENXR=OFF` to skip all OpenXR provisioning). Runtime render-ready output ≡ app-from-raw output **by construction** — the `XR_EXT_view_rig` equivalence guarantee.
+- **W7** (`v0.4.0`) ✅ — **type-neutral core** (`displayxr::math_core`, own `dxr_*` POD types, zero OpenXR dep, `include/dxr_view_math.{h,c}`) now holds ALL the math; `displayxr::math` is a byte-compatible cast-wrapper over it (existing pins unaffected). New **`displayxr::math_xrt`** — the xrt-typed FOV-only wrapper the DisplayXR runtime links in place of its hand-synced `m_camera3d_view`/`m_display3d_view`/`m_multiview` ports (gated on `DISPLAYXR_XRT_INCLUDE_DIR`, the dir containing `xrt/xrt_defines.h`; set `DISPLAYXR_BUILD_MATH_OPENXR=OFF` to skip all OpenXR provisioning). Runtime render-ready output ≡ app-from-raw output **by construction** — the `XR_DXR_view_rig` equivalence guarantee.
 
 ## License
 

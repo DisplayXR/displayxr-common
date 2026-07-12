@@ -72,7 +72,7 @@ SelectColorSwapchainFormat(const std::vector<int64_t>& formats)
 //
 // DisplayXR advertises both OPAQUE and ALPHA_BLEND through
 // xrEnumerateEnvironmentBlendModes when the runtime can deliver alpha-correct
-// output (standalone via XR_EXT_win32_window_binding.transparentBackgroundEnabled
+// output (standalone via XR_DXR_win32_window_binding.transparentBackgroundEnabled
 // on D3D11/D3D12/VK, or workspace via the projection-layer source-alpha bit).
 // Apps that want their alpha honored should submit ALPHA_BLEND; apps that
 // don't (or runtimes that only advertise OPAQUE) get OPAQUE.
@@ -496,20 +496,20 @@ bool PollEvents(XrSessionManager& xr) {
             LOG_WARN("Instance loss pending - requesting exit");
             xr.exitRequested = true;
             break;
-        case (XrStructureType)XR_TYPE_EVENT_DATA_RENDERING_MODE_CHANGED_EXT: {
-            auto* modeEvent = (XrEventDataRenderingModeChangedEXT*)&event;
+        case (XrStructureType)XR_TYPE_EVENT_DATA_RENDERING_MODE_CHANGED_DXR: {
+            auto* modeEvent = (XrEventDataRenderingModeChangedDXR*)&event;
             LOG_INFO("Rendering mode changed: %u -> %u",
                 modeEvent->previousModeIndex, modeEvent->currentModeIndex);
             xr.currentModeIndex = modeEvent->currentModeIndex;
             break;
         }
-        case (XrStructureType)XR_TYPE_EVENT_DATA_EYE_TRACKING_STATE_CHANGED_EXT: {
+        case (XrStructureType)XR_TYPE_EVENT_DATA_EYE_TRACKING_STATE_CHANGED_DXR: {
             // Edge-triggered tracking loss/recovery (#441 v14). The HUD state
-            // refreshes per-frame from the XrViewEyeTrackingStateEXT chain in
+            // refreshes per-frame from the XrViewEyeTrackingStateDXR chain in
             // LocateViews; this handler exists so every manual test session
             // logs the edges, and as the reference for the MANUAL-mode
             // pattern (react here instead of polling isTracking).
-            auto* etEvent = (XrEventDataEyeTrackingStateChangedEXT*)&event;
+            auto* etEvent = (XrEventDataEyeTrackingStateChangedDXR*)&event;
             LOG_INFO("Eye tracking state changed: isTracking=%s mode=%u",
                 etEvent->isTracking == XR_TRUE ? "YES" : "NO",
                 (uint32_t)etEvent->activeMode);
@@ -517,12 +517,12 @@ bool PollEvents(XrSessionManager& xr) {
             xr.activeEyeTrackingMode = (uint32_t)etEvent->activeMode;
             break;
         }
-        case (XrStructureType)XR_TYPE_EVENT_DATA_FILE_PICKER_COMPLETE_EXT: {
+        case (XrStructureType)XR_TYPE_EVENT_DATA_FILE_PICKER_COMPLETE_DXR: {
             // #228 Tier 1: spatial file picker delivered a result. Store on
             // the session manager; the main loop consumes filePickerHasResult
             // and routes the path (apps without a file-open path just see the
             // log line — the state is inert until someone reads it).
-            auto* pickEvent = (XrEventDataFilePickerCompleteEXT*)&event;
+            auto* pickEvent = (XrEventDataFilePickerCompleteDXR*)&event;
             if (pickEvent->requestId == xr.filePickerRequestId) {
                 xr.filePickerLastResult = pickEvent->result;
                 strncpy(xr.filePickerLastPath, pickEvent->path, sizeof(xr.filePickerLastPath) - 1);
@@ -540,14 +540,14 @@ bool PollEvents(XrSessionManager& xr) {
             }
             break;
         }
-        case (XrStructureType)XR_TYPE_EVENT_DATA_MCP_TOOL_CALL_EXT: {
-            // An agent invoked one of our XR_EXT_mcp_tools tools (#457). Fetch
+        case (XrStructureType)XR_TYPE_EVENT_DATA_MCP_TOOL_CALL_DXR: {
+            // An agent invoked one of our XR_DXR_mcp_tools tools (#457). Fetch
             // the JSON args (two-call idiom; argsSize is the required
             // capacity), act on app state — we're on the main loop, so no
             // locking — and answer. An unanswered call fails to the agent
             // after ~5 s. Only apps that registered tools in their
             // CreateSession ever receive this event.
-            auto* call = (XrEventDataMCPToolCallEXT*)&event;
+            auto* call = (XrEventDataMCPToolCallDXR*)&event;
             char args[512] = {0};
             uint32_t needed = 0;
             if (xr.pfnGetMCPToolCallArgsEXT != nullptr) {
@@ -635,7 +635,7 @@ bool LocateViews(
     XrViewState viewState = {XR_TYPE_VIEW_STATE};
 
     // Chain eye tracking state (v6) — runtime fills if extension enabled
-    XrViewEyeTrackingStateEXT eyeTrackingState = {(XrStructureType)XR_TYPE_VIEW_EYE_TRACKING_STATE_EXT};
+    XrViewEyeTrackingStateDXR eyeTrackingState = {(XrStructureType)XR_TYPE_VIEW_EYE_TRACKING_STATE_DXR};
     viewState.next = &eyeTrackingState;
 
     uint32_t viewCount = 8;
@@ -895,8 +895,8 @@ bool EndFrameWithWindowSpaceLayers(
     if (srcH < 0) srcH = (int32_t)xr.hudSwapchain.height;
 
     // Window-space HUD layer
-    XrCompositionLayerWindowSpaceEXT hudLayer = {};
-    hudLayer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_EXT;
+    XrCompositionLayerWindowSpaceDXR hudLayer = {};
+    hudLayer.type = (XrStructureType)XR_TYPE_COMPOSITION_LAYER_WINDOW_SPACE_DXR;
     hudLayer.next = nullptr;
     hudLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     hudLayer.subImage.swapchain = xr.hudSwapchain.swapchain;
@@ -910,8 +910,8 @@ bool EndFrameWithWindowSpaceLayers(
     hudLayer.disparity = hudDisparity;
 
     // projection, [HUD], then each caller-built window-space UI layer on top.
-    const XrCompositionLayerWindowSpaceEXT* ui =
-        reinterpret_cast<const XrCompositionLayerWindowSpaceEXT*>(uiLayers);
+    const XrCompositionLayerWindowSpaceDXR* ui =
+        reinterpret_cast<const XrCompositionLayerWindowSpaceDXR*>(uiLayers);
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     layers.reserve(2 + uiLayerCount);
     layers.push_back((const XrCompositionLayerBaseHeader*)&projectionLayer);
