@@ -172,7 +172,7 @@ else()
     FetchContent_Declare(
         displayxr_extensions_headers
         GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
-        GIT_TAG 809377c5b04988dfb7a56d902ed0c027bc4b4391
+        GIT_TAG 1f931d09234829321011bb2b0f97914d56c7d336
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
