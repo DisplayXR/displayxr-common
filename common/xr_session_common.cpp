@@ -553,6 +553,20 @@ bool PollEvents(XrSessionManager& xr) {
             if (xr.pfnGetMCPToolCallArgsEXT != nullptr) {
                 xr.pfnGetMCPToolCallArgsEXT(xr.session, call->callId, sizeof(args), &needed, args);
             }
+
+            // An app that registered its own tools handles the call itself; the
+            // built-in cube handler below is only the fallback when no handler is
+            // set (#72 follow-up — apps no longer fork PollEvents to swap this).
+            if (xr.mcpToolHandler) {
+                bool success = true;
+                std::string out = xr.mcpToolHandler(call->toolName, args, success);
+                if (xr.pfnSubmitMCPToolResultEXT != nullptr) {
+                    xr.pfnSubmitMCPToolResultEXT(xr.session, call->callId,
+                                                 success ? XR_TRUE : XR_FALSE, out.c_str());
+                }
+                break;
+            }
+
             char result[256];
             XrBool32 ok = XR_TRUE;
             if (strcmp(call->toolName, "set_spin") == 0) {

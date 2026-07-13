@@ -33,6 +33,7 @@
 #include <DirectXMath.h>
 #include <vector>
 #include <string>
+#include <functional>
 
 #include "view_params.h"
 #include "mode_switch.h"  // dxr::ModeSwitch — smooth 2D<->3D disparity sequencer
@@ -111,20 +112,36 @@ struct XrSessionManager {
     bool hasAtlasCaptureExt = false;
     PFN_xrCaptureAtlasDXR pfnCaptureAtlasEXT = nullptr;
 
-    // XR_DXR_mcp_tools (#457): reference adoption — the app registers its own
-    // agent tools (set_spin/get_status). Each app's xr_session.cpp detects the
-    // extension, resolves these PFNs after xrCreateSession, and declares its
-    // per-app appId (matching the manifest `id`, INV-10.1); the shared
-    // PollEvents answers XrEventDataMCPToolCallDXR. Inert when the extension /
-    // MCP capability is absent.
+    // XR_DXR_mcp_tools (#457): the app registers its own agent tools. Each app's
+    // xr_session.cpp detects the extension, resolves these PFNs after
+    // xrCreateSession, and declares its per-app appId (matching the manifest
+    // `id`, INV-10.1); the shared PollEvents answers XrEventDataMCPToolCallDXR.
+    // Inert when the extension / MCP capability is absent.
     bool hasMcpToolsExt = false;
     PFN_xrSetMCPAppInfoDXR pfnSetMCPAppInfoEXT = nullptr;
     PFN_xrRegisterMCPToolDXR pfnRegisterMCPToolEXT = nullptr;
     PFN_xrGetMCPToolCallArgsDXR pfnGetMCPToolCallArgsEXT = nullptr;
     PFN_xrSubmitMCPToolResultDXR pfnSubmitMCPToolResultEXT = nullptr;
 
+    //! App-supplied MCP tool-call handler (#72 follow-up). When set, the shared
+    //! PollEvents delegates every XrEventDataMCPToolCallDXR to it instead of the
+    //! built-in cube handler — so an app with its own tools (media player, model
+    //! viewer, splat viewer, …) no longer has to fork PollEvents just to swap the
+    //! dispatch. Called on the main/render loop (no locking needed by the app for
+    //! shared session state; the app owns any of its own state's locking).
+    //!   toolName  — the invoked tool's name (matches what the app registered)
+    //!   argsJson  — the call arguments as a JSON object string ("" if none)
+    //!   success   — [out] set false to fail the call to the agent
+    //!   returns   — the result payload as a JSON string (submitted verbatim)
+    //! When null (the default), PollEvents uses the built-in set_spin/get_status
+    //! handler so the cube reference app keeps working unchanged.
+    using McpToolHandler = std::function<std::string(
+        const std::string& toolName, const std::string& argsJson, bool& success)>;
+    McpToolHandler mcpToolHandler;
+
     //! Cube spin speed in rad/s — historically hardcoded 0.5; now agent-settable
-    //! via the set_spin MCP tool. Apps pass it to their renderer's UpdateScene.
+    //! via the built-in set_spin MCP tool (used only when mcpToolHandler is null).
+    //! Apps pass it to their renderer's UpdateScene.
     float spinSpeed = 0.5f;
 
     // Display info from XR_DXR_display_info (static display properties)
