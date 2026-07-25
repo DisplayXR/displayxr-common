@@ -60,6 +60,22 @@ void RenderButton(
     bool useSmallFont = true
 );
 
+// Render a "toast" chip: a translucent rounded pill with a centered, single-
+// line label, uniformly scaled by `alpha` (fill, stroke and text together) so a
+// caller can fade the whole thing out. Unlike RenderButton this never draws a
+// hover state — a toast is a notification, not a control. See toast.h for the
+// state object that decides the text and the alpha.
+void RenderToast(
+    TextOverlay& overlay,
+    ID3D11Device* device,
+    ID3D11Texture2D* texture,
+    const std::wstring& label,
+    float x, float y,
+    float width, float height,
+    float alpha = 1.0f,
+    bool useSmallFont = false
+);
+
 // Render a filled rounded rectangle (no label, no stroke). Used by the HUD
 // renderer to draw a localized backdrop behind body text when the HUD layer
 // is mostly transparent.
