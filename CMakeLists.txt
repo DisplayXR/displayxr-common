@@ -219,6 +219,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/rig_transition.h
     common/mode_switch.cpp # platform-neutral smooth 2D<->3D mode-switch sequencer
     common/mode_switch.h
+    common/toast.cpp      # platform-neutral transient confirmation-message state
+    common/toast.h
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

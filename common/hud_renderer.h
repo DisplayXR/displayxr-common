@@ -85,6 +85,20 @@ const void* RenderHudAndMap(HudRenderer& hud, uint32_t* rowPitch,
 const void* RenderButtonStandalone(HudRenderer& hud, uint32_t* rowPitch,
     const std::wstring& label, bool hovered);
 
+// Render a single toast chip filling the ENTIRE texture (for a standalone
+// window-space toast layer). Clears transparent, then draws one centered pill
+// at full size with the whole chip scaled by `alpha`. Returns mapped
+// R8G8B8A8 pixels + row pitch; caller uploads then calls UnmapHud().
+//
+// Pair it with dxr::ToastState (toast.h), which owns the message and its
+// lifetime: Snapshot() gives you the text and the alpha to pass here, and
+// returns false once the toast has expired — at which point simply don't
+// submit the layer that frame (a true toggle, not a transparent layer).
+//
+// Use a HudRenderer sized to the chip (e.g. 512×96), not the main HUD renderer.
+const void* RenderToastStandalone(HudRenderer& hud, uint32_t* rowPitch,
+    const std::wstring& text, float alpha = 1.0f);
+
 // Unmap the staging texture after pixel upload
 void UnmapHud(HudRenderer& hud);
 

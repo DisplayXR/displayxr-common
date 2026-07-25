@@ -235,6 +235,37 @@ const void* RenderButtonStandalone(HudRenderer& hud, uint32_t* rowPitch,
     return mapped.pData;
 }
 
+const void* RenderToastStandalone(HudRenderer& hud, uint32_t* rowPitch,
+    const std::wstring& text, float alpha)
+{
+    // Clear fully transparent so only the chip is visible over the scene.
+    ID3D11RenderTargetView* rtv = nullptr;
+    hud.device->CreateRenderTargetView(hud.renderTex.Get(), nullptr, &rtv);
+    if (rtv) {
+        float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        hud.context->ClearRenderTargetView(rtv, clearColor);
+        rtv->Release();
+    }
+
+    // Inset by a pixel so the pill's 1px stroke isn't clipped by the texture edge.
+    const float inset = 1.0f;
+    RenderToast(hud.overlay, hud.device.Get(), hud.renderTex.Get(),
+        text, inset, inset,
+        (float)hud.width - 2.0f * inset, (float)hud.height - 2.0f * inset,
+        alpha, /*useSmallFont=*/false);
+
+    hud.context->CopyResource(hud.stagingTex.Get(), hud.renderTex.Get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT hr = hud.context->Map(hud.stagingTex.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        LOG_ERROR("HudRenderer: RenderToastStandalone Map failed: 0x%08X", hr);
+        return nullptr;
+    }
+    if (rowPitch) *rowPitch = mapped.RowPitch;
+    return mapped.pData;
+}
+
 void UnmapHud(HudRenderer& hud) {
     hud.context->Unmap(hud.stagingTex.Get(), 0);
 }

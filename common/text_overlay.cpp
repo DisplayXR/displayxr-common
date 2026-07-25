@@ -226,6 +226,73 @@ void RenderButton(
     rt->EndDraw();
 }
 
+void RenderToast(
+    TextOverlay& overlay,
+    ID3D11Device* device,
+    ID3D11Texture2D* texture,
+    const std::wstring& label,
+    float x, float y,
+    float width, float height,
+    float alpha,
+    bool useSmallFont
+) {
+    if (!overlay.initialized || !texture || !device) return;
+    if (alpha <= 0.0f) return;          // fully faded — nothing to draw
+    if (alpha > 1.0f) alpha = 1.0f;
+
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(&context);
+    if (context) context->Flush();
+
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(texture->QueryInterface(IID_PPV_ARGS(&surface)))) return;
+
+    D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+    ComPtr<ID2D1RenderTarget> rt;
+    if (FAILED(overlay.d2dFactory->CreateDxgiSurfaceRenderTarget(surface.Get(), &rtProps, &rt))) return;
+
+    // Darker and more opaque than a button: a toast sits over arbitrary scene
+    // content for a second or two and has to stay legible without the HUD
+    // panel's backdrop behind it. Every channel's alpha is scaled by `alpha` so
+    // the chip fades out as one object.
+    ComPtr<ID2D1SolidColorBrush> fillBrush, strokeBrush, textBrush;
+    if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.72f * alpha), &fillBrush))) return;
+    if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.30f * alpha), &strokeBrush))) return;
+    if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.00f * alpha), &textBrush))) return;
+
+    rt->BeginDraw();
+
+    // Pill: corner radius = half the height, clamped so a squat rect still
+    // rounds sanely.
+    float radius = height * 0.5f;
+    if (radius > width * 0.5f) radius = width * 0.5f;
+    D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+        D2D1::RectF(x, y, x + width, y + height), radius, radius);
+    rt->FillRoundedRectangle(rr, fillBrush.Get());
+    rt->DrawRoundedRectangle(rr, strokeBrush.Get(), 1.0f);
+
+    // Centered, single-line label. The text format is shared with the HUD body
+    // text, so save/restore alignment + wrapping exactly like RenderButton does.
+    IDWriteTextFormat* fmt = useSmallFont ? overlay.smallTextFormat.Get() : overlay.textFormat.Get();
+    DWRITE_TEXT_ALIGNMENT prevTA = fmt->GetTextAlignment();
+    DWRITE_PARAGRAPH_ALIGNMENT prevPA = fmt->GetParagraphAlignment();
+    DWRITE_WORD_WRAPPING prevWrap = fmt->GetWordWrapping();
+    fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    rt->DrawText(label.c_str(), (UINT32)label.length(), fmt,
+        D2D1::RectF(x, y, x + width, y + height), textBrush.Get(),
+        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    fmt->SetTextAlignment(prevTA);
+    fmt->SetParagraphAlignment(prevPA);
+    fmt->SetWordWrapping(prevWrap);
+
+    rt->EndDraw();
+}
+
 void RenderFilledRect(
     TextOverlay& overlay,
     ID3D11Device* device,
