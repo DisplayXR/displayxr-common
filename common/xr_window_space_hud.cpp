@@ -132,9 +132,11 @@ bool SubmitWindowSpaceLayersFrame(
     const XrCompositionLayerProjectionView* projViews,
     uint32_t viewCount,
     const WindowSpaceLayerDesc* layers,
-    uint32_t count)
+    uint32_t count,
+    const void* projectionNext)
 {
     XrCompositionLayerProjection projLayer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    projLayer.next = projectionNext;
     projLayer.space = localSpace;
     projLayer.viewCount = viewCount;
     projLayer.views = projViews;

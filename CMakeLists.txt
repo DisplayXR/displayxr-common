@@ -222,6 +222,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/toast.cpp      # platform-neutral transient confirmation-message state
     common/toast.h
     common/recenter_control.h # header-only per-axis dynamic-recenter pin state
+    common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
+    common/zone_default.h
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

@@ -92,4 +92,7 @@ bool SubmitWindowSpaceLayersFrame(
     const XrCompositionLayerProjectionView* projViews,
     uint32_t viewCount,
     const WindowSpaceLayerDesc* layers,
-    uint32_t count);
+    uint32_t count,
+    // Chained on XrCompositionLayerProjection::next — pass
+    // dxr::FullWindowZoneSubmitChain() (zone_default.h) for a zones frame.
+    const void* projectionNext = nullptr);

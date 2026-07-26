@@ -764,8 +764,10 @@ bool ReleaseSwapchainImage(XrSessionManager& xr) {
 }
 
 bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayerProjectionView* views,
-              uint32_t viewCount, XrCompositionLayerFlags projectionLayerFlags) {
+              uint32_t viewCount, XrCompositionLayerFlags projectionLayerFlags,
+              const void* projectionNext) {
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projectionLayer.next = projectionNext;
     projectionLayer.space = xr.localSpace;
     projectionLayer.layerFlags = projectionLayerFlags;
     projectionLayer.viewCount = viewCount;
@@ -897,9 +899,11 @@ bool EndFrameWithWindowSpaceLayers(
     int32_t srcX, int32_t srcY,
     int32_t srcW, int32_t srcH,
     bool submitHud,
-    XrCompositionLayerFlags projectionLayerFlags
+    XrCompositionLayerFlags projectionLayerFlags,
+    const void* projectionNext
 ) {
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projectionLayer.next = projectionNext;
     projectionLayer.space = xr.localSpace;
     projectionLayer.layerFlags = projectionLayerFlags;
     projectionLayer.viewCount = viewCount;
