@@ -900,7 +900,9 @@ bool EndFrameWithWindowSpaceLayers(
     int32_t srcW, int32_t srcH,
     bool submitHud,
     XrCompositionLayerFlags projectionLayerFlags,
-    const void* projectionNext
+    const void* projectionNext,
+    const XrCompositionLayerBaseHeader* const* extraLayers,
+    uint32_t extraLayerCount
 ) {
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.next = projectionNext;
@@ -940,6 +942,12 @@ bool EndFrameWithWindowSpaceLayers(
         layers.push_back((const XrCompositionLayerBaseHeader*)&hudLayer);
     for (uint32_t i = 0; i < uiLayerCount; ++i)
         layers.push_back((const XrCompositionLayerBaseHeader*)&ui[i]);
+    // Caller-built layers of ANY composition type (e.g. an
+    // XrCompositionLayerLocal2DDXR toast on a zones frame), appended last =
+    // composited on top. An array of pointers, not structs, so heterogeneous
+    // layer types can ride one submission.
+    for (uint32_t i = 0; i < extraLayerCount; ++i)
+        if (extraLayers[i] != nullptr) layers.push_back(extraLayers[i]);
 
     XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
     endInfo.displayTime = displayTime;
