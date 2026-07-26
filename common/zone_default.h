@@ -22,8 +22,9 @@
  *    physical panel region 2D and back.
  *
  * Known trade: zones frames forfeit zero-copy (zone assembly is a composite,
- * so the full-fill handoff can never apply). Zero-copy only ever fires
- * full-screen 2D on Windows Leia — one extra copy where perf matters least.
+ * so the full-fill handoff can never apply). Zero-copy only ever fires in the
+ * worst-case-filling full-screen 2D mode (ADR-030) — one extra copy exactly
+ * where perf matters least.
  *
  * Pure OpenXR, no platform dependencies. The APP still owns:
  *  - enabling XR_DXR_display_zones (+ XR_DXR_local_3d_zone >= v3) at
