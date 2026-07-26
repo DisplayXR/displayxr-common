@@ -221,6 +221,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/mode_switch.h
     common/toast.cpp      # platform-neutral transient confirmation-message state
     common/toast.h
+    common/recenter_control.h # header-only per-axis dynamic-recenter pin state
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
