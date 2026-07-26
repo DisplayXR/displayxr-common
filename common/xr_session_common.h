@@ -321,8 +321,11 @@ XrFovf ComputeKooimaFov(
 // projectionLayerFlags is OR-ed onto XrCompositionLayerProjection::layerFlags
 // (e.g. XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT for transparent
 // backgrounds).
+// `projectionNext` is chained on XrCompositionLayerProjection::next — pass
+// dxr::FullWindowZoneSubmitChain() (zone_default.h) to make this a zones frame.
 bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayerProjectionView* views,
-              uint32_t viewCount = 2, XrCompositionLayerFlags projectionLayerFlags = 0);
+              uint32_t viewCount = 2, XrCompositionLayerFlags projectionLayerFlags = 0,
+              const void* projectionNext = nullptr);
 
 // Create a HUD swapchain for window-space layer submission
 bool CreateHudSwapchain(XrSessionManager& xr, uint32_t width, uint32_t height);
@@ -359,7 +362,10 @@ bool EndFrameWithWindowSpaceLayers(
     // Tab-toggle make the HUD truly absent rather than transparent. Default
     // true preserves every existing caller's behavior.
     bool submitHud = true,
-    XrCompositionLayerFlags projectionLayerFlags = 0);
+    XrCompositionLayerFlags projectionLayerFlags = 0,
+    // Chained on XrCompositionLayerProjection::next — pass
+    // dxr::FullWindowZoneSubmitChain() (zone_default.h) for a zones frame.
+    const void* projectionNext = nullptr);
 
 // End frame with both projection layer and window-space HUD layer.
 // viewCount defaults to 2 (stereo); pass 1 for mono submission in 2D mode.
