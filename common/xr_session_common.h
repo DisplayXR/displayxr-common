@@ -365,7 +365,12 @@ bool EndFrameWithWindowSpaceLayers(
     XrCompositionLayerFlags projectionLayerFlags = 0,
     // Chained on XrCompositionLayerProjection::next — pass
     // dxr::FullWindowZoneSubmitChain() (zone_default.h) for a zones frame.
-    const void* projectionNext = nullptr);
+    const void* projectionNext = nullptr,
+    // Caller-built layers of ANY composition type (pointers, so heterogeneous
+    // types can mix — e.g. an XrCompositionLayerLocal2DDXR toast on a zones
+    // frame). Appended after the window-space layers = composited on top.
+    const XrCompositionLayerBaseHeader* const* extraLayers = nullptr,
+    uint32_t extraLayerCount = 0);
 
 // End frame with both projection layer and window-space HUD layer.
 // viewCount defaults to 2 (stereo); pass 1 for mono submission in 2D mode.
