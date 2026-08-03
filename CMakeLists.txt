@@ -225,6 +225,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/frame_stage_timer.h # header-only env-gated per-stage frame timing (#837)
     common/vk_overlay_kit.h   # header-only VK cached-layer-upload + pipelined-readback kit (#837)
     common/vk_clickthrough_region.h # header-only coverage->SetWindowRgn punch-through (#833, Win32)
+    common/win_window_drag.h  # header-only RMB window-drag for borderless overlays (Win32)
     common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
     common/zone_default.h
 )
