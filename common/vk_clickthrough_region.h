@@ -71,7 +71,11 @@ public:
     init(VkDevice dev, VkPhysicalDevice phys, uint32_t queueFamily)
     {
         dev_ = dev;
-        if (!stage_.init(dev, phys, queueFamily, VkDeviceSize(kCovW) * kCovH * 4,
+        // Two slices: view 0 and (optionally) the LAST view. The on-screen
+        // weave occupies the UNION of the views' footprints — a single view's
+        // silhouette clips the other views' parallax edges once the content
+        // moves off ZDP (the gauss butterfly bug).
+        if (!stage_.init(dev, phys, queueFamily, VkDeviceSize(kCovW) * kCovH * 4 * 2,
                          VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
             return false;
         }
@@ -132,7 +136,8 @@ public:
      */
     void
     update(VkQueue queue, VkImage viewImage, uint32_t viewW, uint32_t viewH, HWND hwnd,
-           uint32_t winW, uint32_t winH, const RECT* chrome, uint32_t chromeCount)
+           uint32_t winW, uint32_t winH, const RECT* chrome, uint32_t chromeCount,
+           uint32_t lastViewX = 0, uint32_t lastViewY = 0, bool unionLastView = false)
     {
         if (covImage_ == VK_NULL_HANDLE || viewImage == VK_NULL_HANDLE || winW == 0 || winH == 0) {
             return;
@@ -143,7 +148,8 @@ public:
             stage_.retire();
             const uint8_t* px = static_cast<const uint8_t*>(stage_.mapped);
             if (px != nullptr) {
-                applyRegion(px, hwnd, pendWinW_, pendWinH_, chrome, chromeCount);
+                applyRegion(px, pendTwo_ ? px + size_t(kCovW) * kCovH * 4 : nullptr, hwnd,
+                            pendWinW_, pendWinH_, chrome, chromeCount);
             }
         } else {
             stage_.retire(); // free any stale cmd
@@ -184,15 +190,7 @@ public:
         vkCmdBlitImage(cmd, viewImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, covImage_,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 
-        bar.image = viewImage;
-        bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &bar);
-
+        // Slice 0: view 0's coverage.
         bar.image = covImage_;
         bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -207,11 +205,52 @@ public:
         rg.imageExtent = {kCovW, kCovH, 1};
         vkCmdCopyImageToBuffer(cmd, covImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage_.buf, 1,
                                &rg);
+
+        if (unionLastView) {
+            // Slice 1: the LAST view's tile → second buffer slice. The view
+            // image is still TRANSFER_SRC (restored below).
+            bar.image = covImage_;
+            bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &bar);
+            VkImageBlit blit2 = {};
+            blit2.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit2.srcOffsets[0] = {(int32_t)lastViewX, (int32_t)lastViewY, 0};
+            blit2.srcOffsets[1] = {(int32_t)(lastViewX + viewW), (int32_t)(lastViewY + viewH), 1};
+            blit2.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit2.dstOffsets[1] = {(int32_t)kCovW, (int32_t)kCovH, 1};
+            vkCmdBlitImage(cmd, viewImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, covImage_,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit2, VK_FILTER_LINEAR);
+            bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &bar);
+            VkBufferImageCopy rg2 = rg;
+            rg2.bufferOffset = VkDeviceSize(kCovW) * kCovH * 4;
+            vkCmdCopyImageToBuffer(cmd, covImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage_.buf,
+                                   1, &rg2);
+        }
+
+        // Restore the view image for the runtime's consumption.
+        bar.image = viewImage;
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &bar);
         vkEndCommandBuffer(cmd);
 
         if (stage_.submit(queue, cmd)) {
             pendWinW_ = winW;
             pendWinH_ = winH;
+            pendTwo_ = unionLastView;
         }
     }
 
@@ -228,21 +267,26 @@ public:
 
 private:
     void
-    applyRegion(const uint8_t* px, HWND hwnd, uint32_t winW, uint32_t winH, const RECT* chrome,
-                uint32_t chromeCount)
+    applyRegion(const uint8_t* px, const uint8_t* px2, HWND hwnd, uint32_t winW, uint32_t winH,
+                const RECT* chrome, uint32_t chromeCount)
     {
         if (winW == 0 || winH == 0) return;
+        auto covered = [&](uint32_t x, uint32_t y) {
+            const size_t i = (size_t(y) * kCovW + x) * 4 + 3;
+            if (px[i] > kAlphaThreshold) return true;
+            return px2 != nullptr && px2[i] > kAlphaThreshold;
+        };
         std::vector<RECT> rects;
         rects.reserve(kCovH + chromeCount);
         for (uint32_t y = 0; y < kCovH; ++y) {
             uint32_t x = 0;
             while (x < kCovW) {
-                if (px[(size_t(y) * kCovW + x) * 4 + 3] <= kAlphaThreshold) {
+                if (!covered(x, y)) {
                     ++x;
                     continue;
                 }
                 const uint32_t xs = x;
-                while (x < kCovW && px[(size_t(y) * kCovW + x) * 4 + 3] > kAlphaThreshold) ++x;
+                while (x < kCovW && covered(x, y)) ++x;
                 RECT r;
                 r.left = (LONG)(xs * winW / kCovW);
                 r.right = (LONG)(x * winW / kCovW);
@@ -289,6 +333,7 @@ private:
     VkImage covImage_ = VK_NULL_HANDLE;
     VkDeviceMemory covMem_ = VK_NULL_HANDLE;
     uint32_t pendWinW_ = 0, pendWinH_ = 0;
+    bool pendTwo_ = false;
     bool shaped_ = false;
 };
 
