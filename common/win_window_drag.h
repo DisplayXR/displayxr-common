@@ -42,6 +42,10 @@ public:
             dragging_ = true;
             SetCapture(hwnd);
             GetCursorPos(&last_);
+            // Look exactly like an OS title-bar move to anything hooked on
+            // the window: the windowed-weaving phase-snap (runtime#757 /
+            // vendor DP) keys on the modal move loop's bracketing messages.
+            SendMessage(hwnd, WM_ENTERSIZEMOVE, 0, 0);
             return true;
         case WM_MOUSEMOVE: {
             if (!dragging_) return false;
@@ -60,9 +64,13 @@ public:
             if (!dragging_) return false;
             dragging_ = false;
             ReleaseCapture();
+            SendMessage(hwnd, WM_EXITSIZEMOVE, 0, 0); // phase re-snap point
             return true;
         case WM_CAPTURECHANGED:
-            dragging_ = false;
+            if (dragging_) {
+                dragging_ = false;
+                SendMessage(hwnd, WM_EXITSIZEMOVE, 0, 0);
+            }
             return false; // observe only — let the app see capture loss too
         }
         return false;
