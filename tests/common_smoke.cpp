@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "atlas_capture.h"
+#include "auto_fit.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
@@ -93,6 +94,48 @@ static void test_mip_chain()
         CHECK(mips[2].width == 1 && mips[2].height == 1, "last mip should be 1x1");
         CHECK(mips[2].pixels[0] == 128, "box filter of a solid image preserves the value");
     }
+}
+
+// Load-time auto-fit (auto_fit.h). Pure, deterministic.
+static void test_auto_fit()
+{
+	const float EPS = 1e-5f;
+	auto near_eq = [&](float a, float b) { return a > b - EPS && a < b + EPS; };
+
+	// Tall asset in a landscape viewport: height binds. vh = H / fill.
+	CHECK(near_eq(dxr::AutoFitVHeight(0.5f, 1.8f, 1920.0f, 1080.0f), 1.8f / 0.8f),
+	      "tall asset in landscape viewport must be height-bound");
+
+	// Wide asset in a portrait viewport: width binds. vh = W / (fill * aspect).
+	// aspect = 600/800 = 0.75 -> vh = 1.2 / (0.8 * 0.75) = 2.0.
+	CHECK(near_eq(dxr::AutoFitVHeight(1.2f, 0.6f, 600.0f, 800.0f), 2.0f),
+	      "wide asset in portrait viewport must be width-bound");
+
+	// Exactly viewport-shaped asset: both axes land on fill together.
+	CHECK(near_eq(dxr::AutoFitVHeight(1.6f, 0.9f, 1600.0f, 900.0f), 0.9f / 0.8f),
+	      "viewport-shaped asset: width and height constraints coincide");
+
+	// The result must always satisfy BOTH caps: rendered fractions <= fill.
+	{
+		const float vh = dxr::AutoFitVHeight(0.944f, 1.7f, 600.0f, 789.0f);
+		const float aspect = 600.0f / 789.0f;
+		CHECK(1.7f / vh <= 0.8f + EPS, "height fraction must not exceed fill");
+		CHECK(0.944f / (vh * aspect) <= 0.8f + EPS, "width fraction must not exceed fill");
+	}
+
+	// Unknown viewport (0 x 0) degrades to the height-only fit.
+	CHECK(near_eq(dxr::AutoFitVHeight(9.0f, 1.0f, 0.0f, 0.0f), 1.0f / 0.8f),
+	      "unknown viewport must fall back to height-only fit");
+
+	// Non-positive height or fill -> 0 (caller's fallback guard takes over).
+	CHECK(dxr::AutoFitVHeight(1.0f, 0.0f, 100.0f, 100.0f) == 0.0f,
+	      "zero extent height must return 0");
+	CHECK(dxr::AutoFitVHeight(1.0f, 1.0f, 100.0f, 100.0f, 0.0f) == 0.0f,
+	      "zero fill must return 0");
+
+	// Custom fill fraction respected.
+	CHECK(near_eq(dxr::AutoFitVHeight(0.5f, 1.0f, 1000.0f, 1000.0f, 0.5f), 2.0f),
+	      "custom fill fraction must scale the fit");
 }
 
 static void test_view_params_defaults()
@@ -318,6 +361,7 @@ int main()
 {
     test_capture_numbering();
     test_mip_chain();
+    test_auto_fit();
     test_view_params_defaults();
     test_window_space_hud_types();
     test_mode_switch();
