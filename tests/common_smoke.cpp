@@ -199,6 +199,49 @@ static void test_panel_px_from_view()
 	CHECK(near_eq(vhAtlas, 1.0f / 0.8f), "atlas fit collapses to height-only");
 }
 
+// FitTransition: the viewport-change refit animation.
+static void test_fit_transition()
+{
+	constexpr float EPS = 1e-3f;
+	auto near_eq = [&](float a, float b) { return std::fabs(a - b) <= EPS; };
+
+	// Real numbers from a tablet rotation: portrait base 3.67 -> landscape 1.89.
+	dxr::FitTransition f;
+	CHECK(!f.active(), "a fresh transition is landed, not running");
+
+	float v = -1.0f;
+	f.start(3.67f, 1.89f, 0.2f);
+	CHECK(f.active(), "start() arms the transition");
+	CHECK(near_eq(f.value(), 3.67f), "t=0 sits exactly on the origin");
+
+	CHECK(f.update(0.1f, &v), "half the duration is still running");
+	CHECK(near_eq(v, 2.78f), "SmoothStep is symmetric: halfway is the midpoint");
+
+	CHECK(f.update(0.1f, &v), "the landing tick still reports work done");
+	CHECK(near_eq(v, 1.89f), "lands exactly on the target");
+	CHECK(!f.active() && !f.update(0.1f, &v), "landed, and stays landed");
+
+	// Retarget mid-flight must not snap back to the original origin -- the
+	// two-step-settle case a rotation actually produces.
+	f.start(3.67f, 1.89f, 0.2f);
+	f.update(0.1f, &v);
+	const float mid = v;
+	f.start(mid, 3.67f, 0.2f);
+	CHECK(near_eq(f.value(), mid), "retarget resumes from where it was");
+	CHECK(near_eq(f.target(), 3.67f), "retarget adopts the new target");
+
+	// A zero duration is an immediate, valid move rather than a divide-by-zero.
+	f.start(1.0f, 2.0f, 0.0f);
+	CHECK(!f.active() && near_eq(f.value(), 2.0f),
+	      "zero duration lands immediately");
+
+	// The curve matches RigTransition's SmoothStep at the ends and the middle.
+	CHECK(near_eq(dxr::FitTransition::curve(0.0f), 0.0f) &&
+	          near_eq(dxr::FitTransition::curve(1.0f), 1.0f) &&
+	          near_eq(dxr::FitTransition::curve(0.5f), 0.5f),
+	      "SmoothStep endpoints and midpoint");
+}
+
 static void test_view_params_defaults()
 {
     ViewParams vp;
@@ -424,6 +467,7 @@ int main()
     test_mip_chain();
     test_auto_fit();
     test_panel_px_from_view();
+    test_fit_transition();
     test_view_params_defaults();
     test_window_space_hud_types();
     test_mode_switch();

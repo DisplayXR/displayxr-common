@@ -16,10 +16,34 @@
  *
  * Platform-neutral and pure; the caller owns the bounds source
  * (getRobustSceneBounds / getMainObjectBounds), the viewport source (window
- * client rect, or the 3D-zone rect when rendering into a display zone), the
- * fallback vHeight, and any recompute policy (this is load-time framing; the
- * fill fraction is exact for content at the display plane and nominal for
- * content in front of / behind it).
+ * client rect, or the 3D-zone rect when rendering into a display zone), and the
+ * fallback vHeight. The fill fraction is exact for content at the display plane
+ * and nominal for content in front of / behind it.
+ *
+ * WHEN TO RECOMPUTE -- read this before calling it once at load.
+ *
+ * vHeight is a function of (content, viewport). It is NOT load-time-only
+ * framing: any change to the viewport invalidates it. Rotating a tablet is the
+ * loud case -- a 2560x1600 panel held portrait is a 1600x2560 viewport, and a
+ * fit derived for one renders ~1.9x wrong in the other (measured). A window
+ * resize or a zone-rect change is the same thing, quieter.
+ *
+ * So: re-derive on every viewport change, and PRESERVE THE USER'S DEVIATION.
+ * Zoom, orbit and pivot are deliberate user state; a viewport change is not a
+ * request to undo them. Apps that keep the user's zoom as a separate
+ * multiplicative term (rig_vh = base / zoom, or a content-side scale) get this
+ * for free: move the base, touch nothing else, and a 2x pinch stays 2x of the
+ * NEW fit so the subject keeps its apparent size. Recentring belongs on an
+ * explicit reset gesture, not on rotation.
+ *
+ * Two practical notes, both learned the hard way:
+ *   - Gate on the ASPECT, not the pixel size: an intermediate size mid-rotation
+ *     that lands on the same aspect must not retrigger, and an in-flight
+ *     transition should RETARGET rather than restart.
+ *   - Cache the fit extents. They are properties of the CONTENT, so a viewport
+ *     change re-derives the base without re-measuring the scene.
+ *
+ * Use FitTransition below to animate the move -- a ~2x jump is very visible.
  */
 #pragma once
 
@@ -104,5 +128,81 @@ PanelPixelsFromView(uint32_t viewWidthPixels,
 	outPanelH = (float)viewHeightPixels / viewScaleY;
 	return true;
 }
+
+//! Animated scalar move between two vHeight values, for the viewport-change
+//! refit described above. A rotation can nearly double the base, and snapping
+//! that reads as a glitch.
+//!
+//! Header-only on purpose. RigTransition (common/rig_transition.h) already does
+//! this properly for whole dxr_rig snapshots, but it lives in a .cpp inside
+//! displayxr_common_lib, which an Android build cannot link -- so every Android
+//! leg that wanted it inlined its own copy. This is the same SmoothStep curve
+//! and the same "starts landed" convention, reachable from displayxr::rules.
+//!
+//! Usage:
+//!     if (aspect_changed) fit.start(current_vh, AutoFitVHeight(...));
+//!     if (fit.update(dt, &vh)) apply(vh);
+struct FitTransition
+{
+	//! Begin (or RETARGET) a move to `to`. Retargeting mid-flight keeps the
+	//! current value as the new origin, so a rotation that settles in two
+	//! steps cannot snap back to where it started.
+	void start(float from, float to, float duration_s = 0.2f)
+	{
+		from_ = from;
+		to_ = to;
+		dur_ = (duration_s > 0.0f) ? duration_s : 0.0f;
+		t_ = (dur_ > 0.0f) ? 0.0f : 1.0f;
+	}
+
+	//! Advance by `dt_s` and write the interpolated value. Returns false once
+	//! landed, so callers can skip redundant work.
+	//!
+	//! Clamp `dt_s` yourself if the app can be backgrounded: a multi-second
+	//! frame would otherwise land the move instantly, which is the snap this
+	//! exists to avoid.
+	bool update(float dt_s, float *out)
+	{
+		if (t_ >= 1.0f) {
+			return false;
+		}
+		t_ += (dur_ > 0.0f) ? (dt_s / dur_) : 1.0f;
+		if (t_ > 1.0f) {
+			t_ = 1.0f;
+		}
+		if (out != nullptr) {
+			*out = value();
+		}
+		return true;
+	}
+
+	//! Current interpolated value without advancing.
+	float value() const
+	{
+		const float c = curve(t_);
+		return from_ + (to_ - from_) * c;
+	}
+
+	bool active() const { return t_ < 1.0f; }
+	float target() const { return to_; }
+
+	//! Hermite 3t^2-2t^3 -- identical to RigTransition's Easing::SmoothStep.
+	static float curve(float t)
+	{
+		if (t <= 0.0f) {
+			return 0.0f;
+		}
+		if (t >= 1.0f) {
+			return 1.0f;
+		}
+		return t * t * (3.0f - 2.0f * t);
+	}
+
+private:
+	float from_ = 0.0f;
+	float to_ = 0.0f;
+	float dur_ = 0.0f;
+	float t_ = 1.0f; //!< normalized progress; starts at 1 (idle/landed)
+};
 
 } // namespace dxr
