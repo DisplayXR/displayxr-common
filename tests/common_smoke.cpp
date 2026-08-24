@@ -139,10 +139,11 @@ static void test_auto_fit()
 	      "custom fill fraction must scale the fit");
 }
 
-// PanelPixelsFromView: panel = view_px / view_scale, pinned to the real
-// numbers measured on a Leia Android panel (NP02J, 2026-08-24). The device
-// reports a 2560x1600 panel; its LeiaSR mode is 2x1 tiles at scale
-// 0.750x0.750, giving a 1920x1200 per-view recommended rect.
+// PanelPixelsFromView: panel = view_px / view_scale, pinned to numbers
+// measured on real 3D-display hardware (2026-08-24). That panel is 2560x1600
+// and its 3D mode is 2x1 tiles at scale 0.750x0.750, giving a 1920x1200
+// per-view recommended rect -- the configuration that motivated this helper,
+// because 0.750 != 1/2 so the tile grid does not cancel the view scale.
 static void test_panel_px_from_view()
 {
 	// NOTE the fabs form. The `a > b - EPS && a < b + EPS` idiom used by
@@ -156,9 +157,9 @@ static void test_panel_px_from_view()
 
 	// The case that motivated this helper.
 	CHECK(dxr::PanelPixelsFromView(1920u, 1200u, 0.75f, 0.75f, w, h),
-	      "PanelPixelsFromView accepts the Leia Android LeiaSR mode");
+	      "PanelPixelsFromView accepts the 2x1 @ 0.75 mode");
 	CHECK(near_eq(w, 2560.0f) && near_eq(h, 1600.0f),
-	      "LeiaSR 1920x1200 @ 0.75 -> the real 2560x1600 panel");
+	      "1920x1200 @ 0.75 -> the real 2560x1600 panel");
 	// ... and the aspect the fit rule actually consumes.
 	CHECK(near_eq(w / h, 1.6f), "panel aspect is 1.600, not the atlas' 3.200");
 

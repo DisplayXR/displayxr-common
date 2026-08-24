@@ -76,10 +76,10 @@ AutoFitVHeight(float extentW,
 //!
 //! DO NOT reconstruct the panel as `view_px * tile_grid`. That yields the
 //! ATLAS, not the panel, and the two coincide only in the special case
-//! `view_scale == 1 / tile_count`. The Leia Android LeiaSR mode breaks it:
-//! 2x1 tiles with scale 0.750x0.750 on a 2560x1600 panel gives per-view
-//! 1920x1200, so the tile reconstruction reports 3840x1200 (aspect 3.200)
-//! where the panel is 2560x1600 (aspect 1.600). Feeding that 2x-too-wide
+//! `view_scale == 1 / tile_count`. A shipping 3D mode breaks it: 2x1 tiles
+//! with scale 0.750x0.750 on a 2560x1600 panel gives per-view 1920x1200, so
+//! the tile reconstruction reports 3840x1200 (aspect 3.200) where the panel
+//! is 2560x1600 (aspect 1.600). Feeding that 2x-too-wide
 //! aspect to AutoFitVHeight halves its `extentW / (fill * aspect)` term, so
 //! the width cap silently stops binding and the fit degrades to height-only.
 //! Dividing by the scale is correct for ANY tiling, isotropic or not.
