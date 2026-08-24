@@ -258,6 +258,28 @@ elseif(APPLE)
     )
 endif()
 
+# ── Header-only, platform-neutral rules ──────────────────────────────────────
+# displayxr_common_lib is STATIC and carries Win32/AppKit sources, so it cannot
+# be consumed from an Android build at all. That is exactly why the shared
+# load-time fit rule (common/auto_fit.h) ended up hand-inlined in three Android
+# legs -- and why two of those copies drifted into reconstructing the viewport
+# from the tile grid, which reports the ATLAS rather than the panel.
+#
+# This INTERFACE target exposes the header-only rules to ANY platform without
+# dragging in a single compiled source. Consume it with:
+#
+#     FetchContent_MakeAvailable(displayxr_common)
+#     target_link_libraries(<app> PRIVATE displayxr::rules)
+#
+# Keep it header-only: anything added here must compile on Windows, macOS,
+# Linux AND Android with no platform sources and no external dependencies.
+add_library(displayxr_rules INTERFACE)
+add_library(displayxr::rules ALIAS displayxr_rules)
+target_include_directories(displayxr_rules INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:common>
+)
+
 add_library(displayxr_common_lib STATIC ${DISPLAYXR_COMMON_SOURCES})
 add_library(displayxr::common ALIAS displayxr_common_lib)
 
@@ -269,6 +291,7 @@ target_include_directories(displayxr_common_lib PUBLIC
 # extensions dir also carries the Khronos set, it must win the include order.
 target_link_libraries(displayxr_common_lib PUBLIC
     displayxr::math
+    displayxr::rules
     displayxr_ext_headers
     ${DISPLAYXR_MATH_OPENXR}
 )

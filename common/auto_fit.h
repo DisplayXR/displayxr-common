@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <cstdint>
+
 namespace dxr {
 
 //! Default fill fraction: the binding axis of the asset spans 80% of the
@@ -59,6 +61,48 @@ AutoFitVHeight(float extentW,
 		}
 	}
 	return vh;
+}
+
+//! Recover the PANEL (window) pixel size from a rendering mode's per-view
+//! recommended rect and that same mode's view scale:
+//!
+//!     panel = view_px / view_scale
+//!
+//! This is the viewport `AutoFitVHeight` wants on a fullscreen app that has no
+//! window rect of its own to ask for (the Android legs, where the runtime owns
+//! the surface). An app that CAN read its live window/canvas rect should pass
+//! that instead — and a zone-rendering app must pass the zone rect — this is
+//! the load-time bootstrap for the case where neither is available yet.
+//!
+//! DO NOT reconstruct the panel as `view_px * tile_grid`. That yields the
+//! ATLAS, not the panel, and the two coincide only in the special case
+//! `view_scale == 1 / tile_count`. The Leia Android LeiaSR mode breaks it:
+//! 2x1 tiles with scale 0.750x0.750 on a 2560x1600 panel gives per-view
+//! 1920x1200, so the tile reconstruction reports 3840x1200 (aspect 3.200)
+//! where the panel is 2560x1600 (aspect 1.600). Feeding that 2x-too-wide
+//! aspect to AutoFitVHeight halves its `extentW / (fill * aspect)` term, so
+//! the width cap silently stops binding and the fit degrades to height-only.
+//! Dividing by the scale is correct for ANY tiling, isotropic or not.
+//!
+//! Returns false (and leaves the outputs untouched) when the inputs cannot
+//! produce a panel size, so callers keep whatever fallback viewport they had.
+inline bool
+PanelPixelsFromView(uint32_t viewWidthPixels,
+                    uint32_t viewHeightPixels,
+                    float viewScaleX,
+                    float viewScaleY,
+                    float &outPanelW,
+                    float &outPanelH)
+{
+	if (viewWidthPixels == 0u || viewHeightPixels == 0u) {
+		return false;
+	}
+	if (!(viewScaleX > 0.0f) || !(viewScaleY > 0.0f)) {
+		return false;
+	}
+	outPanelW = (float)viewWidthPixels / viewScaleX;
+	outPanelH = (float)viewHeightPixels / viewScaleY;
+	return true;
 }
 
 } // namespace dxr
