@@ -12,6 +12,7 @@
  * macOS) and the STB single-implementation-per-platform invariant.
  */
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -136,6 +137,65 @@ static void test_auto_fit()
 	// Custom fill fraction respected.
 	CHECK(near_eq(dxr::AutoFitVHeight(0.5f, 1.0f, 1000.0f, 1000.0f, 0.5f), 2.0f),
 	      "custom fill fraction must scale the fit");
+}
+
+// PanelPixelsFromView: panel = view_px / view_scale, pinned to the real
+// numbers measured on a Leia Android panel (NP02J, 2026-08-24). The device
+// reports a 2560x1600 panel; its LeiaSR mode is 2x1 tiles at scale
+// 0.750x0.750, giving a 1920x1200 per-view recommended rect.
+static void test_panel_px_from_view()
+{
+	// NOTE the fabs form. The `a > b - EPS && a < b + EPS` idiom used by
+	// test_auto_fit above works only for small magnitudes: these values are
+	// pixel counts, and in float32 the spacing at 2560 is ~2.4e-4, so
+	// `2560.0f - 1e-4f` rounds straight back to 2560.0f and the strict `>`
+	// then compares 2560 > 2560 and fails on an EXACT match.
+	constexpr float EPS = 1e-3f;
+	auto near_eq = [&](float a, float b) { return std::fabs(a - b) <= EPS; };
+	float w = 0.0f, h = 0.0f;
+
+	// The case that motivated this helper.
+	CHECK(dxr::PanelPixelsFromView(1920u, 1200u, 0.75f, 0.75f, w, h),
+	      "PanelPixelsFromView accepts the Leia Android LeiaSR mode");
+	CHECK(near_eq(w, 2560.0f) && near_eq(h, 1600.0f),
+	      "LeiaSR 1920x1200 @ 0.75 -> the real 2560x1600 panel");
+	// ... and the aspect the fit rule actually consumes.
+	CHECK(near_eq(w / h, 1.6f), "panel aspect is 1.600, not the atlas' 3.200");
+
+	// The tile reconstruction this replaces would have produced 3840x1200.
+	// Prove the two really do disagree, so a regression cannot pass silently.
+	CHECK(!near_eq(w, 1920.0f * 2.0f),
+	      "panel width is NOT per-view width x tile columns");
+
+	// An isotropically-scaled 2D mode (1x1, scale 1.0) is the identity case.
+	CHECK(dxr::PanelPixelsFromView(2560u, 1600u, 1.0f, 1.0f, w, h) &&
+	          near_eq(w, 2560.0f) && near_eq(h, 1600.0f),
+	      "scale 1.0 returns the view rect unchanged");
+
+	// Anamorphic tiling (the shape the old reconstruction assumed) also works.
+	CHECK(dxr::PanelPixelsFromView(1920u, 2160u, 0.5f, 1.0f, w, h) &&
+	          near_eq(w, 3840.0f) && near_eq(h, 2160.0f),
+	      "0.5x1.0 anamorphic mode recovers the panel too");
+
+	// Degenerate inputs leave the caller's fallback untouched.
+	w = 111.0f;
+	h = 222.0f;
+	CHECK(!dxr::PanelPixelsFromView(0u, 1200u, 0.75f, 0.75f, w, h) &&
+	          near_eq(w, 111.0f) && near_eq(h, 222.0f),
+	      "zero view width is rejected without touching the outputs");
+	CHECK(!dxr::PanelPixelsFromView(1920u, 1200u, 0.0f, 0.75f, w, h) &&
+	          near_eq(w, 111.0f) && near_eq(h, 222.0f),
+	      "zero view scale is rejected without touching the outputs");
+
+	// End-to-end: the same asset fits differently under the two viewports.
+	// A wide asset (2.0 x 1.0) is width-bound on the real panel and would be
+	// wrongly height-bound under the atlas aspect -- the user-visible bug.
+	const float vhPanel = dxr::AutoFitVHeight(2.0f, 1.0f, 2560.0f, 1600.0f);
+	const float vhAtlas = dxr::AutoFitVHeight(2.0f, 1.0f, 3840.0f, 1200.0f);
+	CHECK(vhPanel > vhAtlas,
+	      "the atlas aspect under-fits a wide asset (the regression guard)");
+	CHECK(near_eq(vhPanel, 2.0f / (0.8f * 1.6f)), "panel fit is width-bound");
+	CHECK(near_eq(vhAtlas, 1.0f / 0.8f), "atlas fit collapses to height-only");
 }
 
 static void test_view_params_defaults()
@@ -362,6 +422,7 @@ int main()
     test_capture_numbering();
     test_mip_chain();
     test_auto_fit();
+    test_panel_px_from_view();
     test_view_params_defaults();
     test_window_space_hud_types();
     test_mode_switch();
