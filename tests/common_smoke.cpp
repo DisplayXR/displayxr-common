@@ -22,6 +22,7 @@
 
 #include "atlas_capture.h"
 #include "auto_fit.h"
+#include "auto_fit_canvas.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
@@ -240,6 +241,62 @@ static void test_fit_transition()
 	          near_eq(dxr::FitTransition::curve(1.0f), 1.0f) &&
 	          near_eq(dxr::FitTransition::curve(0.5f), 0.5f),
 	      "SmoothStep endpoints and midpoint");
+}
+
+// AutoFitCanvas + the aspect gate: the desktop viewport source. Pinned to the
+// gaussian-splat numbers that exposed the bug -- a 1280x720 window creation
+// size standing in for a square shell tile.
+static void test_auto_fit_canvas()
+{
+	constexpr float EPS = 1e-3f;
+	auto near_eq = [&](float a, float b) { return std::fabs(a - b) <= EPS; };
+
+	// The gate. A never-fitted aspect must always count as changed: that is
+	// what lands the bootstrap fit when the first canvas finally arrives,
+	// with no separate "pending" flag.
+	CHECK(dxr::AutoFitAspectChanged(0.0f, 1.0f), "unfitted aspect always refits");
+	CHECK(dxr::AutoFitAspectChanged(-1.0f, 1.0f), "negative fitted aspect refits");
+	CHECK(!dxr::AutoFitAspectChanged(1.0f, 0.0f), "a degenerate live aspect never refits");
+	CHECK(!dxr::AutoFitAspectChanged(1.778f, 1.778f), "an unchanged aspect does not refit");
+	CHECK(!dxr::AutoFitAspectChanged(1.778f, 1.7785f),
+	      "a resize that keeps proportions does not refit");
+	CHECK(dxr::AutoFitAspectChanged(1.778f, 1.0f), "16:9 -> square refits");
+
+	dxr::AutoFitCanvas canvas;
+	CHECK(!canvas.Valid() && canvas.Aspect() == 0.0f, "a fresh canvas has not arrived");
+
+	// Before the first locate: the fallback (the app's own client rect) is
+	// used, and reported as NOT the runtime canvas.
+	float w = 0.0f, h = 0.0f;
+	CHECK(!canvas.Viewport(1280.0f, 720.0f, w, h) && near_eq(w, 1280.0f) && near_eq(h, 720.0f),
+	      "no canvas yet -> caller's fallback");
+
+	// An empty publish (a locate that resolved no canvas) must not register.
+	CHECK(!canvas.PublishFromRaw(0.0f, 0.0f, 0, 0), "an empty raw channel is rejected");
+	CHECK(!canvas.Valid(), "a rejected publish leaves the canvas unarrived");
+
+	// Pixels-only (a runtime that filled the rect but not the meters).
+	CHECK(canvas.PublishFromRaw(0.0f, 0.0f, 1080, 1080), "pixels accepted when meters are absent");
+	CHECK(canvas.Viewport(1280.0f, 720.0f, w, h) && near_eq(w, 1080.0f) && near_eq(h, 1080.0f),
+	      "the runtime canvas overrides the fallback");
+	CHECK(near_eq(canvas.Aspect(), 1.0f), "square tile reports aspect 1");
+
+	// Meters win over pixels: they are what the rig's m2v divides by.
+	CHECK(canvas.PublishFromRaw(0.2f, 0.1f, 1080, 1080), "meters accepted");
+	CHECK(near_eq(canvas.Aspect(), 2.0f), "meters win over pixels");
+
+	// A later empty publish must not clobber a good canvas.
+	CHECK(!canvas.PublishFromRaw(0.0f, 0.0f, 0, 0), "empty publish still rejected");
+	CHECK(near_eq(canvas.Aspect(), 2.0f), "the good canvas survives an empty publish");
+
+	// The regression this exists for, end to end: the butterfly scene fitted
+	// against the window creation size vs the square tile it actually renders
+	// in. 15% is the difference between framed and overflowing the sides.
+	const float vhWindow = dxr::AutoFitVHeight(2.010f, 1.741f, 1280.0f, 720.0f, 0.88f);
+	const float vhTile = dxr::AutoFitVHeight(2.010f, 1.741f, 1080.0f, 1080.0f, 0.88f);
+	CHECK(near_eq(vhWindow, 1.741f / 0.88f), "the window aspect fits by height");
+	CHECK(near_eq(vhTile, 2.010f / 0.88f), "the square tile fits by width");
+	CHECK(vhTile > vhWindow * 1.1f, "fitting the wrong viewport oversizes by >10%");
 }
 
 static void test_view_params_defaults()
@@ -468,6 +525,7 @@ int main()
     test_auto_fit();
     test_panel_px_from_view();
     test_fit_transition();
+    test_auto_fit_canvas();
     test_view_params_defaults();
     test_window_space_hud_types();
     test_mode_switch();
