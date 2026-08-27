@@ -63,6 +63,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -84,15 +85,43 @@ HashBytes(const void* p, size_t n, uint64_t seed = 1469598103934665603ull)
 
 namespace detail {
 
+/*!
+ * Pick a mappable memory type.
+ *
+ * @p forCpuReads asks for HOST_CACHED on top of HOST_VISIBLE|HOST_COHERENT,
+ * and getting it matters enormously for any buffer the CPU READS back.
+ * HOST_VISIBLE|HOST_COHERENT alone is typically WRITE-COMBINED on a discrete
+ * GPU: fast to write, pathologically slow to read. Measured on an RTX 3080
+ * (2026-08-26), a per-frame byte-wise read of such a buffer cost ~127 ms/frame
+ * against 0.6 ms for the window present it was blamed on; HOST_CACHED took the
+ * same stage to 0.86 ms. Every throttle and resolution cap in
+ * vk_clickthrough_region.h was justified against that phantom cost.
+ *
+ * Writes are fine on write-combined memory, so uploads pass false. Falls back
+ * to the uncached type when no cached one exists; DXR_VK_NO_HOST_CACHED=1
+ * forces the legacy behaviour so the pathology stays reproducible.
+ */
 inline uint32_t
-FindHostVisibleType(VkPhysicalDevice phys, uint32_t typeBits)
+FindHostVisibleType(VkPhysicalDevice phys, uint32_t typeBits, bool forCpuReads = false)
 {
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(phys, &mp);
-    const VkMemoryPropertyFlags want =
+    const VkMemoryPropertyFlags base =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (forCpuReads) {
+        const char* e = std::getenv("DXR_VK_NO_HOST_CACHED");
+        const bool noCached = (e != nullptr && e[0] != 0 && e[0] != '0');
+        if (!noCached) {
+            const VkMemoryPropertyFlags want = base | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+            for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+                if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) {
+                    return i;
+                }
+            }
+        }
+    }
     for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-        if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) {
+        if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & base) == base) {
             return i;
         }
     }
@@ -111,10 +140,17 @@ struct FencedStage {
     VkFence fence = VK_NULL_HANDLE;
     VkCommandBuffer prevCmd = VK_NULL_HANDLE;
     bool pending = false;
+    //! Did the allocation actually land on a HOST_CACHED type? Read it back and
+    //! LOG it — "we asked for cached" is not the same claim as "the driver had
+    //! one", and a readback that quietly fell back to write-combined reads at
+    //! roughly a tenth the speed for no visible reason.
+    bool hostCached = false;
 
+    //! @p forCpuReads: the CPU reads this buffer back — ask for HOST_CACHED
+    //! (see FindHostVisibleType). Upload staging leaves it false.
     bool
     init(VkDevice device, VkPhysicalDevice phys, uint32_t queueFamily, VkDeviceSize size,
-         VkBufferUsageFlags usage)
+         VkBufferUsageFlags usage, bool forCpuReads = false)
     {
         dev = device;
         bytes = size;
@@ -125,8 +161,14 @@ struct FencedStage {
         if (vkCreateBuffer(dev, &bi, nullptr, &buf) != VK_SUCCESS) return false;
         VkMemoryRequirements mr;
         vkGetBufferMemoryRequirements(dev, buf, &mr);
-        const uint32_t type = FindHostVisibleType(phys, mr.memoryTypeBits);
+        const uint32_t type = FindHostVisibleType(phys, mr.memoryTypeBits, forCpuReads);
         if (type == UINT32_MAX) return false;
+        {
+            VkPhysicalDeviceMemoryProperties mp;
+            vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+            hostCached =
+                (mp.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
+        }
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         ai.allocationSize = mr.size;
         ai.memoryTypeIndex = type;
@@ -316,7 +358,8 @@ public:
     bool
     init(VkDevice dev, VkPhysicalDevice phys, uint32_t queueFamily, VkDeviceSize maxBytes)
     {
-        return stage_.init(dev, phys, queueFamily, maxBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        return stage_.init(dev, phys, queueFamily, maxBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           /*forCpuReads=*/true);
     }
 
     void destroy() { stage_.destroy(); }
