@@ -129,10 +129,37 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | stb image (read+write headers + the **only** implementation TUs) | `stb_image*.h`, `stb_image_impl_macos.cpp` | both |
 | dGPU hint (`NvOptimusEnablement`, force-included into consumer EXEs) | `optimus_dgpu_hint.c` | Windows |
 | Workspace-manifest CMake helper (`displayxr_install_manifest()`) | `displayxr_manifest.cmake` | both |
+| Viewer launch contract: `--transparent/--rect/--src/--vh/...` flags + the `displayxr-view:` URL, parsed and policy-checked (loopback-only http, no local files from a protocol launch) | `launch_args.h` | both (Win32 command-line entry) |
+| Asset download to `%LOCALAPPDATA%\DisplayXR\<app>\cache\<sha1>.<ext>` (WinHTTP, size cap, no downgrade redirects, extension from path/Content-Type/magic) | `url_fetch.{h,cpp}` | Windows (pure helpers: both) |
+| `displayxr-view:` protocol: per-user self-registration, sibling-viewer forward by `type=`, single-instance `WM_COPYDATA` hand-off | `view_protocol.h` | Windows |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
 **stb ownership:** the lib owns exactly one `STB_IMAGE_IMPLEMENTATION` and one `STB_IMAGE_WRITE_IMPLEMENTATION` TU per platform (Windows: `d3d11_renderer.cpp` / `atlas_capture.cpp`; Apple: `stb_image_impl_macos.cpp` / `atlas_capture_macos.mm`). Consumers must not define them.
+
+### The undock launch contract (`launch_args.h`, `url_fetch.h`, `view_protocol.h`)
+
+A viewer that can float a 3D asset over the desktop (the model viewer, the splat viewer) is
+started three ways - by a shell tile, by a web page through the OS protocol handler, or by a
+native app "undocking" a part - and all three arrive as argv. These headers make every viewer
+speak the same grammar and apply the same policy:
+
+```
+model_viewer.exe --transparent --rect=200,200,800,800 --vh=0.2 --src=https://host/x.glb
+model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=model&rect=200,200,800,800&vh=0.2&v=1"
+```
+
+- `dxr::ParseLaunchArgsFromCommandLine()` -> `LaunchArgs` (`ok()`, `errors`, `warnings`). The
+  policy is keyed on `fromProtocol`: from a web page, `src` must be `https:` or loopback `http:`;
+  `file:`/UNC/bare paths are refused (a native caller passes `--allow-local`, which a page cannot).
+- `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
+  progress for the viewer's toast; a cache hit never touches the network.
+- `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch
+  (the installers run elevated, so an HKCU write there lands in the wrong hive);
+  `FindSiblingViewer()` + `LaunchViewerWithUrl()` forward a URL whose `type=` belongs to another
+  viewer; `AcquireSingleInstanceOrForward()` hands a second launch to the running instance.
+
+The security negatives in `tests/launch_args_test.cpp` are the contract.
 
 ### DisplayXR extension headers
 
