@@ -152,6 +152,8 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
 - `dxr::ParseLaunchArgsFromCommandLine()` -> `LaunchArgs` (`ok()`, `errors`, `warnings`). The
   policy is keyed on `fromProtocol`: from a web page, `src` must be `https:` or loopback `http:`;
   `file:`/UNC/bare paths are refused (a native caller passes `--allow-local`, which a page cannot).
+  A protocol launch is **transparent by default** (`transparent=0` opts out); on the CLI
+  `--transparent` stays opt-in.
 - `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
   progress for the viewer's toast; a cache hit never touches the network.
 - `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch

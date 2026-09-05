@@ -85,6 +85,9 @@ ResolveAssetExtension(std::string_view url, std::string_view contentType,
             Allowed(".ply", allowed))
             return ".ply";
         if (head[0] == 0x1f && head[1] == 0x8b && Allowed(".spz", allowed)) return ".spz"; // gzip
+        if (head[0] == 'N' && head[1] == 'G' && head[2] == 'S' && head[3] == 'P' &&
+            Allowed(".spz", allowed))
+            return ".spz"; // raw (un-gzipped) spz payload, e.g. splat-transform output
         if (head[0] == 'P' && head[1] == 'K' && Allowed(".usdz", allowed)) return ".usdz"; // zip
     }
     if (!head.empty()) {

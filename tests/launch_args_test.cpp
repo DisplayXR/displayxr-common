@@ -95,6 +95,18 @@ test_protocol_happy_path()
 
     a = P({"displayxr-view://open?src=https%3A%2F%2Fcdn.example.com%2Fm.glb&v=1#frag"});
     CHECK(a.ok() && a.src == "https://cdn.example.com/m.glb", "fragment stripped");
+
+    // Transparent is the protocol's DEFAULT (undock = floating overlay); opt out with =0.
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&v=1"});
+    CHECK(a.ok() && a.transparent, "protocol launch is transparent by default");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&transparent=1&v=1"});
+    CHECK(a.ok() && a.transparent, "transparent=1 explicit");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&transparent=0&v=1"});
+    CHECK(a.ok() && !a.transparent, "transparent=0 opts out (framed window)");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&transparent=maybe&v=1"});
+    CHECK(!a.ok(), "transparent=<garbage> is an error");
+    a = P({"--rect=1,1,100,100"});
+    CHECK(a.ok() && !a.transparent, "CLI stays opt-in (no --transparent => framed)");
 }
 
 static void
