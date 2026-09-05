@@ -154,6 +154,12 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
   `file:`/UNC/bare paths are refused (a native caller passes `--allow-local`, which a page cannot).
   A protocol launch is **transparent by default** (`transparent=0` opts out); on the CLI
   `--transparent` stays opt-in.
+- `dxr::ForceInProcessRuntimeForUndock(args)` — call before `xrCreateInstance`. A protocol handler
+  inherits the browser's environment, and the DisplayXR browser sets `XRT_FORCE_MODE=ipc` for
+  itself; inherited, that makes the viewer an IPC client that is not the panel owner (flips to 2D
+  whenever the browser holds the panel, no drag phase-snap). A protocol or `--transparent` launch
+  pins `XRT_FORCE_MODE=native` and clears `DXR_IPC_FD` / `DISPLAYXR_WORKSPACE_SESSION`; a plain
+  shell-tile launch is left alone.
 - `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
   progress for the viewer's toast; a cache hit never touches the network.
 - `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch

@@ -204,6 +204,36 @@ test_ext_resolution()
           "allowed set is per viewer: spz is not a model");
 }
 
+#if defined(_WIN32)
+static void
+test_force_in_process()
+{
+    // Simulate the browser's inherited environment.
+    SetEnvironmentVariableW(L"XRT_FORCE_MODE", L"ipc");
+    SetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", L"1");
+    LaunchArgs shellTile = P({"C:\\x\\y.glb"});
+    CHECK(!dxr::ForceInProcessRuntimeForUndock(shellTile), "plain launch leaves the env alone");
+    wchar_t buf[64] = {};
+    CHECK(GetEnvironmentVariableW(L"XRT_FORCE_MODE", buf, 64) > 0 && wcscmp(buf, L"ipc") == 0,
+          "plain launch: XRT_FORCE_MODE untouched");
+
+    LaunchArgs proto = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&v=1"});
+    CHECK(dxr::ForceInProcessRuntimeForUndock(proto), "protocol launch overrides inherited ipc");
+    CHECK(GetEnvironmentVariableW(L"XRT_FORCE_MODE", buf, 64) > 0 && wcscmp(buf, L"native") == 0,
+          "protocol launch: XRT_FORCE_MODE=native");
+    CHECK(GetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", buf, 64) == 0,
+          "protocol launch: workspace-session trigger cleared");
+    CHECK(!dxr::ForceInProcessRuntimeForUndock(proto), "second call: nothing left to override");
+
+    SetEnvironmentVariableW(L"XRT_FORCE_MODE", nullptr);
+    LaunchArgs cliT = P({"--transparent", "C:\\x\\y.glb"});
+    dxr::ForceInProcessRuntimeForUndock(cliT);
+    CHECK(GetEnvironmentVariableW(L"XRT_FORCE_MODE", buf, 64) > 0 && wcscmp(buf, L"native") == 0,
+          "--transparent on the CLI also pins native");
+    SetEnvironmentVariableW(L"XRT_FORCE_MODE", nullptr);
+}
+#endif
+
 int
 main()
 {
@@ -211,6 +241,9 @@ main()
     test_protocol_happy_path();
     test_protocol_security();
     test_ext_resolution();
+#if defined(_WIN32)
+    test_force_in_process();
+#endif
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

@@ -639,6 +639,41 @@ NarrowPathForFopen(std::string_view utf8)
 }
 
 /*!
+ * Make sure an undocked viewer runs its OWN in-process compositor.
+ *
+ * A protocol handler is launched by the browser process and inherits its
+ * environment — and the DisplayXR browser sets `XRT_FORCE_MODE=ipc` for
+ * itself. Inherited, that routes the viewer to the service as an IPC
+ * client, where it is not the panel owner: the service denies it the panel
+ * lease, weaves it only while it is focused (the window flips to 2D whenever
+ * the browser holds the panel), the drag phase-snap does not apply, and the
+ * transparent present takes a different route. A floating overlay must be a
+ * standalone session, so when the launch is a protocol launch or asks for
+ * transparency, pin `XRT_FORCE_MODE=native` and clear the other two IPC
+ * triggers the runtime honours (`DXR_IPC_FD`, `DISPLAYXR_WORKSPACE_SESSION`).
+ *
+ * Call BEFORE xrCreateInstance (the runtime DLL snapshots the environment
+ * when it loads). Returns true when something inherited was overridden, so
+ * the caller can log it. A shell-launched tile (no protocol URL, no
+ * `--transparent`) is left alone and keeps its workspace routing.
+ */
+inline bool
+ForceInProcessRuntimeForUndock(const LaunchArgs& a)
+{
+    if (!(a.fromProtocol || a.transparent)) return false;
+    bool overrode = false;
+    wchar_t buf[64] = {};
+    if (GetEnvironmentVariableW(L"XRT_FORCE_MODE", buf, 64) > 0 && wcscmp(buf, L"native") != 0)
+        overrode = true;
+    if (GetEnvironmentVariableW(L"DXR_IPC_FD", buf, 64) > 0) overrode = true;
+    if (GetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", buf, 64) > 0) overrode = true;
+    SetEnvironmentVariableW(L"XRT_FORCE_MODE", L"native");
+    SetEnvironmentVariableW(L"DXR_IPC_FD", nullptr);
+    SetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", nullptr);
+    return overrode;
+}
+
+/*!
  * Parse this process's real command line (`GetCommandLineW`, so non-ASCII
  * paths survive, unlike WinMain's ANSI `lpCmdLine`). Skips argv[0].
  */
