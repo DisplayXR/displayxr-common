@@ -172,7 +172,7 @@ else()
     FetchContent_Declare(
         displayxr_extensions_headers
         GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
-        GIT_TAG 1f931d09234829321011bb2b0f97914d56c7d336
+        GIT_TAG 6fdc449ddb12029ec205a4d99844f039cfe835c0
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
@@ -234,6 +234,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/view_protocol.h    # header-only displayxr-view: registration / sibling forward / single instance (Win32)
     common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
     common/zone_default.h
+    common/clip_policy.h  # header-only: near/far/clipFar from XrRearDepthBudgetDXR (#38)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
