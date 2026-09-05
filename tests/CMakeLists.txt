@@ -12,3 +12,12 @@ set_target_properties(displayxr_common_smoke PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_test(NAME displayxr_common_smoke COMMAND displayxr_common_smoke)
+
+# Launch-contract tests (launch_args.h parser + policy, url_fetch.h pure
+# helpers). Platform-neutral; the security negatives are the contract.
+add_executable(displayxr_launch_args_test launch_args_test.cpp)
+target_link_libraries(displayxr_launch_args_test PRIVATE displayxr::common)
+set_target_properties(displayxr_launch_args_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+add_test(NAME displayxr_launch_args_test COMMAND displayxr_launch_args_test)

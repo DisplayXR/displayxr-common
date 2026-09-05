@@ -228,6 +228,10 @@ set(DISPLAYXR_COMMON_SOURCES
     common/vk_overlay_kit.h   # header-only VK cached-layer-upload + pipelined-readback kit (#837)
     common/vk_clickthrough_region.h # header-only coverage->SetWindowRgn punch-through (#833, Win32)
     common/win_window_drag.h  # header-only RMB window-drag for borderless overlays (Win32)
+    common/launch_args.h      # header-only viewer launch contract: CLI flags + displayxr-view: URL
+    common/url_fetch.cpp      # asset download to a per-user cache (WinHTTP on Windows; pure helpers everywhere)
+    common/url_fetch.h
+    common/view_protocol.h    # header-only displayxr-view: registration / sibling forward / single instance (Win32)
     common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
     common/zone_default.h
 )
@@ -303,7 +307,8 @@ set_target_properties(displayxr_common_lib PROPERTIES
 
 if(WIN32)
     target_link_libraries(displayxr_common_lib PUBLIC
-        d3d11 dxgi d3dcompiler d2d1 dwrite)
+        d3d11 dxgi d3dcompiler d2d1 dwrite
+        winhttp bcrypt shell32) # url_fetch.cpp (WinHTTP + CNG SHA-1), launch_args.h (CommandLineToArgvW)
     # Hybrid-GPU dGPU hint: optimus_dgpu_hint.c defines NvOptimusEnablement /
     # AmdPowerXpressRequestHighPerformance, but a static-library member with no
     # referenced symbols would be discarded — force-include it into every
