@@ -595,8 +595,23 @@ ParseLaunchArgs(const std::vector<std::string>& args)
 
 #include <windows.h>
 #include <shellapi.h>
+#include <stdlib.h> // _putenv_s
+#include <cwctype>  // towlower
 
 namespace dxr {
+
+namespace launch_detail {
+inline bool
+IEqualsAsciiW(std::wstring_view a, const wchar_t* b)
+{
+    const size_t n = wcslen(b);
+    if (a.size() != n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        if (towlower(a[i]) != towlower(b[i])) return false;
+    }
+    return true;
+}
+} // namespace launch_detail
 
 inline std::string
 Utf8FromWide(std::wstring_view w)
@@ -667,10 +682,101 @@ ForceInProcessRuntimeForUndock(const LaunchArgs& a)
         overrode = true;
     if (GetEnvironmentVariableW(L"DXR_IPC_FD", buf, 64) > 0) overrode = true;
     if (GetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", buf, 64) > 0) overrode = true;
+    // Both channels, on purpose. The runtime reads getenv() FIRST and falls back
+    // to GetEnvironmentVariableA only when getenv returns NULL. With a dynamic
+    // CRT shared between this exe and the runtime DLL, getenv serves the CRT's
+    // copy of the environment, snapshotted at PROCESS start — so the inherited
+    // "ipc" would still win after a bare SetEnvironmentVariable. _putenv_s
+    // updates the CRT copy (and, for a shared CRT, the DLL's view of it);
+    // SetEnvironmentVariable updates the Win32 block a static-CRT DLL snapshots
+    // when it loads. Verified on the panel box: SetEnvironmentVariable alone left
+    // the viewer on the IPC path.
+    _putenv_s("XRT_FORCE_MODE", "native");
+    _putenv_s("DXR_IPC_FD", "");
+    _putenv_s("DISPLAYXR_WORKSPACE_SESSION", "");
     SetEnvironmentVariableW(L"XRT_FORCE_MODE", L"native");
     SetEnvironmentVariableW(L"DXR_IPC_FD", nullptr);
     SetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", nullptr);
     return overrode;
+}
+
+namespace launch_detail {
+
+inline bool
+InheritedIpcRouting()
+{
+    wchar_t buf[64] = {};
+    if (GetEnvironmentVariableW(L"XRT_FORCE_MODE", buf, 64) > 0 && wcscmp(buf, L"native") != 0)
+        return true;
+    if (GetEnvironmentVariableW(L"DXR_IPC_FD", buf, 64) > 0) return true;
+    if (GetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", buf, 64) > 0) return true;
+    return false;
+}
+
+//! Copy of this process's environment block with the IPC triggers removed,
+//! `XRT_FORCE_MODE=native` and `DXR_UNDOCK_REEXEC=1` added. Double-NUL
+//! terminated, ready for CreateProcessW(CREATE_UNICODE_ENVIRONMENT).
+inline std::wstring
+ScrubbedEnvironmentBlock()
+{
+    std::wstring out;
+    LPWCH env = GetEnvironmentStringsW();
+    if (env) {
+        for (const wchar_t* p = env; *p; p += wcslen(p) + 1) {
+            std::wstring_view kv(p);
+            const size_t eq = kv.find(L'=', 1); // "=C:=..." drive entries start with '='
+            std::wstring_view key = kv.substr(0, eq);
+            if (IEqualsAsciiW(key, L"XRT_FORCE_MODE") || IEqualsAsciiW(key, L"DXR_IPC_FD") ||
+                IEqualsAsciiW(key, L"DISPLAYXR_WORKSPACE_SESSION") || IEqualsAsciiW(key, L"DXR_UNDOCK_REEXEC"))
+                continue;
+            out.append(kv);
+            out.push_back(L'\0');
+        }
+        FreeEnvironmentStringsW(env);
+    }
+    out.append(L"XRT_FORCE_MODE=native");
+    out.push_back(L'\0');
+    out.append(L"DXR_UNDOCK_REEXEC=1");
+    out.push_back(L'\0');
+    out.push_back(L'\0');
+    return out;
+}
+
+} // namespace launch_detail
+
+/*!
+ * If this undock launch inherited IPC routing (the browser's
+ * `XRT_FORCE_MODE=ipc`, a workspace session, an adopted service socket),
+ * re-launch this exe ONCE with a scrubbed environment and return true so the
+ * caller exits. Setting variables in place is not enough: the runtime DLL
+ * links the dynamic CRT, whose environment copy is snapshotted at process
+ * start, and its getenv() is consulted before the Win32 block — verified on
+ * the panel box, where an in-place override still produced an IPC client.
+ * A child that starts with the clean block has no such copy to be stale.
+ * Loop-guarded by `DXR_UNDOCK_REEXEC`. Call before creating any window.
+ */
+inline bool
+ReexecWithCleanRuntimeEnvIfNeeded(const LaunchArgs& a)
+{
+    using namespace launch_detail;
+    if (!(a.fromProtocol || a.transparent)) return false;
+    if (!InheritedIpcRouting()) return false;
+    wchar_t guard[8] = {};
+    if (GetEnvironmentVariableW(L"DXR_UNDOCK_REEXEC", guard, 8) > 0) return false;
+
+    std::wstring env = ScrubbedEnvironmentBlock();
+    std::wstring cmd = GetCommandLineW();
+    wchar_t exe[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(sizeof(exe) / sizeof(exe[0])));
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                                   env.data(), nullptr, &si, &pi);
+    if (!ok) return false; // fall through and run here; the in-place override is the fallback
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 }
 
 /*!

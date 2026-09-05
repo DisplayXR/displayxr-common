@@ -159,7 +159,11 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
   itself; inherited, that makes the viewer an IPC client that is not the panel owner (flips to 2D
   whenever the browser holds the panel, no drag phase-snap). A protocol or `--transparent` launch
   pins `XRT_FORCE_MODE=native` and clears `DXR_IPC_FD` / `DISPLAYXR_WORKSPACE_SESSION`; a plain
-  shell-tile launch is left alone.
+  shell-tile launch is left alone. Pair it with `dxr::ReexecWithCleanRuntimeEnvIfNeeded(args)`
+  (call first; exit if it returns true): an in-place override is not enough because the runtime
+  DLL's dynamic CRT snapshots the environment at process start and its `getenv` wins, so a launch
+  that inherited IPC routing re-launches itself once with a scrubbed block (`DXR_UNDOCK_REEXEC=1`
+  guards the loop).
 - `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
   progress for the viewer's toast; a cache hit never touches the network.
 - `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch
