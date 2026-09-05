@@ -26,6 +26,7 @@
  *   --vh=<metres>          virtual display height the asset was authored at
  *   --title=<suffix>       appended to the viewer's window title, never replaces it
  *   --type=model|splat     which viewer the launch is meant for (routing hint)
+ *   --env=studio|sky|none  lighting the sender rendered with, so the undocked view matches
  *   --dpr=<float>          the launching page's devicePixelRatio (logged only)
  *   --max-bytes=<n>        download cap (default 256 MiB)
  *   --no-cache             bypass the download cache (dev aid)
@@ -34,7 +35,7 @@
  * The protocol form carries the same fields as a query string:
  *
  *   displayxr-view://open?src=<pct>&type=model|splat&rect=X,Y,W,H&vh=0.2
- *                        &dpr=2.5&title=<pct>&transparent=1&v=1
+ *                        &dpr=2.5&title=<pct>&env=studio&transparent=1&v=1
  *
  * `open` is the AUTHORITY (verb), leaving room for future verbs; `v=1` lets an
  * old handler reject a future grammar loudly instead of half-honouring it.
@@ -98,6 +99,9 @@ struct LaunchArgs {
 
     std::string title; //!< window-title SUFFIX, control chars stripped, <= 64 bytes
     std::string type;  //!< lower-case routing hint ("model", "splat", ""), <= 16 chars
+    //! Lighting/environment hint the sender rendered with ("studio", "sky", "none", ""),
+    //! lower-case, <= 16 chars, so the undocked view matches the page. Viewers map it.
+    std::string env;
 
     uint64_t maxBytes = 256ull << 20;
     bool noCache = false;
@@ -369,6 +373,10 @@ ApplyKeyValue(std::string_view key, std::string_view value, LaunchArgs& a, const
         std::string t(value);
         for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         a.type = t;
+    } else if (key == "env") {
+        std::string e(value);
+        for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        a.env = e;
     } else if (key == "max-bytes") {
         uint64_t n = 0;
         if (!ParseU64(value, n)) {
@@ -532,6 +540,16 @@ ApplyPolicy(LaunchArgs& a)
             a.type.clear();
         }
     }
+    if (!a.env.empty()) {
+        bool clean = a.env.size() <= 16;
+        for (unsigned char c : a.env) {
+            if (!(std::islower(c) || std::isdigit(c) || c == '-')) clean = false;
+        }
+        if (!clean) {
+            a.warnings.push_back("env: not a short lower-case token, ignored");
+            a.env.clear();
+        }
+    }
     const uint64_t kMinBytes = 1ull << 20, kMaxBytes = 4ull << 30;
     if (a.maxBytes < kMinBytes) a.maxBytes = kMinBytes;
     if (a.maxBytes > kMaxBytes) a.maxBytes = kMaxBytes;
@@ -571,7 +589,7 @@ ParseLaunchArgs(const std::vector<std::string>& args)
                 else if (key == "no-cache") a.noCache = true;
                 else if (key == "allow-local") a.allowLocal = true;
                 else if (key == "src" || key == "rect" || key == "vh" || key == "dpr" ||
-                         key == "title" || key == "type" || key == "max-bytes")
+                         key == "title" || key == "type" || key == "env" || key == "max-bytes")
                     a.errors.push_back("cli: --" + std::string(key) + " needs =value");
                 else a.warnings.push_back("cli: unknown flag '" + tok + "' ignored");
             } else {
