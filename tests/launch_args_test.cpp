@@ -223,7 +223,42 @@ test_force_in_process()
           "protocol launch: XRT_FORCE_MODE=native");
     CHECK(GetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", buf, 64) == 0,
           "protocol launch: workspace-session trigger cleared");
+    // The CRT's own copy must agree — that is what the runtime's getenv() reads first.
+    const char* crt = std::getenv("XRT_FORCE_MODE");
+    CHECK(crt && std::string(crt) == "native", "protocol launch: CRT getenv sees native too");
+    const char* ws = std::getenv("DISPLAYXR_WORKSPACE_SESSION");
+    CHECK(ws == nullptr || ws[0] == '\0', "protocol launch: CRT getenv no longer sees the workspace trigger");
     CHECK(!dxr::ForceInProcessRuntimeForUndock(proto), "second call: nothing left to override");
+
+    // The re-exec path: a scrubbed block drops the IPC triggers, pins native, adds the guard.
+    SetEnvironmentVariableW(L"XRT_FORCE_MODE", L"ipc");
+    SetEnvironmentVariableW(L"DXR_IPC_FD", L"7");
+    SetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", L"1");
+    SetEnvironmentVariableW(L"DXR_UNDOCK_KEEP_ME", L"yes");
+    CHECK(dxr::launch_detail::InheritedIpcRouting(), "inherited ipc detected");
+    {
+        const std::wstring block = dxr::launch_detail::ScrubbedEnvironmentBlock();
+        std::vector<std::wstring> entries;
+        for (const wchar_t* p = block.c_str(); *p; p += wcslen(p) + 1) entries.emplace_back(p);
+        auto has = [&](const wchar_t* prefix) {
+            for (const std::wstring& e : entries)
+                if (e.rfind(prefix, 0) == 0) return true;
+            return false;
+        };
+        CHECK(has(L"XRT_FORCE_MODE=native"), "scrubbed block pins native");
+        CHECK(has(L"DXR_UNDOCK_REEXEC=1"), "scrubbed block carries the loop guard");
+        CHECK(!has(L"DXR_IPC_FD="), "scrubbed block drops DXR_IPC_FD");
+        CHECK(!has(L"DISPLAYXR_WORKSPACE_SESSION="), "scrubbed block drops the workspace trigger");
+        CHECK(has(L"DXR_UNDOCK_KEEP_ME=yes"), "scrubbed block keeps unrelated variables");
+        CHECK(block.size() >= 2 && block[block.size() - 1] == L'\0' && block[block.size() - 2] == L'\0',
+              "scrubbed block is double-NUL terminated");
+    }
+    SetEnvironmentVariableW(L"DXR_UNDOCK_REEXEC", L"1");
+    CHECK(!dxr::ReexecWithCleanRuntimeEnvIfNeeded(proto), "loop guard: no second re-exec");
+    SetEnvironmentVariableW(L"DXR_UNDOCK_REEXEC", nullptr);
+    SetEnvironmentVariableW(L"DXR_IPC_FD", nullptr);
+    SetEnvironmentVariableW(L"DISPLAYXR_WORKSPACE_SESSION", nullptr);
+    SetEnvironmentVariableW(L"DXR_UNDOCK_KEEP_ME", nullptr);
 
     SetEnvironmentVariableW(L"XRT_FORCE_MODE", nullptr);
     LaunchArgs cliT = P({"--transparent", "C:\\x\\y.glb"});
