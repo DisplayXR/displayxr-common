@@ -234,6 +234,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/view_protocol.h    # header-only displayxr-view: registration / sibling forward / single instance (Win32)
     common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
     common/zone_default.h
+    common/clip_policy.h  # header-only: near/far/clipFar from XrRearDepthBudgetDXR (#38)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

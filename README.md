@@ -132,6 +132,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Viewer launch contract: `--transparent/--rect/--src/--vh/...` flags + the `displayxr-view:` URL, parsed and policy-checked (loopback-only http, no local files from a protocol launch) | `launch_args.h` | both (Win32 command-line entry) |
 | Asset download to `%LOCALAPPDATA%\DisplayXR\<app>\cache\<sha1>.<ext>` (WinHTTP, size cap, no downgrade redirects, extension from path/Content-Type/magic) | `url_fetch.{h,cpp}` | Windows (pure helpers: both) |
 | `displayxr-view:` protocol: per-user self-registration, sibling-viewer forward by `type=`, single-instance `WM_COPYDATA` hand-off | `view_protocol.h` | Windows |
+| Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -181,6 +182,40 @@ The security negatives in `tests/launch_args_test.cpp` are the contract.
 - demos: their vendored `openxr_includes/` (keep it refreshed from [displayxr-extensions](https://github.com/DisplayXR/displayxr-extensions))
 
 When unset (this repo's own CI), the build fetches `displayxr-extensions` at a pinned commit. When the consumer's dir also carries the full Khronos set (every current consumer's does), it wins the include order, so lib TUs and app TUs compile against the same `openxr.h`.
+
+> **`XR_DXR_depth_budget.h` (below) needs a newer pin.** It ships from
+> `displayxr-runtime` PR [#1366](https://github.com/DisplayXR/displayxr-runtime/pull/1366) and auto-syncs to
+> `displayxr-extensions` only once that PR merges to `main`. Until this repo's pinned
+> `GIT_TAG` (the `displayxr_extensions_headers` `FetchContent_Declare` above) is bumped past that
+> sync in a follow-up commit, this repo's own standalone CI build (and any consumer relying on the
+> pinned fallback rather than `DISPLAYXR_EXTENSIONS_INCLUDE_DIR`) will fail to find the header.
+
+### Rear-depth-budget clip policy (`clip_policy.h`)
+
+`dxr::ResolveClipPlanes()` is the one place that turns the runtime's advisory `XR_DXR_depth_budget`
+rear-depth budget (see runtime PR [#1366](https://github.com/DisplayXR/displayxr-runtime/pull/1366)) —
+or its absence, on an older runtime / an app that hasn't opted in — into an eye's near/far
+clip planes and the shader/rasterizer far-cull value — replacing the hand-rolled "clip the far plane
+at the ZDP when transparent and standalone" block every transparent demo used to carry. Pure,
+stateless, and does no smoothing of its own (the runtime already time-ramps the budget so the clip
+plane glides, not pops):
+
+```cpp
+XrRearDepthBudgetDXR budgetStorage;
+dxr::ChainRearDepthBudget(viewState, budgetStorage);   // before xrLocateViews, once per XrViewState
+xrLocateViews(session, &locateInfo, &viewState, viewCount, &viewCountOutput, views);
+const XrRearDepthBudgetDXR* budget =
+    (budgetStorage.type == XR_TYPE_REAR_DEPTH_BUDGET_DXR) ? &budgetStorage : nullptr;
+
+dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vHeight, budget, transparent, standalone);
+// clip.near_z / clip.far_z feed the projection matrix; clip.clipFar (0 = no cull) feeds
+// the shader/rasterizer far-cull the transparent demos already carry.
+```
+
+`budget == nullptr` — no `XR_DXR_depth_budget` support, the app didn't enable it, or the chained
+struct came back untouched — reproduces today's rule bit-for-bit: `farOffsetVH = (transparent &&
+standalone) ? 0 : 1000`. `dxr::RearDepthBudgetStateName()` gives HUD/log code a human-readable name
+for `budget->state`.
 
 ## Integration
 

@@ -23,6 +23,7 @@
 #include "atlas_capture.h"
 #include "auto_fit.h"
 #include "auto_fit_canvas.h"
+#include "clip_policy.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
@@ -518,6 +519,105 @@ static void test_rig_math()
     CHECK(dxr_display3d_selftest() == 0, "dxr_display3d_selftest (incl. rig equivalence) reported failures");
 }
 
+// dxr::ResolveClipPlanes / ChainRearDepthBudget / RearDepthBudgetStateName
+// (clip_policy.h, #38). Pure, deterministic; the math mirrors
+// dxr_display3d_compute_view's ZDP-relative near/far derivation.
+static void test_clip_policy()
+{
+    const float EPS = 1e-4f;
+    auto near_eq = [&](float a, float b) { return a > b - EPS && a < b + EPS; };
+
+    const float ez = 0.65f;
+    const float vH = 0.3f;
+
+    // No budget (older runtime / extension not enabled): transparent +
+    // standalone reproduces today's hard ZDP clip bit-for-bit.
+    {
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vH, nullptr, /*transparent=*/true, /*standalone=*/true);
+        CHECK(near_eq(clip.farOffsetVH, 0.0f), "no budget + transparent + standalone -> farOffsetVH 0");
+        CHECK(near_eq(clip.near_z, ez - vH), "near_z = ez - vH");
+        CHECK(near_eq(clip.far_z, ez), "far_z = ez when farOffsetVH is 0");
+        CHECK(near_eq(clip.clipFar, clip.far_z), "clipFar must equal far_z when clipping");
+    }
+
+    // No budget, but NOT (transparent && standalone): unrestricted, no cull.
+    {
+        dxr::ClipPlanes clipOpaque = dxr::ResolveClipPlanes(ez, vH, nullptr, /*transparent=*/false, /*standalone=*/true);
+        CHECK(near_eq(clipOpaque.farOffsetVH, 1000.0f), "opaque session -> unrestricted farOffsetVH");
+        CHECK(clipOpaque.clipFar == 0.0f, "opaque session must never cull");
+
+        dxr::ClipPlanes clipWorkspace = dxr::ResolveClipPlanes(ez, vH, nullptr, /*transparent=*/true, /*standalone=*/false);
+        CHECK(near_eq(clipWorkspace.farOffsetVH, 1000.0f), "under-workspace session -> unrestricted farOffsetVH");
+        CHECK(clipWorkspace.clipFar == 0.0f, "under-workspace session must never cull");
+    }
+
+    // A budget overrides the fallback rule outright, including for a
+    // standalone transparent session (the runtime decided it can open up).
+    {
+        XrRearDepthBudgetDXR budget{};
+        budget.type = (XrStructureType)XR_TYPE_REAR_DEPTH_BUDGET_DXR;
+        budget.farOffsetVH = 4.0f;
+        budget.state = XR_REAR_DEPTH_BUDGET_STATE_OPEN_DXR;
+
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vH, &budget, /*transparent=*/true, /*standalone=*/true);
+        CHECK(near_eq(clip.farOffsetVH, 4.0f), "budget's farOffsetVH must be used as-is (no smoothing)");
+        CHECK(near_eq(clip.far_z, ez + 4.0f * vH), "far_z = ez + farOffsetVH * vH");
+        CHECK(clip.clipFar != 0.0f, "still clips (farOffsetVH < 1000) while the budget is finite");
+    }
+
+    // farOffsetVH >= 1000 (unrestricted) must disable the hard clip even with
+    // a budget present.
+    {
+        XrRearDepthBudgetDXR budget{};
+        budget.type = (XrStructureType)XR_TYPE_REAR_DEPTH_BUDGET_DXR;
+        budget.farOffsetVH = 1000.0f;
+        budget.state = XR_REAR_DEPTH_BUDGET_STATE_UNRESTRICTED_WORKSPACE_DXR;
+
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vH, &budget, /*transparent=*/true, /*standalone=*/false);
+        CHECK(clip.clipFar == 0.0f, "farOffsetVH >= 1000 must never cull");
+    }
+
+    // Near-degenerate eye distance: clipFar must not fire at/behind the near
+    // plane (the demos' existing ez > 0.2 guard), even while clipping is
+    // otherwise active.
+    {
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(/*ez=*/0.1f, vH, nullptr, /*transparent=*/true, /*standalone=*/true);
+        CHECK(clip.clipFar == 0.0f, "clipFar must not fire when ez <= 0.2");
+        CHECK(clip.near_z >= 1.0e-4f, "near_z must stay positive");
+    }
+
+    // Degenerate near/far ordering never inverts: far_z is always > near_z.
+    {
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(/*ez=*/1.0e-5f, /*vH=*/1.0f, nullptr, false, false);
+        CHECK(clip.far_z > clip.near_z, "far_z must stay strictly past near_z even at a degenerate eye distance");
+    }
+
+    // ChainRearDepthBudget: links onto XrViewState::next, preserves an
+    // existing chain, and stamps the correct type.
+    {
+        int sentinelChain = 0;
+        XrViewState vs{XR_TYPE_VIEW_STATE, &sentinelChain, 0};
+        XrRearDepthBudgetDXR out;
+        CHECK(dxr::ChainRearDepthBudget(vs, out), "ChainRearDepthBudget must succeed");
+        CHECK(out.type == XR_TYPE_REAR_DEPTH_BUDGET_DXR, "chained struct must carry the extension's type");
+        CHECK(vs.next == &out, "XrViewState::next must point at the chained struct");
+        CHECK(out.next == &sentinelChain, "the chained struct must preserve the prior chain");
+    }
+
+    // RearDepthBudgetStateName: every enumerator gets a distinct, non-null name.
+    {
+        CHECK(std::string(dxr::RearDepthBudgetStateName(XR_REAR_DEPTH_BUDGET_STATE_UNRESTRICTED_OPAQUE_DXR)) ==
+                  "UnrestrictedOpaque",
+              "state name: UnrestrictedOpaque");
+        CHECK(std::string(dxr::RearDepthBudgetStateName(XR_REAR_DEPTH_BUDGET_STATE_OPEN_DXR)) == "Open",
+              "state name: Open");
+        CHECK(std::string(dxr::RearDepthBudgetStateName(XR_REAR_DEPTH_BUDGET_STATE_FORCED_DXR)) == "Forced",
+              "state name: Forced");
+        CHECK(std::string(dxr::RearDepthBudgetStateName(XR_REAR_DEPTH_BUDGET_STATE_MAX_ENUM_DXR)) == "Unknown",
+              "state name: unrecognized value falls back to Unknown");
+    }
+}
+
 int main()
 {
     test_capture_numbering();
@@ -530,6 +630,7 @@ int main()
     test_window_space_hud_types();
     test_mode_switch();
     test_rig_math();
+    test_clip_policy();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();
