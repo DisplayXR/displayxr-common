@@ -107,6 +107,13 @@ test_protocol_happy_path()
     CHECK(!a.ok(), "transparent=<garbage> is an error");
     a = P({"--rect=1,1,100,100"});
     CHECK(a.ok() && !a.transparent, "CLI stays opt-in (no --transparent => framed)");
+
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&env=Studio&v=1"});
+    CHECK(a.ok() && a.env == "studio", "env hint lower-cased");
+    a = P({"--env=sky", "C:\x.glb"});
+    CHECK(a.ok() && a.env == "sky", "--env on the CLI");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&env=%3Cscript%3E&v=1"});
+    CHECK(a.ok() && a.env.empty() && !a.warnings.empty(), "garbage env is dropped with a warning, not fatal");
 }
 
 static void
