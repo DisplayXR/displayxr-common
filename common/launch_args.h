@@ -27,6 +27,8 @@
  *   --title=<suffix>       appended to the viewer's window title, never replaces it
  *   --type=model|splat     which viewer the launch is meant for (routing hint)
  *   --env=studio|sky|none  lighting the sender rendered with, so the undocked view matches
+ *   --pose=YAW,PITCH[,ZOOM] opening orbit (degrees, SDK convention; zoom = fit multiplier)
+ *   --margin=<0..1>        fraction of the window the framed asset may fill (sender's fit margin)
  *   --dpr=<float>          the launching page's devicePixelRatio (logged only)
  *   --max-bytes=<n>        download cap (default 256 MiB)
  *   --no-cache             bypass the download cache (dev aid)
@@ -35,7 +37,8 @@
  * The protocol form carries the same fields as a query string:
  *
  *   displayxr-view://open?src=<pct>&type=model|splat&rect=X,Y,W,H&vh=0.2
- *                        &dpr=2.5&title=<pct>&env=studio&transparent=1&v=1
+ *                        &dpr=2.5&title=<pct>&env=studio&pose=-40,10&margin=0.8
+ *                        &transparent=1&v=1
  *
  * `open` is the AUTHORITY (verb), leaving room for future verbs; `v=1` lets an
  * old handler reject a future grammar loudly instead of half-honouring it.
@@ -102,6 +105,18 @@ struct LaunchArgs {
     //! Lighting/environment hint the sender rendered with ("studio", "sky", "none", ""),
     //! lower-case, <= 16 chars, so the undocked view matches the page. Viewers map it.
     std::string env;
+
+    //! Opening orbit pose the sender showed the asset at, so the undocked view opens at the
+    //! same angle: yaw about the vertical axis and pitch above the horizon, degrees, in the
+    //! web SDK's convention (`setPose({yaw, pitch, zoom})`); zoom is a multiplier on the fit.
+    bool hasPose = false;
+    float poseYawDeg = 0.f;
+    float posePitchDeg = 0.f;
+    float poseZoom = 1.f;
+
+    //! Fraction of the window the framed asset may fill (the sender's fit margin), (0, 1].
+    bool hasMargin = false;
+    float margin = 0.f;
 
     uint64_t maxBytes = 256ull << 20;
     bool noCache = false;
@@ -373,6 +388,36 @@ ApplyKeyValue(std::string_view key, std::string_view value, LaunchArgs& a, const
         std::string t(value);
         for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         a.type = t;
+    } else if (key == "pose") {
+        float parts[3] = {0.f, 0.f, 1.f};
+        size_t start = 0;
+        int k = 0;
+        bool ok = true;
+        while (k < 3) {
+            const size_t comma = value.find(',', start);
+            const std::string_view piece =
+                value.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+            if (!ParseFloat(piece, parts[k])) { ok = false; break; }
+            ++k;
+            if (comma == std::string_view::npos) break;
+            start = comma + 1;
+        }
+        if (!ok || k < 2) {
+            a.warnings.push_back(std::string(where) + ": pose must be YAW,PITCH[,ZOOM] degrees; ignored");
+        } else {
+            a.hasPose = true;
+            a.poseYawDeg = parts[0];
+            a.posePitchDeg = parts[1];
+            a.poseZoom = parts[2];
+        }
+    } else if (key == "margin") {
+        float f = 0.f;
+        if (!ParseFloat(value, f)) {
+            a.warnings.push_back(std::string(where) + ": margin is not a number; ignored");
+        } else {
+            a.hasMargin = true;
+            a.margin = f;
+        }
     } else if (key == "env") {
         std::string e(value);
         for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -540,6 +585,23 @@ ApplyPolicy(LaunchArgs& a)
             a.type.clear();
         }
     }
+    if (a.hasPose) {
+        const bool sane = std::isfinite(a.poseYawDeg) && std::isfinite(a.posePitchDeg) &&
+                          a.posePitchDeg >= -90.f && a.posePitchDeg <= 90.f && a.poseZoom > 0.f &&
+                          a.poseZoom <= 100.f;
+        if (!sane) {
+            a.warnings.push_back("pose: out of range, ignored");
+            a.hasPose = false;
+        } else {
+            // Normalise yaw into (-180, 180].
+            while (a.poseYawDeg > 180.f) a.poseYawDeg -= 360.f;
+            while (a.poseYawDeg <= -180.f) a.poseYawDeg += 360.f;
+        }
+    }
+    if (a.hasMargin && !(a.margin > 0.f && a.margin <= 1.f)) {
+        a.warnings.push_back("margin: must be in (0, 1], ignored");
+        a.hasMargin = false;
+    }
     if (!a.env.empty()) {
         bool clean = a.env.size() <= 16;
         for (unsigned char c : a.env) {
@@ -589,7 +651,8 @@ ParseLaunchArgs(const std::vector<std::string>& args)
                 else if (key == "no-cache") a.noCache = true;
                 else if (key == "allow-local") a.allowLocal = true;
                 else if (key == "src" || key == "rect" || key == "vh" || key == "dpr" ||
-                         key == "title" || key == "type" || key == "env" || key == "max-bytes")
+                         key == "title" || key == "type" || key == "env" || key == "pose" ||
+                         key == "margin" || key == "max-bytes")
                     a.errors.push_back("cli: --" + std::string(key) + " needs =value");
                 else a.warnings.push_back("cli: unknown flag '" + tok + "' ignored");
             } else {

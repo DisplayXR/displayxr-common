@@ -154,7 +154,9 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
   policy is keyed on `fromProtocol`: from a web page, `src` must be `https:` or loopback `http:`;
   `file:`/UNC/bare paths are refused (a native caller passes `--allow-local`, which a page cannot).
   A protocol launch is **transparent by default** (`transparent=0` opts out); on the CLI
-  `--transparent` stays opt-in.
+  `--transparent` stays opt-in. `env=` carries the sender's lighting, `pose=YAW,PITCH[,ZOOM]` its
+  opening orbit (SDK `setPose` convention) and `margin=` its fit fraction, so the undocked view
+  opens looking like the tile it came from.
 - `dxr::ForceInProcessRuntimeForUndock(args)` — call before `xrCreateInstance`. A protocol handler
   inherits the browser's environment, and the DisplayXR browser sets `XRT_FORCE_MODE=ipc` for
   itself; inherited, that makes the viewer an IPC client that is not the panel owner (flips to 2D
