@@ -135,19 +135,25 @@ EnsureViewProtocolRegistered(const std::wstring& exe, const wchar_t* friendlyNam
 
 /*!
  * Locate a sibling viewer by its install breadcrumb
- * (`HKLM\Software\DisplayXR\Demos\<demoKey>\InstallPath` + `exeName`). Empty
- * when not installed.
+ * (`Software\DisplayXR\Demos\<demoKey>\InstallPath` + `exeName`). The
+ * per-user hive (HKCU) is consulted FIRST so a dev build can be routed to
+ * without touching the machine-wide install — the same precedence the
+ * workspace manifests use (`%LOCALAPPDATA%` over `%ProgramData%`). Then HKLM
+ * (what the installers write). Empty when neither resolves to an existing exe.
  */
 inline std::wstring
 FindSiblingViewer(const wchar_t* demoKey, const wchar_t* exeName)
 {
     using namespace view_protocol_detail;
     const std::wstring key = std::wstring(L"Software\\DisplayXR\\Demos\\") + demoKey;
-    std::wstring dir = ReadRegSz(HKEY_LOCAL_MACHINE, key, L"InstallPath");
-    if (dir.empty()) return {};
-    if (dir.back() != L'\\') dir.push_back(L'\\');
-    const std::wstring exe = dir + exeName;
-    return FileExistsW(exe) ? exe : std::wstring{};
+    for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        std::wstring dir = ReadRegSz(root, key, L"InstallPath");
+        if (dir.empty()) continue;
+        if (dir.back() != L'\\') dir.push_back(L'\\');
+        const std::wstring exe = dir + exeName;
+        if (FileExistsW(exe)) return exe;
+    }
+    return {};
 }
 
 /*!

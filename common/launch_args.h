@@ -34,10 +34,13 @@
  * The protocol form carries the same fields as a query string:
  *
  *   displayxr-view://open?src=<pct>&type=model|splat&rect=X,Y,W,H&vh=0.2
- *                        &dpr=2.5&title=<pct>&v=1
+ *                        &dpr=2.5&title=<pct>&transparent=1&v=1
  *
  * `open` is the AUTHORITY (verb), leaving room for future verbs; `v=1` lets an
  * old handler reject a future grammar loudly instead of half-honouring it.
+ * A protocol launch is TRANSPARENT by default — undocking into a floating
+ * overlay is what the scheme exists for — and `transparent=0` opts out for a
+ * framed, positionable window. On the CLI, `--transparent` stays opt-in.
  * Every value is percent-encoded by the sender (`encodeURIComponent`); only
  * `%XX` is decoded here — `+` is NOT a space.
  *
@@ -373,6 +376,12 @@ ApplyKeyValue(std::string_view key, std::string_view value, LaunchArgs& a, const
         } else {
             a.maxBytes = n;
         }
+    } else if (key == "transparent") {
+        // Protocol form: launches are transparent BY DEFAULT (undocking is the whole point of
+        // the scheme); `transparent=0` opts out for a framed, positionable window.
+        if (value.empty() || value == "1" || IEqualsAscii(value, "true")) a.transparent = true;
+        else if (value == "0" || IEqualsAscii(value, "false")) a.transparent = false;
+        else a.errors.push_back(std::string(where) + ": transparent must be 0 or 1");
     } else if (key == "v") {
         int32_t v = 0;
         if (!ParseInt32(value, v) || v < 1) {
@@ -394,6 +403,7 @@ ParseProtocolUrl(std::string_view url, LaunchArgs& a)
 {
     a.fromProtocol = true;
     a.protocolUrl = std::string(url);
+    a.transparent = true; // the protocol's default; `transparent=0` in the query opts out
     if (url.size() > kMaxProtocolUrlBytes) {
         a.errors.push_back("protocol: URL longer than 2048 bytes");
         return;
