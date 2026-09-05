@@ -114,6 +114,19 @@ test_protocol_happy_path()
     CHECK(a.ok() && a.env == "sky", "--env on the CLI");
     a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&env=%3Cscript%3E&v=1"});
     CHECK(a.ok() && a.env.empty() && !a.warnings.empty(), "garbage env is dropped with a warning, not fatal");
+
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&pose=-40,10&margin=0.8&v=1"});
+    CHECK(a.ok() && a.hasPose && a.poseYawDeg == -40.f && a.posePitchDeg == 10.f && a.poseZoom == 1.f,
+          "pose yaw,pitch parsed, zoom defaults to 1");
+    CHECK(a.hasMargin && a.margin > 0.79f && a.margin < 0.81f, "margin parsed");
+    a = P({"--pose=200,5,1.5", "C:/x.glb"});
+    CHECK(a.ok() && a.hasPose && a.poseYawDeg == -160.f && a.poseZoom == 1.5f, "CLI pose, yaw normalised to (-180,180]");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&pose=1&v=1"});
+    CHECK(a.ok() && !a.hasPose && !a.warnings.empty(), "one-component pose is dropped with a warning");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&pose=0,120&v=1"});
+    CHECK(a.ok() && !a.hasPose, "pitch beyond 90 is dropped");
+    a = P({"displayxr-view://open?src=https%3A%2F%2Fh%2Fx.glb&margin=1.7&v=1"});
+    CHECK(a.ok() && !a.hasMargin, "margin > 1 is dropped");
 }
 
 static void
