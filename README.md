@@ -134,6 +134,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | `displayxr-view:` protocol: per-user self-registration, sibling-viewer forward by `type=`, single-instance `WM_COPYDATA` hand-off | `view_protocol.h` | Windows |
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
+| Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -300,6 +301,83 @@ EndFrame(xr, displayTime, views, viewCount, /*projectionLayerFlags=*/0,
 It is appended as the true *last* parameter of both functions (after `extraLayerCount` on
 `EndFrameWithWindowSpaceLayers`, not next to `projectionNext`) so every pre-existing call site —
 including ones passing later positional arguments — keeps compiling unchanged.
+
+### Content mask (v3) (`content_mask.h`, `XR_DXR_depth_budget` v3)
+
+A rect is still mostly background. A zone-clamped box around a character is roughly two-thirds
+pixels the model never covers, and any horizontal structure sitting in that surplus closes the
+clip for content that never overlapped it. `XrContentMaskDXR` (SPEC_VERSION 3, chained on
+`XrFrameEndInfo::next` in `xrEndFrame`, beside or instead of `XrContentBoundsDXR`) replaces the
+box with the **silhouette** — the union over all views of where the app's content actually lands,
+as a small occupancy grid.
+
+The app produces nothing new for this. A transparent app already derives exactly that artefact
+every frame, from its own rendered alpha, to build its click-through window region.
+`dxr::ContentMaskFromCoverage()` is an any-coverage (max-filter) downsample of that existing
+coverage buffer onto the extension's cell grid; `dxr::ChainContentMask()` attaches it:
+
+```cpp
+// cov: 1 byte per pixel, nonzero = covered, row-major, top-left origin.
+std::vector<uint8_t> cells;                      // must outlive xrEndFrame
+dxr::ContentMaskFromCoverage(cov, covW, covH, /*srcStride=*/covW,
+                             windowW, windowH, /*srcRectPx=*/nullptr,  // whole window
+                             64, 64, cells);
+if (dxr::ContentMaskCoverageCells(cells) != 0) {  // 0 => the runtime reads it as absent
+    XrContentMaskDXR mask;
+    dxr::ChainContentMask(frameEndInfo, mask, cells, 64, 64);
+}
+xrEndFrame(session, &frameEndInfo);
+```
+
+**Grid convention and sizing.** Row-major, top-left origin, window-client-normalised: cell
+`(x, y)` covers `[x/width, (x+1)/width) x [y/height, (y+1)/height)` of the app window's *client*
+rect — the same frame as `XrContentBoundsDXR::bounds` after `RebaseZoneBoundsToWindow()`. The
+extension allows 1..512 cells per side; the recommendation is **256x256 maximum**, and in
+practice **the app's own coverage buffer downsampled by 4-8x** (a 480x270 click-through raster
+→ a 120x68 or 60x34 grid). Finer buys nothing: the runtime dilates the mask by its own disparity
+band before measuring, which erases sub-cell detail, and every extra cell is bytes copied inside
+`xrEndFrame`.
+
+**Any-coverage, on purpose.** A cell is marked if *any* overlapping source pixel is covered — a
+single covered pixel marks its cell. Erring outward is correct here: the runtime measures the
+background only *inside* the mask, so a cell wrongly cleared hides a real conflict while a cell
+wrongly set at worst measures a little extra background. The app does **not** dilate, does **not**
+clamp to its 3D zones and does **not** smooth — the runtime does all three, and pre-dilating here
+would compound with its band.
+
+**Zoned apps** pass `srcRectPx` (the zone's rect in window client pixels) instead of `nullptr`:
+the coverage is placed into the window grid at that rect and every cell outside stays 0, which is
+exactly the "leave the rest of the window unmasked" contract. `dxr::ContentMaskUnion()` ORs two
+same-dimension grids together for an app with more than one 3D zone, and
+`dxr::ContentMaskCoverageCells()` counts occupied cells — check it before chaining, since the
+runtime treats an all-zero mask as absent and falls back to the content bounds.
+
+`ContentMaskFromCoverage` returns false only on **degenerate input** (null source, a zero
+dimension, `srcStride < srcW`, a non-positive `srcRectPx` extent, or a grid outside 1..512),
+leaving `out` all-zero. A valid but fully-uncovered source is *not* a failure — it returns true
+with an all-zero grid. `ChainContentMask` refuses a grid it cannot describe (dims outside 1..512,
+or a `cells` buffer shorter than `width * height`) without touching `XrFrameEndInfo`, so a frame
+is never left half-chained. As with `content_bounds.h`, if the pinned extensions header predates
+the v3 bump this header defines an ABI-identical local `XrContentMaskDXR` and
+`XR_TYPE_CONTENT_MASK_DXR` (guarded by `DXR_CONTENT_MASK_LOCAL_DEF`); both compile out once the
+pin advances, with no call-site changes.
+
+**Feeding it from the click-through region (no second readback).** On Windows/Vulkan,
+`dxr::ClickThroughRegion` (`vk_clickthrough_region.h`) already reads back the union-over-views
+alpha coverage every frame. `ClickThroughRegion::coverage()` exposes that buffer read-only —
+one byte per texel, nonzero = covered, tightly packed at `coverageWidth() x coverageHeight()` —
+so the mask costs a downsample rather than a second alpha readback. It is the **raw,
+un-dilated** coverage (the region needs the dilated one; the depth budget must not be
+pre-dilated), it lags one `update()` call like everything on that pipelined readback, and it is
+`nullptr` until the first region has been applied. Nothing about how the click-through region
+itself is computed changed.
+
+```cpp
+if (const uint8_t* cov = punch.coverage()) {
+    dxr::ContentMaskFromCoverage(cov, punch.coverageWidth(), punch.coverageHeight(),
+                                 punch.coverageWidth(), winW, winH, nullptr, 64, 64, cells);
+}
+```
 
 ## Integration
 

@@ -208,6 +208,43 @@ public:
     uint32_t rectCount() const { return lastRects_; }
 
     /*!
+     * The RAW (un-dilated) coverage the last applied region was built from:
+     * one byte per texel, nonzero = covered, row-major, top-left origin,
+     * tightly packed at coverageWidth() x coverageHeight() (so the stride IS
+     * coverageWidth()). Read-only view of this object's scratch buffer —
+     * valid until the next update() call, never freed by the caller.
+     *
+     * This is the union over the views blitted this frame (view 0, plus the
+     * last view when unionLastView was requested), thresholded at
+     * regionAlpha(). It is the same artefact `XR_DXR_depth_budget` v3 wants as
+     * its analysis ROI, which is the point of exposing it: feed it straight to
+     * `dxr::ContentMaskFromCoverage()` (content_mask.h) instead of doing a
+     * second alpha readback for the mask. Nothing about how the click-through
+     * region itself is computed changes — this is a pure accessor.
+     *
+     * UN-DILATED on purpose. The region needs the dilated mask (an under-large
+     * region deletes visible content); the depth budget does not, because the
+     * runtime dilates the mask by its own disparity band before measuring, and
+     * dilating twice would hand it an ROI wider than the silhouette.
+     *
+     * The data LAGS ONE update() call — the pipelined readback this class
+     * deliberately never stalls on. That is well within the budget's own
+     * ramp (~300 ms open / ~150 ms close), so it needs no compensation.
+     *
+     * @return nullptr when no region has been applied yet (no readback
+     *         consumed, or the last apply bailed on degenerate dimensions).
+     */
+    const uint8_t*
+    coverage() const
+    {
+        if (lastCovW_ == 0 || lastCovH_ == 0 ||
+            cov_.size() != size_t(lastCovW_) * size_t(lastCovH_)) {
+            return nullptr;
+        }
+        return cov_.data();
+    }
+
+    /*!
      * One punch-through step. Consumes the previous call's readback (fence
      * ~free by now) and applies the region; then blits @p viewImage
      * (COLOR_ATTACHMENT_OPTIMAL, restored on exit) down to the coverage
