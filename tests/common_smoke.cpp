@@ -796,6 +796,133 @@ static void test_content_bounds()
               "bounds must be copied verbatim");
         CHECK(near_eq(out.marginNormalized, 0.02f), "marginNormalized must be copied verbatim");
     }
+
+    // --- RebaseZoneBoundsToWindow: a 3D zone occupying the bottom half of a
+    //     100x200 window (zoneRectPx = {0,100} / {100,100}). ---
+    {
+        XrRect2Di zoneRectPx{};
+        zoneRectPx.offset.x = 0;
+        zoneRectPx.offset.y = 100;
+        zoneRectPx.extent.width = 100;
+        zoneRectPx.extent.height = 100;
+
+        // zone-normalised {0.25,0.5 / 0.5,0.5} -> window {0.25,0.75 / 0.5,0.25}.
+        {
+            XrRect2Df zoneNorm{};
+            zoneNorm.offset.x = 0.25f;
+            zoneNorm.offset.y = 0.5f;
+            zoneNorm.extent.width = 0.5f;
+            zoneNorm.extent.height = 0.5f;
+
+            XrRect2Df rect{};
+            bool ok = dxr::RebaseZoneBoundsToWindow(zoneNorm, zoneRectPx, 100, 200, &rect);
+            CHECK(ok, "RebaseZoneBoundsToWindow must succeed for a well-formed zone");
+            CHECK(near_eq(rect.offset.x, 0.25f), "rebased offset.x == 0.25");
+            CHECK(near_eq(rect.offset.y, 0.75f), "rebased offset.y == 0.75 (bottom-half zone)");
+            CHECK(near_eq(rect.extent.width, 0.5f), "rebased extent.width == 0.5");
+            CHECK(near_eq(rect.extent.height, 0.25f), "rebased extent.height == 0.25 (half of the zone's half)");
+        }
+
+        // v0 = -0.2 clamps to 0 BEFORE rebase: the result must land exactly
+        // on the zone's own top edge (window y=0.5), never above it.
+        {
+            XrRect2Df zoneNorm{};
+            zoneNorm.offset.x = 0.25f;
+            zoneNorm.offset.y = -0.2f;
+            zoneNorm.extent.width = 0.5f;
+            zoneNorm.extent.height = 0.7f; // spans [-0.2, 0.5] pre-clamp
+
+            XrRect2Df rect{};
+            bool ok = dxr::RebaseZoneBoundsToWindow(zoneNorm, zoneRectPx, 100, 200, &rect);
+            CHECK(ok, "RebaseZoneBoundsToWindow must succeed with an out-of-range-but-clampable input");
+            CHECK(near_eq(rect.offset.y, 0.5f),
+                  "a v0 below 0 must clamp to the zone's own top edge, never reach above it");
+            CHECK(near_eq(rect.offset.y + rect.extent.height, 0.75f),
+                  "the clamped rect's bottom edge is unaffected");
+        }
+
+        // Degenerate zone (zero-area zoneRectPx) -> whole window, false.
+        {
+            XrRect2Di degenerateZone{};
+            degenerateZone.offset.x = 0;
+            degenerateZone.offset.y = 100;
+            degenerateZone.extent.width = 0;
+            degenerateZone.extent.height = 100;
+
+            XrRect2Df zoneNorm{};
+            zoneNorm.offset.x = 0.25f;
+            zoneNorm.offset.y = 0.5f;
+            zoneNorm.extent.width = 0.5f;
+            zoneNorm.extent.height = 0.5f;
+
+            XrRect2Df rect{};
+            rect.offset.x = 42.0f; // sentinel: must be overwritten
+            bool ok = dxr::RebaseZoneBoundsToWindow(zoneNorm, degenerateZone, 100, 200, &rect);
+            CHECK(!ok, "a zero-area zoneRectPx must return false");
+            CHECK(near_eq(rect.offset.x, 0.0f) && near_eq(rect.offset.y, 0.0f) &&
+                      near_eq(rect.extent.width, 1.0f) && near_eq(rect.extent.height, 1.0f),
+                  "degenerate zone rebase writes the whole window, not garbage");
+        }
+
+        // Degenerate window dims -> whole window, false.
+        {
+            XrRect2Df zoneNorm{};
+            zoneNorm.extent.width = 0.5f;
+            zoneNorm.extent.height = 0.5f;
+            XrRect2Df rect{};
+            bool ok = dxr::RebaseZoneBoundsToWindow(zoneNorm, zoneRectPx, 0, 200, &rect);
+            CHECK(!ok, "a zero window width must return false");
+            CHECK(near_eq(rect.extent.width, 1.0f) && near_eq(rect.extent.height, 1.0f),
+                  "zero-window-dim rebase writes the whole window");
+        }
+    }
+
+    // --- ProjectAabbToWindowBounds: one-call variant must equal
+    //     project-then-rebase performed manually with the same inputs. ---
+    {
+        XrRect2Di zoneRectPx{};
+        zoneRectPx.offset.x = 0;
+        zoneRectPx.offset.y = 100;
+        zoneRectPx.extent.width = 100;
+        zoneRectPx.extent.height = 100;
+
+        const float* eyes[1] = {eye1};
+
+        XrRect2Df projected{};
+        bool projectedOk = dxr::ProjectAabbToCanvasBounds(aabbMin, aabbMax, eyes, 1, &projected);
+        XrRect2Df expected{};
+        bool expectedOk = dxr::RebaseZoneBoundsToWindow(projected, zoneRectPx, 100, 200, &expected);
+
+        XrRect2Df combined{};
+        bool combinedOk =
+            dxr::ProjectAabbToWindowBounds(aabbMin, aabbMax, eyes, 1, zoneRectPx, 100, 200, &combined);
+
+        CHECK(projectedOk && expectedOk, "manual project-then-rebase reference path must succeed");
+        CHECK(combinedOk == expectedOk, "ProjectAabbToWindowBounds success must match the manual two-step path");
+        CHECK(near_eq(combined.offset.x, expected.offset.x) && near_eq(combined.offset.y, expected.offset.y) &&
+                  near_eq(combined.extent.width, expected.extent.width) &&
+                  near_eq(combined.extent.height, expected.extent.height),
+              "ProjectAabbToWindowBounds must equal project-then-rebase performed manually");
+    }
+
+    // --- ProjectAabbToWindowBounds: zoneRectPx with <= 0 extent means "the
+    //     zone is the whole window" -> no rebase, output is the raw
+    //     projected rect. ---
+    {
+        XrRect2Di wholeWindowZone{}; // extent defaults to {0,0}
+        const float* eyes[1] = {eye1};
+
+        XrRect2Df projected{};
+        bool projectedOk = dxr::ProjectAabbToCanvasBounds(aabbMin, aabbMax, eyes, 1, &projected);
+
+        XrRect2Df rect{};
+        bool ok = dxr::ProjectAabbToWindowBounds(aabbMin, aabbMax, eyes, 1, wholeWindowZone, 100, 200, &rect);
+        CHECK(ok == projectedOk, "a zero-extent zoneRectPx must skip the rebase, not fail it");
+        CHECK(near_eq(rect.offset.x, projected.offset.x) && near_eq(rect.offset.y, projected.offset.y) &&
+                  near_eq(rect.extent.width, projected.extent.width) &&
+                  near_eq(rect.extent.height, projected.extent.height),
+              "a zero-extent zoneRectPx must pass the projected rect through unchanged");
+    }
 }
 
 int main()

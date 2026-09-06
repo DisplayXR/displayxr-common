@@ -80,7 +80,17 @@ inline float Clamp01F(float v) { return MinF(MaxF(v, 0.0f), 1.0f); }
 /*!
  * Project the 8 corners of a world-space axis-aligned bounding box through
  * each eye's column-major 4x4 view-projection matrix, union the results over
- * eyes, and express the union as a canvas-normalised rect.
+ * eyes, and express the union as a rect normalised to the VIEW's own canvas —
+ * i.e. `viewProjPerEye` fully determines the normalisation frame. For a
+ * window-filling view that IS the app window's client rect. For a zone-scoped
+ * locate (the view-proj of a single `XR_DXR_display_zones` 3D zone, e.g. the
+ * bottom-band zone of a mixed 2D/3D layout) the output is normalised to that
+ * ZONE, not the window — chaining it into `XrContentBoundsDXR::bounds`
+ * unchanged would scale the runtime's analysis region onto the whole window
+ * and reach into any 2D band outside the zone. Zoned apps must rebase the
+ * zone-normalised result into window-normalised space before chaining it —
+ * use `RebaseZoneBoundsToWindow` (or the one-call `ProjectAabbToWindowBounds`)
+ * for that step.
  *
  * Convention: NDC (x,y) in [-1,1] -> canvas-normalised (u,v) via
  * `u = (x+1)/2`, `v = (1-y)/2` — origin top-left, v DOWN, the same convention
@@ -171,6 +181,135 @@ ProjectAabbToCanvasBounds(const float aabbMin[3], const float aabbMax[3],
     out->extent.width = detail::MaxF(u1 - u0, 0.0f);
     out->extent.height = detail::MaxF(v1 - v0, 0.0f);
     return true;
+}
+
+/*!
+ * Rebase a rect normalised to a sub-canvas (a 3D display zone) into
+ * window-client-normalised space.
+ *
+ * `ProjectAabbToCanvasBounds` run against a zone's own view-proj yields a
+ * rect normalised to that ZONE, not the app window. `XrContentBoundsDXR::bounds`
+ * wants window-client-normalised space (the frame of the display processor's
+ * background preview) — chaining the zone-normalised rect unchanged makes the
+ * runtime's analysis region scale onto the whole window and reach into
+ * whatever sits outside the zone (e.g. a Local2D speech bubble stacked above
+ * a 3D avatar zone). This maps `zoneNormalised` through `zoneRectPx` (the
+ * zone's own rect in window client pixels) into window-normalised space.
+ *
+ * The input is clamped to [0,1] in ZONE space FIRST — animation bounds
+ * routinely project outside their own frustum (see the clamping test in
+ * `ProjectAabbToCanvasBounds` above) — before being mapped into window space,
+ * and the mapped result is clamped to [0,1] again on the way out.
+ *
+ * @param zoneNormalised Rect normalised to the zone's own canvas, as returned
+ *                        by `ProjectAabbToCanvasBounds` for that zone's views.
+ * @param zoneRectPx      The zone's rect in window CLIENT pixels (origin
+ *                        top-left, y down) — what the app chained in
+ *                        `XrDisplayZoneDXR`, or read back in
+ *                        `XrViewDisplayRawDXR::canvasRectPx`.
+ * @param windowW         Window client width in pixels.
+ * @param windowH         Window client height in pixels.
+ * @param out             Output rect. Always written (whole window on failure).
+ * @return true on success, false on degenerate input (null `out`, zero window
+ *         dimensions, or a zero/negative-area `zoneRectPx`) — `*out` is the
+ *         whole window ({0,0,1,1}) on any false return except null `out`.
+ */
+inline bool
+RebaseZoneBoundsToWindow(const XrRect2Df& zoneNormalised, const XrRect2Di& zoneRectPx,
+                         uint32_t windowW, uint32_t windowH, XrRect2Df* out)
+{
+    if (out == nullptr) {
+        return false;
+    }
+
+    auto wholeWindow = [&]() {
+        out->offset.x = 0.0f;
+        out->offset.y = 0.0f;
+        out->extent.width = 1.0f;
+        out->extent.height = 1.0f;
+    };
+
+    if (windowW == 0 || windowH == 0 || zoneRectPx.extent.width <= 0 || zoneRectPx.extent.height <= 0) {
+        wholeWindow();
+        return false;
+    }
+
+    // Clamp the input to [0,1] in ZONE space first — animation bounds
+    // routinely project outside their own frustum. Clamp both edges
+    // independently, then re-order so the rect never inverts.
+    float zx0 = detail::Clamp01F(zoneNormalised.offset.x);
+    float zy0 = detail::Clamp01F(zoneNormalised.offset.y);
+    float zx1 = detail::Clamp01F(zoneNormalised.offset.x + zoneNormalised.extent.width);
+    float zy1 = detail::Clamp01F(zoneNormalised.offset.y + zoneNormalised.extent.height);
+    zx1 = detail::MaxF(zx1, zx0);
+    zy1 = detail::MaxF(zy1, zy0);
+
+    const float windowWf = (float)windowW;
+    const float windowHf = (float)windowH;
+    const float zoneOffXf = (float)zoneRectPx.offset.x;
+    const float zoneOffYf = (float)zoneRectPx.offset.y;
+    const float zoneWf = (float)zoneRectPx.extent.width;
+    const float zoneHf = (float)zoneRectPx.extent.height;
+
+    // Zone-normalised -> zone pixels -> window-normalised.
+    const float wx0 = (zoneOffXf + zx0 * zoneWf) / windowWf;
+    const float wx1 = (zoneOffXf + zx1 * zoneWf) / windowWf;
+    const float wy0 = (zoneOffYf + zy0 * zoneHf) / windowHf;
+    const float wy1 = (zoneOffYf + zy1 * zoneHf) / windowHf;
+
+    const float ox0 = detail::Clamp01F(wx0);
+    const float ox1 = detail::Clamp01F(wx1);
+    const float oy0 = detail::Clamp01F(wy0);
+    const float oy1 = detail::Clamp01F(wy1);
+
+    out->offset.x = ox0;
+    out->offset.y = oy0;
+    out->extent.width = detail::MaxF(ox1 - ox0, 0.0f);
+    out->extent.height = detail::MaxF(oy1 - oy0, 0.0f);
+    return true;
+}
+
+/*!
+ * Convenience: `ProjectAabbToCanvasBounds` + `RebaseZoneBoundsToWindow` in one
+ * call. `aabbMin`/`aabbMax`/`viewProjPerEye`/`eyeCount` are as for
+ * `ProjectAabbToCanvasBounds` (pass the zone's own per-eye view-proj
+ * matrices). If `zoneRectPx.extent` is zero/negative (width or height <= 0)
+ * the zone IS the whole window — no rebase is performed and the projected
+ * rect is returned as-is.
+ *
+ * @return true on success. Returns false on the same conditions as the two
+ *         steps it composes (projection failure, or a degenerate rebase
+ *         input) — `*out` is the whole window ({0,0,1,1}) on any false
+ *         return.
+ */
+inline bool
+ProjectAabbToWindowBounds(const float aabbMin[3], const float aabbMax[3],
+                          const float* const* viewProjPerEye, uint32_t eyeCount,
+                          const XrRect2Di& zoneRectPx, uint32_t windowW, uint32_t windowH,
+                          XrRect2Df* out)
+{
+    if (out == nullptr) {
+        return false;
+    }
+
+    XrRect2Df zoneBounds{};
+    if (!ProjectAabbToCanvasBounds(aabbMin, aabbMax, viewProjPerEye, eyeCount, &zoneBounds)) {
+        // Projection failed closed to the whole (zone) canvas; on failure
+        // the contract is "whole window", not a rebase of that fallback.
+        out->offset.x = 0.0f;
+        out->offset.y = 0.0f;
+        out->extent.width = 1.0f;
+        out->extent.height = 1.0f;
+        return false;
+    }
+
+    if (zoneRectPx.extent.width <= 0 || zoneRectPx.extent.height <= 0) {
+        // No zone geometry given: the zone IS the whole window, no rebase.
+        *out = zoneBounds;
+        return true;
+    }
+
+    return RebaseZoneBoundsToWindow(zoneBounds, zoneRectPx, windowW, windowH, out);
 }
 
 /*!
