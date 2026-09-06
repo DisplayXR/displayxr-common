@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "atlas_capture.h"
@@ -343,6 +344,41 @@ static void test_session_manager_defaults()
     CHECK(xr.filePickerInFlight == false && xr.filePickerHasResult == false,
           "file-picker state machine idle at init");
     CHECK(xr.spinSpeed == 0.5f, "MCP-settable spin speed defaults to 0.5");
+}
+
+// EndFrame / EndFrameWithWindowSpaceLayers `frameEndNext` (content_bounds.h's
+// dxr::ChainContentBounds is the first user — see xr_session_common.h). This
+// is a HEADER-ONLY compile check, deliberately not a call or a runtime
+// function-pointer read: both functions are defined in xr_session_common.cpp,
+// which calls xrEndFrame — an OpenXR *loader* symbol this headers-only
+// standalone build does not link (see the NOTE in
+// test_session_manager_defaults() above; actually taking &EndFrame would pull
+// that .obj out of the static-lib archive and fail to link here). `decltype`
+// is an unevaluated context — it type-checks the declaration without
+// generating any reference to the symbol — so this proves at compile time
+// that `frameEndNext` was added as a trailing `const void*` default argument
+// to both signatures, without requiring the loader.
+static void test_endframe_frame_end_next_signature()
+{
+    using EndFrameFn = bool (*)(XrSessionManager&, XrTime,
+                                 const XrCompositionLayerProjectionView*,
+                                 uint32_t, XrCompositionLayerFlags,
+                                 const void*, const void*);
+    static_assert(std::is_same<decltype(&EndFrame), EndFrameFn>::value,
+                  "EndFrame must end with frameEndNext (const void*), chained onto "
+                  "XrFrameEndInfo::next");
+
+    using EndFrameWindowSpaceFn = bool (*)(
+        XrSessionManager&, XrTime, const XrCompositionLayerProjectionView*,
+        float, float, float, float, float, uint32_t,
+        const void*, uint32_t,
+        int32_t, int32_t, int32_t, int32_t,
+        bool, XrCompositionLayerFlags, const void*,
+        const XrCompositionLayerBaseHeader* const*, uint32_t,
+        const void*);
+    static_assert(std::is_same<decltype(&EndFrameWithWindowSpaceLayers), EndFrameWindowSpaceFn>::value,
+                  "EndFrameWithWindowSpaceLayers must end with frameEndNext (const void*), "
+                  "chained onto XrFrameEndInfo::next");
 }
 
 static void test_win32_link_closure()
@@ -779,6 +815,7 @@ int main()
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();
+    test_endframe_frame_end_next_signature();
 #endif
 #ifdef __APPLE__
     test_macos_hud_rasterize();
