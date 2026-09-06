@@ -337,9 +337,20 @@ XrFovf ComputeKooimaFov(
 // backgrounds).
 // `projectionNext` is chained on XrCompositionLayerProjection::next — pass
 // dxr::FullWindowZoneSubmitChain() (zone_default.h) to make this a zones frame.
+// `frameEndNext` is a DIFFERENT chain: it is written straight to
+// XrFrameEndInfo::next (the frame-level pNext, not the projection layer's).
+// Its first user is `XrContentBoundsDXR` (XR_DXR_depth_budget v2) — build one
+// with dxr::ChainContentBounds() (content_bounds.h) and pass its address here
+// so the runtime can narrow its rear-depth-budget analysis to where the app's
+// content actually projects, instead of the whole canvas. Appended as the
+// LAST parameter (after `projectionNext`, despite the conceptual pairing)
+// specifically so every pre-existing call site keeps compiling unchanged;
+// this function assembles XrFrameEndInfo internally and previously left
+// `next` untouched, so there is no other chain to preserve here.
 bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayerProjectionView* views,
               uint32_t viewCount = 2, XrCompositionLayerFlags projectionLayerFlags = 0,
-              const void* projectionNext = nullptr);
+              const void* projectionNext = nullptr,
+              const void* frameEndNext = nullptr);
 
 // Create a HUD swapchain for window-space layer submission
 bool CreateHudSwapchain(XrSessionManager& xr, uint32_t width, uint32_t height);
@@ -384,7 +395,18 @@ bool EndFrameWithWindowSpaceLayers(
     // types can mix — e.g. an XrCompositionLayerLocal2DDXR toast on a zones
     // frame). Appended after the window-space layers = composited on top.
     const XrCompositionLayerBaseHeader* const* extraLayers = nullptr,
-    uint32_t extraLayerCount = 0);
+    uint32_t extraLayerCount = 0,
+    // Written straight to XrFrameEndInfo::next — a DIFFERENT chain from
+    // `projectionNext` above (that one is XrCompositionLayerProjection::next).
+    // Its first user is `XrContentBoundsDXR` (XR_DXR_depth_budget v2): build
+    // one with dxr::ChainContentBounds() (content_bounds.h) and pass its
+    // address here. Appended as the true LAST parameter — after `extraLayerCount`,
+    // not next to `projectionNext` — purely so every pre-existing call site
+    // (which already uses positional args out to extraLayerCount) keeps
+    // compiling unchanged. This function assembles XrFrameEndInfo internally
+    // and previously left `next` untouched, so there is no other chain to
+    // preserve here.
+    const void* frameEndNext = nullptr);
 
 // End frame with both projection layer and window-space HUD layer.
 // viewCount defaults to 2 (stereo); pass 1 for mono submission in 2D mode.

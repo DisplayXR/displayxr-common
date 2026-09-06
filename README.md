@@ -248,6 +248,29 @@ extensions header predates the v2 struct bump, `content_bounds.h` defines an ABI
 `XrContentBoundsDXR` (guarded by `DXR_CONTENT_BOUNDS_LOCAL_DEF`) so this API is usable against an
 older pin; it compiles out once the pin advances.
 
+**Wiring it through `EndFrame`/`EndFrameWithWindowSpaceLayers`.** Both helpers build their own
+`XrFrameEndInfo` internally and call `xrEndFrame` themselves, so an app using them has no
+`XrFrameEndInfo&` of its own to hand to `dxr::ChainContentBounds()` directly — which is exactly
+why two demos ended up copy-vendoring the helper bodies locally just to add `endInfo.next = ...`.
+Both now take an optional trailing `const void* frameEndNext = nullptr` that they write straight
+to `XrFrameEndInfo::next` — a *different* chain from the existing `projectionNext` parameter,
+which lands on `XrCompositionLayerProjection::next` instead. `XrContentBoundsDXR` is the first
+user: chain it with `dxr::ChainContentBounds()` against a scratch `XrFrameEndInfo` (its `next` is
+never read by `EndFrame`/`EndFrameWithWindowSpaceLayers` — only the `contentBounds` struct they
+point at matters) and pass that struct's address as `frameEndNext`:
+
+```cpp
+XrFrameEndInfo scratch{}; // ChainContentBounds needs a fei.next to read/link; discarded here
+XrContentBoundsDXR contentBounds;
+dxr::ChainContentBounds(scratch, contentBounds, bounds);
+EndFrame(xr, displayTime, views, viewCount, /*projectionLayerFlags=*/0,
+         /*projectionNext=*/nullptr, /*frameEndNext=*/&contentBounds);
+```
+
+It is appended as the true *last* parameter of both functions (after `extraLayerCount` on
+`EndFrameWithWindowSpaceLayers`, not next to `projectionNext`) so every pre-existing call site —
+including ones passing later positional arguments — keeps compiling unchanged.
+
 ## Integration
 
 Consume via CMake `FetchContent`, pinned to a tag — the same pattern the DisplayXR runtime uses for its other deps. Don't vendor a copy (that's exactly the drift this repo exists to kill).

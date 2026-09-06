@@ -770,7 +770,7 @@ bool ReleaseSwapchainImage(XrSessionManager& xr) {
 
 bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayerProjectionView* views,
               uint32_t viewCount, XrCompositionLayerFlags projectionLayerFlags,
-              const void* projectionNext) {
+              const void* projectionNext, const void* frameEndNext) {
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.next = projectionNext;
     projectionLayer.space = xr.localSpace;
@@ -783,6 +783,7 @@ bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayer
     };
 
     XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.next = frameEndNext;
     endInfo.displayTime = displayTime;
     endInfo.environmentBlendMode = SelectEnvBlendMode(xr);
     endInfo.layerCount = 1;
@@ -907,7 +908,8 @@ bool EndFrameWithWindowSpaceLayers(
     XrCompositionLayerFlags projectionLayerFlags,
     const void* projectionNext,
     const XrCompositionLayerBaseHeader* const* extraLayers,
-    uint32_t extraLayerCount
+    uint32_t extraLayerCount,
+    const void* frameEndNext
 ) {
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.next = projectionNext;
@@ -955,6 +957,7 @@ bool EndFrameWithWindowSpaceLayers(
         if (extraLayers[i] != nullptr) layers.push_back(extraLayers[i]);
 
     XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.next = frameEndNext;
     endInfo.displayTime = displayTime;
     endInfo.environmentBlendMode = SelectEnvBlendMode(xr);
     endInfo.layerCount = (uint32_t)layers.size();
