@@ -226,8 +226,22 @@ struct XrSessionManager {
     XrDuration predictedDisplayPeriod = 0;
 };
 
-// Create reference spaces
-bool CreateSpaces(XrSessionManager& xr);
+// Create reference spaces.
+//
+// `worldSpaceType` is the reference space the app treats as its world - it
+// becomes `xr.localSpace` (the name is historical; every caller passes it to
+// xrLocateViews AND layer submission, F-4). The runtime honours it on both
+// legs of xrLocateViews (runtime #1370), so the choice is about where the
+// app authors its content:
+//   - XR_REFERENCE_SPACE_TYPE_LOCAL (default): origin at the head's initial
+//     pose - DisplayXR-aware apps, rig apps, anything authored around the
+//     viewer. The correct, portable choice (INV F-4).
+//   - XR_REFERENCE_SPACE_TYPE_STAGE: origin on the floor, the head standing
+//     ~1.6 m above it - what a legacy VR title expects. The in-tree hosted
+//     test cubes author their cube at y = 1.6 for exactly that reason and
+//     pass STAGE; they mirror real legacy titles, not DXR apps.
+bool CreateSpaces(XrSessionManager& xr,
+                  XrReferenceSpaceType worldSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL);
 
 // Create the app's projection swapchain.
 //
