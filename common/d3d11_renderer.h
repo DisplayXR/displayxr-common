@@ -85,7 +85,8 @@ void UpdateScene(D3D11Renderer& renderer, float deltaTime, float spinSpeed = 0.5
 // Render the scene to a render target view
 // viewMatrix and projMatrix come from OpenXR views (already includes player locomotion
 // via reference space offset — see UpdateLocalSpace in xr_session)
-// cubeHeight: Y position of cube in world space (1.6 for DisplayXR window, 0 for extension apps)
+// cubeHeight: Y position of cube in world space (1.6 for the hosted cubes, which locate in
+//             STAGE and mirror a legacy VR title standing at 1.6 m; 0 for extension apps in LOCAL)
 // cubeZ: Z position of cube (0 for ext apps near display, -2 for non-ext apps farther away)
 // cubeSize: cube edge length in meters (0.06 for ext apps, 0.3 for non-ext apps)
 void RenderScene(

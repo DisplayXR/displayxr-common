@@ -190,18 +190,23 @@ XrFovf ComputeKooimaFov(
     return display3d_compute_fov(eyePos, screenWidthM, screenHeightM);
 }
 
-bool CreateSpaces(XrSessionManager& xr) {
+bool CreateSpaces(XrSessionManager& xr, XrReferenceSpaceType worldSpaceType) {
     LOG_INFO("Creating reference spaces...");
 
-    // Create LOCAL reference space
-    LOG_INFO("Creating LOCAL reference space...");
+    // Create the app's world reference space (LOCAL by default; STAGE for
+    // legacy-style apps that author content at standing height - see the
+    // header). Stored in xr.localSpace whichever type it is.
+    const char* worldName = worldSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "STAGE"
+                          : worldSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ? "LOCAL"
+                          : "reference";
+    LOG_INFO("Creating %s reference space (app world)...", worldName);
     XrReferenceSpaceCreateInfo localSpaceInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
-    localSpaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    localSpaceInfo.referenceSpaceType = worldSpaceType;
     localSpaceInfo.poseInReferenceSpace.orientation = {0, 0, 0, 1};
     localSpaceInfo.poseInReferenceSpace.position = {0, 0, 0};
 
     XR_CHECK_LOG(xrCreateReferenceSpace(xr.session, &localSpaceInfo, &xr.localSpace));
-    LOG_INFO("LOCAL space created: 0x%p", (void*)xr.localSpace);
+    LOG_INFO("%s space created (xr.localSpace): 0x%p", worldName, (void*)xr.localSpace);
 
     // Create VIEW reference space
     LOG_INFO("Creating VIEW reference space...");
