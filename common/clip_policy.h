@@ -84,7 +84,8 @@ struct ClipPlanes {
  *
  * Math (design brief §2.6):
  *   near_z      = max(ez - vH, 1e-4)
- *   farOffsetVH = budget ? budget->farOffsetVH : ((transparent && standalone) ? 0 : 1000)
+ *   farOffsetVH = !transparent ? 1000
+ *               : budget ? budget->farOffsetVH : (standalone ? 0 : 1000)
  *   far_z       = max(ez + farOffsetVH * vH, near_z + 1e-4)
  *   clipFar     = (transparent && farOffsetVH < 1000 && ez > 0.2) ? far_z : 0
  *
@@ -97,7 +98,17 @@ ResolveClipPlanes(float ez, float vH, const XrRearDepthBudgetDXR *budget, bool t
 {
     ClipPlanes out{};
 
-    out.farOffsetVH = budget ? budget->farOffsetVH : ((transparent && standalone) ? 0.0f : 1000.0f);
+    // An app that is not rendering transparent has nothing composited over the
+    // desktop, so its far plane is never the runtime's business - even when a
+    // budget is chained. The runtime's session-level transparent flag is set at
+    // xrCreateSession and cannot follow a per-frame Ctrl+T toggle; only the app
+    // knows what it draws this frame, and a busy-background budget of 0 applied
+    // to an opaque frame would clip the skybox behind the display plane.
+    if (!transparent) {
+        out.farOffsetVH = 1000.0f;
+    } else {
+        out.farOffsetVH = budget ? budget->farOffsetVH : (standalone ? 0.0f : 1000.0f);
+    }
 
     out.near_z = ez - vH;
     if (out.near_z < 1.0e-4f) {

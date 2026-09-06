@@ -577,6 +577,22 @@ static void test_clip_policy()
         CHECK(clip.clipFar == 0.0f, "farOffsetVH >= 1000 must never cull");
     }
 
+    // The runtime's session-level transparent flag is set at xrCreateSession and
+    // cannot follow a per-frame Ctrl+T toggle, so a budget of 0 (busy desktop)
+    // can arrive while the app is drawing OPAQUE. The app's own `transparent`
+    // must win: an opaque frame is never clipped, whatever the budget says.
+    {
+        XrRearDepthBudgetDXR budget{};
+        budget.type = (XrStructureType)XR_TYPE_REAR_DEPTH_BUDGET_DXR;
+        budget.farOffsetVH = 0.0f;
+        budget.state = XR_REAR_DEPTH_BUDGET_STATE_CLIPPED_BUSY_BACKGROUND_DXR;
+
+        dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vH, &budget, /*transparent=*/false, /*standalone=*/true);
+        CHECK(near_eq(clip.farOffsetVH, 1000.0f), "opaque frame ignores a clipping budget -> unrestricted");
+        CHECK(near_eq(clip.far_z, ez + 1000.0f * vH), "opaque frame keeps the unrestricted far plane");
+        CHECK(clip.clipFar == 0.0f, "opaque frame must never cull, even with a budget of 0");
+    }
+
     // Near-degenerate eye distance: clipFar must not fire at/behind the near
     // plane (the demos' existing ez > 0.2 guard), even while clipping is
     // otherwise active.
