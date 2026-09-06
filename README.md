@@ -133,7 +133,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Asset download to `%LOCALAPPDATA%\DisplayXR\<app>\cache\<sha1>.<ext>` (WinHTTP, size cap, no downgrade redirects, extension from path/Content-Type/magic) | `url_fetch.{h,cpp}` | Windows (pure helpers: both) |
 | `displayxr-view:` protocol: per-user self-registration, sibling-viewer forward by `type=`, single-instance `WM_COPYDATA` hand-off | `view_protocol.h` | Windows |
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
-| Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
+| Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -247,6 +247,36 @@ oversized AABB that exceeds the frustum still succeeds, clamped to `[0,1]`. If t
 extensions header predates the v2 struct bump, `content_bounds.h` defines an ABI-identical local
 `XrContentBoundsDXR` (guarded by `DXR_CONTENT_BOUNDS_LOCAL_DEF`) so this API is usable against an
 older pin; it compiles out once the pin advances.
+
+**Zoned apps must rebase before chaining.** `XrContentBoundsDXR::bounds` wants window-client-
+normalised space (the frame of the display processor's background preview). `ProjectAabbToCanvasBounds`
+normalises to whatever view-proj it was handed — for a window-filling app that already IS the
+window, but for an `XR_DXR_display_zones` app (e.g. the avatar layout: a 3D zone in the bottom
+band, a Local2D speech bubble stacked on top) a zone's own view-proj yields a rect normalised to
+that ZONE. Chaining a zone-normalised rect unchanged makes the runtime's analysis region scale
+onto the whole window and reach into the 2D band above it. `dxr::RebaseZoneBoundsToWindow()`
+maps a zone-normalised rect into window-normalised space given the zone's own rect in window
+client pixels (`zoneRectPx` — what the app chained in `XrDisplayZoneDXR`, or read back in
+`XrViewDisplayRawDXR::canvasRectPx`); `dxr::ProjectAabbToWindowBounds()` does the projection and
+the rebase in one call:
+
+```cpp
+// zoneRectPx: the 3D zone's rect in window client pixels (from XrDisplayZoneDXR /
+// XrViewDisplayRawDXR::canvasRectPx); windowW/H: the app window's client size.
+XrRect2Df bounds{};
+dxr::ProjectAabbToWindowBounds(contentAabbMin, contentAabbMax, viewProj, 2,
+                               zoneRectPx, windowW, windowH, &bounds);
+
+XrContentBoundsDXR contentBounds;
+dxr::ChainContentBounds(frameEndInfo, contentBounds, bounds); // before xrEndFrame
+```
+
+Both rebase helpers clamp the input to `[0,1]` in ZONE space first (animation bounds routinely
+project outside their own frustum) before mapping through `zoneRectPx`, and clamp the mapped
+result to `[0,1]` again on the way out; a zero/negative-area `zoneRectPx` means "the zone is the
+whole window" and `ProjectAabbToWindowBounds` skips the rebase, passing the projected rect
+through unchanged. A non-zoned app (single full-window view) can keep calling
+`ProjectAabbToCanvasBounds` + `ChainContentBounds()` directly, as above.
 
 **Wiring it through `EndFrame`/`EndFrameWithWindowSpaceLayers`.** Both helpers build their own
 `XrFrameEndInfo` internally and call `xrEndFrame` themselves, so an app using them has no
