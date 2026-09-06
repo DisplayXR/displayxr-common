@@ -24,6 +24,7 @@
 #include "auto_fit.h"
 #include "auto_fit_canvas.h"
 #include "clip_policy.h"
+#include "content_bounds.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
@@ -634,6 +635,133 @@ static void test_clip_policy()
     }
 }
 
+// dxr::ProjectAabbToCanvasBounds / ChainContentBounds (content_bounds.h,
+// XR_DXR_depth_budget v2, rear-depth-budget brief §5.1). Pure, deterministic.
+//
+// Both eyes below share one symmetric perspective projection with fovy=90deg
+// (cot(45deg)=1) and aspect=1, near=0.1/far=100 -- chosen so the projection's
+// column-major entries are m[0]=m[5]=1, m[10]=(f+n)/(n-f), m[11]=-1,
+// m[14]=2fn/(n-f), everything else 0, and every corner's projected w reduces
+// to exactly -z. That makes the expected canvas rect hand-computable in exact
+// fractions (see the comments at each call site) rather than needing a matrix
+// library in the test itself.
+static void test_content_bounds()
+{
+    const float EPS = 1e-3f;
+    auto near_eq = [&](float a, float b) { return std::fabs(a - b) <= EPS; };
+
+    // Shared symmetric perspective projection (see banner comment above).
+    // m[11] = -1 makes projected w == -z for any point with w_in == 1.
+    float eye1[16] = {0};
+    eye1[0] = 1.0f;
+    eye1[5] = 1.0f;
+    eye1[10] = (100.0f + 0.1f) / (0.1f - 100.0f);
+    eye1[11] = -1.0f;
+    eye1[14] = (2.0f * 0.1f * 100.0f) / (0.1f - 100.0f);
+
+    // A unit cube in front of the camera, x/y in [-0.5,0.5], z in [-2.5,-1.5]
+    // (camera looks down -Z, so this is "1 to 2.5 units in front").
+    const float aabbMin[3] = {-0.5f, -0.5f, -2.5f};
+    const float aabbMax[3] = {0.5f, 0.5f, -1.5f};
+
+    // --- Single eye: hand-computed centred rect. ---
+    // Near corners (z=-1.5, w=1.5) dominate: ndcX = +-0.5/1.5 = +-1/3, same
+    // for ndcY. u = (ndcX+1)/2 -> [1/3, 2/3]; v = (1-ndcY)/2 -> [1/3, 2/3]
+    // (v DOWN, but the cube is symmetric in y so the range is the same).
+    {
+        const float* eyes[1] = {eye1};
+        XrRect2Df rect{};
+        bool ok = dxr::ProjectAabbToCanvasBounds(aabbMin, aabbMax, eyes, 1, &rect);
+        CHECK(ok, "single-eye projection of an in-frustum cube must succeed");
+        CHECK(near_eq(rect.offset.x, 1.0f / 3.0f), "single-eye offset.x == 1/3");
+        CHECK(near_eq(rect.offset.y, 1.0f / 3.0f), "single-eye offset.y == 1/3");
+        CHECK(near_eq(rect.extent.width, 1.0f / 3.0f), "single-eye extent.width == 1/3");
+        CHECK(near_eq(rect.extent.height, 1.0f / 3.0f), "single-eye extent.height == 1/3");
+    }
+
+    // --- Two eyes, second offset in X (an off-axis/Kooima-style lens shift,
+    //     m[12] += -0.4): union must be strictly WIDER than either eye alone.
+    //     Hand-computed union: ndcX in [-0.6, 1/3] -> u in [0.2, 2/3];
+    //     eye2 never touches Y, so the v range is unchanged.
+    {
+        float eye2[16];
+        std::memcpy(eye2, eye1, sizeof(eye2));
+        eye2[12] = -0.4f;
+
+        const float* eyes[2] = {eye1, eye2};
+        XrRect2Df rect{};
+        bool ok = dxr::ProjectAabbToCanvasBounds(aabbMin, aabbMax, eyes, 2, &rect);
+        CHECK(ok, "two-eye projection of an in-frustum cube must succeed");
+        CHECK(near_eq(rect.offset.x, 0.2f), "union offset.x == 0.2 (widened left)");
+        CHECK(near_eq(rect.extent.width, 2.0f / 3.0f - 0.2f), "union extent.width matches hand calc");
+        CHECK(rect.extent.width > 1.0f / 3.0f + EPS,
+              "union of two eyes must be strictly wider than a single eye");
+        CHECK(near_eq(rect.offset.y, 1.0f / 3.0f) && near_eq(rect.extent.height, 1.0f / 3.0f),
+              "the Y range is untouched by an X-only eye offset");
+    }
+
+    // --- A corner behind the eye (w <= 0): must fail closed to the whole
+    //     canvas, not a partial/garbage rect. ---
+    {
+        const float behindMin[3] = {-0.5f, -0.5f, -1.0f};
+        const float behindMax[3] = {0.5f, 0.5f, 0.5f}; // z=+0.5 is behind the camera
+        const float* eyes[1] = {eye1};
+        XrRect2Df rect{};
+        rect.offset.x = 42.0f; // sentinel: must be overwritten even on failure
+        bool ok = dxr::ProjectAabbToCanvasBounds(behindMin, behindMax, eyes, 1, &rect);
+        CHECK(!ok, "a corner behind the eye must return false");
+        CHECK(near_eq(rect.offset.x, 0.0f) && near_eq(rect.offset.y, 0.0f) &&
+                  near_eq(rect.extent.width, 1.0f) && near_eq(rect.extent.height, 1.0f),
+              "failure must write the whole canvas, not leave garbage");
+    }
+
+    // --- Clamping: a box far wider than the frustum clamps to the full
+    //     canvas but still reports success (every corner has w > 0). ---
+    {
+        const float wideMin[3] = {-10.0f, -10.0f, -2.5f};
+        const float wideMax[3] = {10.0f, 10.0f, -1.5f};
+        const float* eyes[1] = {eye1};
+        XrRect2Df rect{};
+        bool ok = dxr::ProjectAabbToCanvasBounds(wideMin, wideMax, eyes, 1, &rect);
+        CHECK(ok, "an out-of-frustum-but-in-front box still succeeds (clamped, not failed)");
+        CHECK(near_eq(rect.offset.x, 0.0f) && near_eq(rect.offset.y, 0.0f) &&
+                  near_eq(rect.extent.width, 1.0f) && near_eq(rect.extent.height, 1.0f),
+              "an oversized box clamps to the whole canvas");
+    }
+
+    // --- Degenerate/null input: fails closed to the whole canvas too. ---
+    {
+        XrRect2Df rect{};
+        CHECK(!dxr::ProjectAabbToCanvasBounds(aabbMin, aabbMax, nullptr, 0, &rect),
+              "zero eyeCount / null viewProj must fail");
+        CHECK(near_eq(rect.extent.width, 1.0f) && near_eq(rect.extent.height, 1.0f),
+              "degenerate input still writes the whole canvas");
+    }
+
+    // --- ChainContentBounds: links onto XrFrameEndInfo::next, preserves an
+    //     existing chain, and copies bounds + margin verbatim. ---
+    {
+        int sentinelChain = 0;
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO, &sentinelChain, 0, XR_ENVIRONMENT_BLEND_MODE_OPAQUE, 0, nullptr};
+        XrRect2Df bounds{};
+        bounds.offset.x = 0.25f;
+        bounds.offset.y = 0.1f;
+        bounds.extent.width = 0.5f;
+        bounds.extent.height = 0.6f;
+
+        XrContentBoundsDXR out;
+        CHECK(dxr::ChainContentBounds(fei, out, bounds, 0.02f), "ChainContentBounds must succeed");
+        CHECK(out.type == (XrStructureType)XR_TYPE_CONTENT_BOUNDS_DXR,
+              "chained struct must carry the extension's type");
+        CHECK(fei.next == &out, "XrFrameEndInfo::next must point at the chained struct");
+        CHECK(out.next == &sentinelChain, "the chained struct must preserve the prior chain");
+        CHECK(near_eq(out.bounds.offset.x, 0.25f) && near_eq(out.bounds.offset.y, 0.1f) &&
+                  near_eq(out.bounds.extent.width, 0.5f) && near_eq(out.bounds.extent.height, 0.6f),
+              "bounds must be copied verbatim");
+        CHECK(near_eq(out.marginNormalized, 0.02f), "marginNormalized must be copied verbatim");
+    }
+}
+
 int main()
 {
     test_capture_numbering();
@@ -647,6 +775,7 @@ int main()
     test_mode_switch();
     test_rig_math();
     test_clip_policy();
+    test_content_bounds();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();
