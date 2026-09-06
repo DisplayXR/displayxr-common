@@ -133,6 +133,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Asset download to `%LOCALAPPDATA%\DisplayXR\<app>\cache\<sha1>.<ext>` (WinHTTP, size cap, no downgrade redirects, extension from path/Content-Type/magic) | `url_fetch.{h,cpp}` | Windows (pure helpers: both) |
 | `displayxr-view:` protocol: per-user self-registration, sibling-viewer forward by `type=`, single-instance `WM_COPYDATA` hand-off | `view_protocol.h` | Windows |
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
+| Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -218,6 +219,34 @@ dxr::ClipPlanes clip = dxr::ResolveClipPlanes(ez, vHeight, budget, transparent, 
 struct came back untouched — reproduces today's rule bit-for-bit: `farOffsetVH = (transparent &&
 standalone) ? 0 : 1000`. `dxr::RearDepthBudgetStateName()` gives HUD/log code a human-readable name
 for `budget->state`.
+
+### Content-bounds ROI (`content_bounds.h`, `XR_DXR_depth_budget` v2)
+
+The rear-depth-budget analysis defaults to looking at the whole canvas, which can needlessly
+close the budget over busy pixels the app's own content never sits behind (a window's menu bar,
+a taskbar). `XrContentBoundsDXR` (SPEC_VERSION 2, chained on `XrFrameEndInfo::next` in `xrEndFrame`)
+lets the app narrow the runtime's analysis to where its content actually projects.
+`dxr::ProjectAabbToCanvasBounds()` does the geometry — project a world-space content AABB through
+each eye's column-major view-projection matrix, union over eyes, and express the result as a
+canvas-normalised rect (origin top-left, v down, same convention as `clip_policy.h`'s canvas
+coordinates) — and `dxr::ChainContentBounds()` attaches it to the frame:
+
+```cpp
+const float* viewProj[2] = { leftViewProjColMajor, rightViewProjColMajor }; // column-major 4x4 each
+XrRect2Df bounds{};
+dxr::ProjectAabbToCanvasBounds(contentAabbMin, contentAabbMax, viewProj, 2, &bounds);
+
+XrContentBoundsDXR contentBounds;
+dxr::ChainContentBounds(frameEndInfo, contentBounds, bounds); // before xrEndFrame
+xrEndFrame(session, &frameEndInfo);
+```
+
+`ProjectAabbToCanvasBounds` fails closed: any projected corner with `w <= 0` (behind the eye)
+returns false and writes the whole canvas ({0,0,1,1}) rather than a partial or garbage rect; an
+oversized AABB that exceeds the frustum still succeeds, clamped to `[0,1]`. If the pinned
+extensions header predates the v2 struct bump, `content_bounds.h` defines an ABI-identical local
+`XrContentBoundsDXR` (guarded by `DXR_CONTENT_BOUNDS_LOCAL_DEF`) so this API is usable against an
+older pin; it compiles out once the pin advances.
 
 ## Integration
 
