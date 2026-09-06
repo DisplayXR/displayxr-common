@@ -26,6 +26,7 @@
 #include "auto_fit_canvas.h"
 #include "clip_policy.h"
 #include "content_bounds.h"
+#include "content_mask.h"
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
@@ -925,6 +926,302 @@ static void test_content_bounds()
     }
 }
 
+// ---------------------------------------------------------------------------
+// XR_DXR_depth_budget v3 — content-MASK helpers (content_mask.h).
+//
+// The mask is the silhouette ROI the runtime measures the background inside,
+// so the properties that matter are (a) ANY-coverage: a cell containing even
+// one covered source pixel is marked, never dropped, and (b) placement: a
+// zoned app's coverage lands in its zone's part of the WINDOW grid and leaves
+// the rest at 0. Both are tested against hand-computed grids, not round-trips.
+// ---------------------------------------------------------------------------
+static void test_content_mask()
+{
+    // --- 16x16 coverage, one 4x4 blob at [4,8) x [4,8) -> 4x4 grid marks
+    //     EXACTLY cell (1,1). A blob that exactly fills a cell must not smear
+    //     into its neighbours (the reason the resample uses exact integer
+    //     arithmetic rather than floats + ceil). ---
+    {
+        std::vector<uint8_t> cov(16 * 16, 0);
+        for (uint32_t y = 4; y < 8; ++y) {
+            for (uint32_t x = 4; x < 8; ++x) {
+                cov[y * 16 + x] = 1;
+            }
+        }
+
+        std::vector<uint8_t> cells;
+        bool ok = dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, nullptr, 4, 4, cells);
+        CHECK(ok, "ContentMaskFromCoverage must succeed on well-formed input");
+        CHECK(cells.size() == 16, "out must be resized to outW*outH");
+        for (uint32_t cy = 0; cy < 4; ++cy) {
+            for (uint32_t cx = 0; cx < 4; ++cx) {
+                const bool expected = (cx == 1 && cy == 1);
+                const bool got = cells[cy * 4 + cx] != 0;
+                CHECK(got == expected, "a cell-aligned blob marks exactly its own cell");
+                if (got) {
+                    CHECK(cells[cy * 4 + cx] == 255, "marked cells must be 255, not the source value");
+                }
+            }
+        }
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 1, "exactly one cell covered");
+    }
+
+    // --- ANY-coverage: a SINGLE covered source pixel marks its whole cell. ---
+    {
+        std::vector<uint8_t> cov(16 * 16, 0);
+        cov[0 * 16 + 13] = 1; // one pixel, in cell (3,0)
+
+        std::vector<uint8_t> cells;
+        bool ok = dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, nullptr, 4, 4, cells);
+        CHECK(ok, "single-pixel coverage is valid input");
+        CHECK(cells[0 * 4 + 3] != 0, "a single covered pixel must mark its cell (max filter)");
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 1,
+              "a single covered pixel must mark ONE cell, not a neighbourhood");
+    }
+
+    // --- A source COARSER than the grid must fill every cell it overlaps
+    //     (up-sampling side of the any-coverage rule). 2x2 coverage, one
+    //     covered sample -> a 4x4 grid quadrant. ---
+    {
+        std::vector<uint8_t> cov(2 * 2, 0);
+        cov[0] = 1; // top-left sample
+        std::vector<uint8_t> cells;
+        bool ok = dxr::ContentMaskFromCoverage(cov.data(), 2, 2, 2, 16, 16, nullptr, 4, 4, cells);
+        CHECK(ok, "a coverage coarser than the grid is valid input");
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 4,
+              "one sample of a 2x2 coverage must fill the whole 2x2 cell quadrant");
+        CHECK(cells[0] != 0 && cells[1] != 0 && cells[4] != 0 && cells[5] != 0,
+              "the filled quadrant is the top-left one");
+    }
+
+    // --- Stride > width: the source rows are read at srcStride, not srcW. ---
+    {
+        const uint32_t stride = 20;
+        std::vector<uint8_t> cov(stride * 16, 0);
+        for (uint32_t y = 4; y < 8; ++y) {
+            for (uint32_t x = 4; x < 8; ++x) {
+                cov[y * stride + x] = 1;
+            }
+            cov[y * stride + 18] = 1; // padding bytes past srcW must be IGNORED
+        }
+        std::vector<uint8_t> cells;
+        bool ok =
+            dxr::ContentMaskFromCoverage(cov.data(), 16, 16, stride, 16, 16, nullptr, 4, 4, cells);
+        CHECK(ok, "srcStride > srcW must be honoured");
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 1,
+              "row padding beyond srcW must not contribute coverage");
+        CHECK(cells[1 * 4 + 1] != 0, "the blob is still cell (1,1) with a padded stride");
+    }
+
+    // --- Zoned placement: an 8x8 coverage placed in the BOTTOM HALF of a
+    //     16x16 window ({0,8}/{16,8}) -> the top half of the grid stays 0. ---
+    {
+        std::vector<uint8_t> cov(8 * 8, 1); // fully covered zone
+
+        XrRect2Di zone{};
+        zone.offset.x = 0;
+        zone.offset.y = 8;
+        zone.extent.width = 16;
+        zone.extent.height = 8;
+
+        std::vector<uint8_t> cells;
+        bool ok = dxr::ContentMaskFromCoverage(cov.data(), 8, 8, 8, 16, 16, &zone, 4, 4, cells);
+        CHECK(ok, "zoned placement must succeed");
+        for (uint32_t cx = 0; cx < 4; ++cx) {
+            CHECK(cells[0 * 4 + cx] == 0, "grid row 0 (above the zone) must stay 0");
+            CHECK(cells[1 * 4 + cx] == 0, "grid row 1 (above the zone) must stay 0");
+            CHECK(cells[2 * 4 + cx] != 0, "grid row 2 is inside the zone");
+            CHECK(cells[3 * 4 + cx] != 0, "grid row 3 is inside the zone");
+        }
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 8, "exactly the bottom half is covered");
+    }
+
+    // --- A zone rect partly off the window: the off-window part is dropped,
+    //     never wrapped or clamped into the visible cells' neighbours. ---
+    {
+        std::vector<uint8_t> cov(8 * 8, 1);
+        XrRect2Di zone{};
+        zone.offset.x = -8; // left half of the zone is off-screen
+        zone.offset.y = 0;
+        zone.extent.width = 16;
+        zone.extent.height = 16;
+
+        std::vector<uint8_t> cells;
+        bool ok = dxr::ContentMaskFromCoverage(cov.data(), 8, 8, 8, 16, 16, &zone, 4, 4, cells);
+        CHECK(ok, "a partly-off-window zone is valid input");
+        for (uint32_t cy = 0; cy < 4; ++cy) {
+            CHECK(cells[cy * 4 + 0] != 0 && cells[cy * 4 + 1] != 0,
+                  "the on-window left columns are covered");
+            CHECK(cells[cy * 4 + 2] == 0 && cells[cy * 4 + 3] == 0,
+                  "columns past the zone's right edge stay 0");
+        }
+    }
+
+    // --- Union of two masks (per-cell OR), and the size-mismatch no-op. ---
+    {
+        std::vector<uint8_t> a(16, 0), b(16, 0);
+        a[0] = 255;
+        a[5] = 255;
+        b[5] = 255;
+        b[9] = 1; // a non-canonical "covered" value must normalise to 255
+
+        dxr::ContentMaskUnion(a, b);
+        CHECK(dxr::ContentMaskCoverageCells(a) == 3, "union covers cells 0, 5 and 9");
+        CHECK(a[0] == 255 && a[5] == 255 && a[9] == 255, "union normalises covered cells to 255");
+        CHECK(a[1] == 0, "union must not set cells neither input covered");
+
+        // NB: not named `small` — <windows.h> (rpcndr.h) #defines that to `char`.
+        std::vector<uint8_t> mismatched(4, 255);
+        std::vector<uint8_t> before = a;
+        dxr::ContentMaskUnion(a, mismatched);
+        CHECK(a == before, "a size mismatch must be a no-op, never a partial union");
+    }
+
+    // --- Coverage count. ---
+    {
+        std::vector<uint8_t> cells(10, 0);
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 0, "an all-zero mask counts 0 cells");
+        cells[3] = 1;
+        cells[7] = 255;
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 2, "any nonzero value counts as covered");
+    }
+
+    // --- ChainContentMask: links onto XrFrameEndInfo::next, preserves an
+    //     existing chain, and describes the grid verbatim. ---
+    {
+        int sentinelChain = 0;
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO, &sentinelChain, 0,
+                           XR_ENVIRONMENT_BLEND_MODE_OPAQUE, 0, nullptr};
+        std::vector<uint8_t> cells(8 * 4, 0);
+        cells[3] = 255;
+
+        XrContentMaskDXR mask;
+        CHECK(dxr::ChainContentMask(fei, mask, cells, 8, 4, 0.03f), "ChainContentMask must succeed");
+        CHECK(mask.type == (XrStructureType)XR_TYPE_CONTENT_MASK_DXR,
+              "chained struct must carry the extension's type");
+        CHECK(fei.next == &mask, "XrFrameEndInfo::next must point at the chained struct");
+        CHECK(mask.next == &sentinelChain, "the chained struct must preserve the prior chain");
+        CHECK(mask.width == 8 && mask.height == 4, "grid dims copied verbatim");
+        CHECK(mask.strideBytes == 8, "tightly-packed rows: strideBytes == width");
+        CHECK(mask.cells == cells.data(), "cells must point at the caller's buffer, not a copy");
+        CHECK(std::fabs(mask.marginNormalized - 0.03f) <= 1e-6f, "margin copied verbatim");
+    }
+
+    // --- Chained AFTER ChainContentBounds (mask first, then bounds): both
+    //     structs stay reachable from fei.next, and the original chain tail
+    //     survives underneath. ---
+    {
+        int sentinelChain = 0;
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO, &sentinelChain, 0,
+                           XR_ENVIRONMENT_BLEND_MODE_OPAQUE, 0, nullptr};
+        std::vector<uint8_t> cells(4 * 4, 255);
+
+        XrContentMaskDXR mask;
+        CHECK(dxr::ChainContentMask(fei, mask, cells, 4, 4), "mask chains first");
+        XrRect2Df bounds{};
+        bounds.extent.width = 0.5f;
+        bounds.extent.height = 0.5f;
+        XrContentBoundsDXR cb;
+        CHECK(dxr::ChainContentBounds(fei, cb, bounds), "bounds chains second");
+
+        // Walk the chain and prove both are on it, above the pre-existing tail.
+        bool sawMask = false, sawBounds = false, sawTail = false;
+        const void* p = fei.next;
+        for (int hops = 0; p != nullptr && hops < 8; ++hops) {
+            if (p == &mask) {
+                sawMask = true;
+                p = mask.next;
+            } else if (p == &cb) {
+                sawBounds = true;
+                p = cb.next;
+            } else {
+                sawTail = (p == &sentinelChain);
+                break;
+            }
+        }
+        CHECK(sawBounds, "the bounds struct must be reachable from fei.next");
+        CHECK(sawMask, "the mask struct must be reachable from fei.next");
+        CHECK(sawTail, "the pre-existing chain tail must survive both chain calls");
+        CHECK(fei.next == &cb, "the last-chained struct is the head");
+    }
+
+    // --- ChainContentMask rejects a grid it cannot describe, WITHOUT
+    //     touching fei (a half-chained frame would be worse than none). ---
+    {
+        int sentinelChain = 0;
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO, &sentinelChain, 0,
+                           XR_ENVIRONMENT_BLEND_MODE_OPAQUE, 0, nullptr};
+        std::vector<uint8_t> cells(4 * 4, 255);
+        XrContentMaskDXR mask;
+
+        CHECK(!dxr::ChainContentMask(fei, mask, cells, 8, 8),
+              "a cells buffer shorter than width*height must be refused");
+        CHECK(!dxr::ChainContentMask(fei, mask, cells, 0, 4), "a zero grid dimension is refused");
+        CHECK(!dxr::ChainContentMask(fei, mask, cells, 513, 1),
+              "a grid past the extension's 512-cell ceiling is refused");
+        CHECK(fei.next == &sentinelChain, "a refused chain must leave XrFrameEndInfo untouched");
+    }
+
+    // --- Degenerate input -> false, and `out` left all-zero. ---
+    {
+        std::vector<uint8_t> cov(16 * 16, 1);
+        std::vector<uint8_t> cells;
+
+        auto allZero = [](const std::vector<uint8_t>& v) {
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (v[i] != 0) return false;
+            }
+            return true;
+        };
+
+        cells.assign(4, 200); // sentinel: must be overwritten/cleared
+        CHECK(!dxr::ContentMaskFromCoverage(nullptr, 16, 16, 16, 16, 16, nullptr, 4, 4, cells),
+              "a null source must fail");
+        CHECK(cells.size() == 16 && allZero(cells), "failure leaves a sized, all-zero grid");
+
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 0, 16, 16, 16, 16, nullptr, 4, 4, cells),
+              "a zero source width must fail");
+        CHECK(allZero(cells), "zero-srcW failure leaves an all-zero grid");
+
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 8, 16, 16, nullptr, 4, 4, cells),
+              "srcStride < srcW must fail");
+        CHECK(allZero(cells), "bad-stride failure leaves an all-zero grid");
+
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 0, 16, nullptr, 4, 4, cells),
+              "a zero window width must fail");
+        CHECK(allZero(cells), "zero-window failure leaves an all-zero grid");
+
+        cells.assign(4, 200);
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, nullptr, 0, 4, cells),
+              "a zero grid dimension must fail");
+        CHECK(cells.empty(), "an unusable grid dimension clears out rather than sizing it");
+
+        cells.assign(4, 200);
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, nullptr, 4, 513, cells),
+              "a grid past the 512-cell ceiling must fail");
+        CHECK(cells.empty(), "an out-of-range grid dimension clears out rather than sizing it");
+
+        XrRect2Di badZone{};
+        badZone.extent.width = 0;
+        badZone.extent.height = 8;
+        CHECK(!dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, &badZone, 4, 4, cells),
+              "a zero-extent srcRectPx must fail");
+        CHECK(cells.size() == 16 && allZero(cells), "bad-zone failure leaves a sized, all-zero grid");
+    }
+
+    // --- A valid but fully-UNCOVERED source is not a failure: it returns true
+    //     with an all-zero grid, which the caller detects via the cell count
+    //     (the runtime reads an all-zero mask as absent). ---
+    {
+        std::vector<uint8_t> cov(16 * 16, 0);
+        std::vector<uint8_t> cells;
+        CHECK(dxr::ContentMaskFromCoverage(cov.data(), 16, 16, 16, 16, 16, nullptr, 4, 4, cells),
+              "an empty-but-valid coverage is not degenerate input");
+        CHECK(dxr::ContentMaskCoverageCells(cells) == 0,
+              "an empty coverage yields a zero-cell mask the caller can skip chaining");
+    }
+}
+
 int main()
 {
     test_capture_numbering();
@@ -939,6 +1236,7 @@ int main()
     test_rig_math();
     test_clip_policy();
     test_content_bounds();
+    test_content_mask();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();

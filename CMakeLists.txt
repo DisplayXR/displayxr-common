@@ -236,6 +236,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/zone_default.h
     common/clip_policy.h  # header-only: near/far/clipFar from XrRearDepthBudgetDXR (#38)
     common/content_bounds.h # header-only: ProjectAabbToCanvasBounds + ChainContentBounds (XR_DXR_depth_budget v2)
+    common/content_mask.h # header-only: ContentMaskFromCoverage + ChainContentMask (XR_DXR_depth_budget v3)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
