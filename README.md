@@ -135,7 +135,8 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
-| View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
+| View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — the ADR-041 inactive-tail fill | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
+| Located-count projection submission (ADR-041): read `XrViewActivityStateDXR::activeViewCount`, stage a located-sized view array with the inactive tail aliased onto view 0 | `view_submission.h` | both (also `displayxr::rules`) |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -177,13 +178,84 @@ assigns its own variable; `grep PRIMARY_STEREO` per leg and account for every hi
 
 The probe is safe to call unconditionally: it enumerates once and returns `PRIMARY_STEREO` on every other path
 (older runtime, extension not enabled, enumerate failure, null handles), so the same binary keeps working
-against a pre-#1486 runtime. Locate into an `XRT_MAX_VIEWS` (8) wide buffer and submit the **active mode's**
-view count (app rule INV-3.1) — never more views than were located or than the swapchain has slices.
+against a pre-#1486 runtime. Locate into an `XRT_MAX_VIEWS` (8) wide buffer and **render** the active mode's
+view count — but **submit the located count**, aliasing the rest: see the next section (ADR-041). The older
+advice here ("submit the active mode's view count") is what ADR-041 replaced.
 
 The type value comes from the consumer's `XR_DXR_display_info.h` when one is on the include path
 (`__has_include`); a tree pinned to a pre-19 snapshot falls back to the fixed DXR author-ID value, so the header
 compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour (C11 and C++17,
 GPU- and loader-free — they script a fake `xrEnumerateViewConfigurations`).
+
+### Submitting the located view count (`view_submission.h`, ADR-041 "Model E")
+
+**The runtime contract** (runtime [#1533](https://github.com/DisplayXR/displayxr-runtime/pull/1533), ADR-041):
+an `XrCompositionLayerProjection` must carry **exactly** the number of views `xrLocateViews` returned, under
+*every* view configuration type. That is core OpenXR ("all views associated with projection layers must be
+supplied"); the pre-ADR-041 DisplayXR relaxation — submit whatever the active rendering mode's `viewCount`
+is — contradicted it and is gone.
+
+The two counts are now separate and both explicit:
+
+| | what it is | where it comes from | changes on a mode switch? |
+|---|---|---|---|
+| **located** | the size of every projection layer | `xrLocateViews` `viewCountOutput`; fixed by the begun view configuration for the session's lifetime (2 under `PRIMARY_STEREO`, the device max under `PRIMARY_MULTIVIEW_DXR`) | **no** |
+| **active** | how many of them carry live content | `XrViewActivityStateDXR::activeViewCount` (`XR_DXR_display_info` `SPEC_VERSION` 21), chained on `XrViewState` | **yes** |
+
+Views `[active, located)` are **inactive**: the runtime locates them at view 0's pose and **ignores whatever
+pixels they point at**. An app that renders only the active views therefore closes the gap by **aliasing** —
+each inactive view keeps its **own located pose/fov** (a pose the runtime rejects still fails the layer for
+real) and takes **view 0's `subImage`**, i.e. content it already rendered this frame.
+
+**The Windows path is automatic.** `EndFrame()`, `EndFrameWithWindowSpaceLayers()` and
+`EndFrameWithWindowSpaceHud()` now stage the layer themselves:
+
+- `LocateViews()` chains `XrViewActivityStateDXR` (when `XR_DXR_display_info` is enabled), and records
+  `XrSessionManager::locatedViewCount`, `activeViewCount` and `locatedViews[8]`. When the runtime is older
+  than `SPEC_VERSION` 21 and leaves the struct alone, `activeViewCount` falls back to the **rendering-mode
+  table's** `viewCount` for `currentModeIndex` — the same number the app derives from the 1/2/3 mode keys.
+- the `viewCount` argument to `EndFrame*` is now the **ACTIVE** count: how many entries of the array the app
+  filled. It can shrink how much is **copied**, never how much is **submitted**. **No call site has to
+  change** — a 2D-mode call still passing `1` now submits 2 views under `PRIMARY_STEREO`, which is exactly
+  what the runtime requires.
+- the hardcoded `viewCount = 2` in `EndFrameWithQuadLayer()` is gone (it was wrong in a 1-view mode and wrong
+  under `PRIMARY_MULTIVIEW_DXR`'s 4).
+
+**A leg that builds its own projection layer** — every macOS / Linux / Android `main.{cpp,mm}` in the demos,
+which cannot link the STATIC `displayxr_common_lib` — takes the same two helpers from `displayxr::rules`:
+
+```c
+#include "view_submission.h"                 // pulls in dxr_view_config.h
+
+XrViewState viewState = {XR_TYPE_VIEW_STATE};
+XrViewActivityStateDXR activity;
+DxrChainViewActivity(&viewState, &activity);                  // before xrLocateViews
+xrLocateViews(session, &locateInfo, &viewState, 8, &located, views);
+
+uint32_t active = DxrReadViewActivity(&activity, located, modeViewCount);
+// … render views [0, active) …
+
+XrCompositionLayerProjectionView projViews[8];                // sized LOCATED, not active
+// … fill projViews[0 .. active) as before …
+DxrAliasInactiveViews(projViews, views, located, active);     // the tail
+layer.viewCount = located;                                    // NOT `active`
+layer.views     = projViews;
+```
+
+`DxrBuildProjectionViews()` is the same thing for a caller holding a `const` array sized to `active` (which is
+what `EndFrame()` is given) — it stages into its own buffer and returns the count to submit.
+
+**Deprecation window.** Under `PRIMARY_STEREO`, an app that enabled `XR_DXR_display_info` may still submit 1
+view while the active mode is 1-view: accepted for one release with a one-shot runtime `WARN`, then rejected
+(the runtime's `DXR_UNDER_SUBMIT` switch selects the behaviour, and its default flips to strict once this lib
+and the five demos ship the alias submission). Under `PRIMARY_MULTIVIEW_DXR` an under-submit is rejected
+immediately. A **3D zone layer is a projection layer** and goes through the same gate, aliased per zone.
+
+`XrViewActivityStateDXR` comes from the consumer's `XR_DXR_display_info.h` when it is `SPEC_VERSION` 21 or
+newer; a pre-21 snapshot gets the guarded fallback definition in `view_submission.h` (same two-stage
+mechanism `dxr_view_config.h` uses for `PRIMARY_MULTIVIEW_DXR`). `tests/view_submission_test.cpp` pins the
+behaviour — located 4 / active 2 → a 4-view layer whose views 2 and 3 alias view 0's `subImage` while keeping
+their own poses; located 2 / active 1 → 2; an old-style `viewCount = 1` → still 2.
 
 ### The undock launch contract (`launch_args.h`, `url_fetch.h`, `view_protocol.h`)
 
@@ -238,6 +310,14 @@ When unset (this repo's own CI), the build fetches `displayxr-extensions` at a p
 > `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` supplies its own snapshot instead, and an older one there is what
 > `dxr_view_config.h`'s fallback covers. Bump the `GIT_TAG` in the `displayxr_extensions_headers`
 > `FetchContent_Declare` whenever this repo starts using a newer extension header.
+>
+> **One header currently overrides that pin.** ADR-041 needs `XR_DXR_display_info.h` `SPEC_VERSION` 21
+> (`XrViewActivityStateDXR`), which is still on an unmerged runtime branch, so it is vendored
+> byte-for-byte at `extensions/openxr/XR_DXR_display_info.h` and put **ahead** of the fetched snapshot —
+> **on the standalone path only**. A consumer that sets `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` is unaffected
+> and keeps its own snapshot; `common/view_submission.h` carries the guarded pre-21 fallback for it.
+> See [`extensions/README.md`](extensions/README.md) for how to retire the directory once runtime
+> [#1533](https://github.com/DisplayXR/displayxr-runtime/pull/1533) merges.
 
 ### Rear-depth-budget clip policy (`clip_policy.h`)
 
@@ -463,7 +543,9 @@ display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near_offse
 
 That is the *math* for N views. The OpenXR-level permission to submit N views is a separate, app-called
 opt-in — see [Opting in to `PRIMARY_MULTIVIEW_DXR`](#opting-in-to-primary_multiview_dxr-dxr_view_configh):
-under `PRIMARY_STEREO` the runtime accepts exactly 2.
+under `PRIMARY_STEREO` the runtime accepts exactly 2. And whatever the configuration reports, the
+projection layer must carry **that** count every frame, not the active mode's — see
+[Submitting the located view count](#submitting-the-located-view-count-view_submissionh-adr-041-model-e).
 
 ## Documentation
 

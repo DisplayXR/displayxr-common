@@ -69,6 +69,13 @@ xrEnumerateViewConfigurations(XrInstance instance,
 int
 dxr_view_config_cxx_check(void);
 
+/* Defined in view_submission_test.cpp — the ADR-041 located-count submission
+ * contract (common/view_submission.h). Lives in this target because it shares
+ * the header chain, and because the C TU here is what makes the OpenXR symbols
+ * link on a loader-free runner. */
+int
+dxr_view_submission_check(void);
+
 static void
 script(XrResult result, uint32_t count, XrViewConfigurationType a, XrViewConfigurationType b)
 {
@@ -133,6 +140,11 @@ main(void)
 
 	if (dxr_view_config_cxx_check() != 0) {
 		fprintf(stderr, "FAIL: C++17 view of dxr_view_config.h disagrees with the C one\n");
+		g_failures++;
+	}
+
+	if (dxr_view_submission_check() != 0) {
+		fprintf(stderr, "FAIL: view_submission.h contract (ADR-041)\n");
 		g_failures++;
 	}
 

@@ -22,14 +22,18 @@ set_target_properties(displayxr_launch_args_test PROPERTIES
 
 add_test(NAME displayxr_launch_args_test COMMAND displayxr_launch_args_test)
 
-# dxr_view_config.h contract test (runtime #1486). Links displayxr::rules (the
-# header-only, platform-neutral target the non-Windows legs consume) plus the
-# header-only OpenXR / DisplayXR-extension include targets — NOT the loader:
-# the C TU defines its own xrEnumerateViewConfigurations, which is what makes
-# the probe loop testable on a bare CI runner. Two TUs on purpose: C11 + C++17.
+# dxr_view_config.h + view_submission.h contract test (runtime #1486 / ADR-041).
+# Links displayxr::rules (the header-only, platform-neutral target the
+# non-Windows legs consume) plus the header-only OpenXR / DisplayXR-extension
+# include targets — NOT the loader: the C TU defines its own
+# xrEnumerateViewConfigurations, which is what makes the probe loop testable on
+# a bare CI runner. Three TUs on purpose: C11 + C++17, and the ADR-041
+# located-count submission contract (which is the platform-neutral core of what
+# EndFrame() does, extracted so it is testable off Windows).
 add_executable(displayxr_view_config_test
     view_config_test.c
-    view_config_test_cxx.cpp)
+    view_config_test_cxx.cpp
+    view_submission_test.cpp)
 target_link_libraries(displayxr_view_config_test PRIVATE
     displayxr::rules
     displayxr_ext_headers

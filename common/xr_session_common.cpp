@@ -657,6 +657,17 @@ bool LocateViews(
     XrViewEyeTrackingStateDXR eyeTrackingState = {(XrStructureType)XR_TYPE_VIEW_EYE_TRACKING_STATE_DXR};
     viewState.next = &eyeTrackingState;
 
+    // Chain per-frame view activity (v21, ADR-041) — the runtime publishes how
+    // many of the located views the active rendering mode uses. Gated on the
+    // extension: a runtime that never saw XR_DXR_display_info would just ignore
+    // the struct, but not chaining it keeps the chain honest. `activeViewCount`
+    // is pre-seeded to 0, which is how the reader below tells "runtime filled
+    // it" from "runtime is older than v21".
+    XrViewActivityStateDXR viewActivity = {};
+    if (xr.hasDisplayInfoExt) {
+        DxrChainViewActivity(&viewState, &viewActivity);
+    }
+
     uint32_t viewCount = 8;
     XrView views[8];
     for (uint32_t i = 0; i < 8; i++) {
@@ -736,6 +747,21 @@ bool LocateViews(
         xr.projMatrices[i] = XrFovToProjectionMatrix(views[i].fov, 0.01f, 100.0f);
     }
 
+    // ADR-041: record what must be SUBMITTED (the located count) and how much
+    // of it is live this frame. The fallback when the runtime did not fill
+    // XrViewActivityStateDXR is the active rendering mode's own viewCount —
+    // the same number the app derives from the 1/2/3 mode keys.
+    uint32_t modeActive = 0;
+    if (xr.currentModeIndex < xr.renderingModeCount && xr.currentModeIndex < 8) {
+        modeActive = xr.renderingModeViewCounts[xr.currentModeIndex];
+    }
+    xr.locatedViewCount = viewCount;
+    xr.activeViewCount = DxrReadViewActivity(
+        xr.hasDisplayInfoExt ? &viewActivity : nullptr, viewCount, modeActive);
+    for (uint32_t i = 0; i < viewCount && i < 8; i++) {
+        xr.locatedViews[i] = views[i];
+    }
+
     xr.isEyeTracking = (eyeTrackingState.isTracking == XR_TRUE);
     xr.activeEyeTrackingMode = (uint32_t)eyeTrackingState.activeMode;
     xr.eyeTrackingActive = xr.isEyeTracking;  // backward compat for HUD
@@ -768,15 +794,62 @@ bool ReleaseSwapchainImage(XrSessionManager& xr) {
     return XR_SUCCEEDED(xrReleaseSwapchainImage(xr.swapchain.swapchain, &releaseInfo));
 }
 
+// ADR-041 ("Model E", runtime #1533) staging for every projection layer this
+// lib submits. The app hands us a CONST array sized to what it rendered (the
+// ACTIVE count); the runtime requires the LOCATED count. We therefore cannot
+// alias in place — we copy into this buffer and fill the inactive tail from
+// xr.locatedViews (own pose/fov) + view 0's subImage.
+//
+// `activeCount` can only shrink how much is COPIED, never how much is
+// SUBMITTED. A session that never located (locatedViewCount == 0) falls all the
+// way back to the caller's own array: there is nothing better to submit.
+namespace {
+
+struct ProjectionSubmission {
+    XrCompositionLayerProjectionView storage[8];
+    const XrCompositionLayerProjectionView* views = nullptr;
+    uint32_t count = 0;
+};
+
+void StageProjectionViews(const XrSessionManager& xr,
+                          const XrCompositionLayerProjectionView* in,
+                          uint32_t activeCount,
+                          ProjectionSubmission& out) {
+    out.count = DxrBuildProjectionViews(out.storage, 8, in, activeCount,
+                                        xr.locatedViews, xr.locatedViewCount);
+    if (out.count == 0) {
+        // Degenerate (no views passed, or never located) — submit verbatim.
+        out.views = in;
+        out.count = activeCount;
+        return;
+    }
+    out.views = out.storage;
+
+    // One-shot, so a mode that renders fewer views than it locates is visible
+    // in the log exactly once per session instead of never or 60x/second.
+    static bool aliasLogged = false;
+    if (!aliasLogged && out.count > activeCount) {
+        aliasLogged = true;
+        LOG_WARN("[Frame] ADR-041: submitting %u located views, aliasing views [%u,%u) "
+                 "onto view 0's subImage (app rendered %u)",
+                 out.count, activeCount, out.count, activeCount);
+    }
+}
+
+} // namespace
+
 bool EndFrame(XrSessionManager& xr, XrTime displayTime, const XrCompositionLayerProjectionView* views,
               uint32_t viewCount, XrCompositionLayerFlags projectionLayerFlags,
               const void* projectionNext, const void* frameEndNext) {
+    ProjectionSubmission sub;
+    StageProjectionViews(xr, views, viewCount, sub);
+
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.next = projectionNext;
     projectionLayer.space = xr.localSpace;
     projectionLayer.layerFlags = projectionLayerFlags;
-    projectionLayer.viewCount = viewCount;
-    projectionLayer.views = views;
+    projectionLayer.viewCount = sub.count;
+    projectionLayer.views = sub.views;
 
     const XrCompositionLayerBaseHeader* layers[] = {
         (XrCompositionLayerBaseHeader*)&projectionLayer
@@ -911,12 +984,15 @@ bool EndFrameWithWindowSpaceLayers(
     uint32_t extraLayerCount,
     const void* frameEndNext
 ) {
+    ProjectionSubmission sub;
+    StageProjectionViews(xr, projViews, viewCount, sub);
+
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.next = projectionNext;
     projectionLayer.space = xr.localSpace;
     projectionLayer.layerFlags = projectionLayerFlags;
-    projectionLayer.viewCount = viewCount;
-    projectionLayer.views = projViews;
+    projectionLayer.viewCount = sub.count;
+    projectionLayer.views = sub.views;
 
     if (srcW < 0) srcW = (int32_t)xr.hudSwapchain.width;
     if (srcH < 0) srcH = (int32_t)xr.hudSwapchain.height;
@@ -1195,10 +1271,16 @@ bool EndFrameWithQuadLayer(
     const XrPosef& quadPose,
     float quadWidth, float quadHeight
 ) {
+    // ADR-041: was a hardcoded 2 — wrong the moment the session begins
+    // PRIMARY_MULTIVIEW_DXR (4 located views on sim_display) AND wrong in a
+    // 1-view mode. Stage like every other projection layer in this file.
+    ProjectionSubmission sub;
+    StageProjectionViews(xr, projViews, xr.activeViewCount ? xr.activeViewCount : 2, sub);
+
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projectionLayer.space = xr.localSpace;
-    projectionLayer.viewCount = 2;
-    projectionLayer.views = projViews;
+    projectionLayer.viewCount = sub.count;
+    projectionLayer.views = sub.views;
 
     // Quad layer for UI overlay - positioned in VIEW space (pose is view-relative)
     // We use VIEW space because DisplayXR's handle_space() silently drops LOCAL-space
