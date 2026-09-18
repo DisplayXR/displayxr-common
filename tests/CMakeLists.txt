@@ -21,3 +21,21 @@ set_target_properties(displayxr_launch_args_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_test(NAME displayxr_launch_args_test COMMAND displayxr_launch_args_test)
+
+# dxr_view_config.h contract test (runtime #1486). Links displayxr::rules (the
+# header-only, platform-neutral target the non-Windows legs consume) plus the
+# header-only OpenXR / DisplayXR-extension include targets — NOT the loader:
+# the C TU defines its own xrEnumerateViewConfigurations, which is what makes
+# the probe loop testable on a bare CI runner. Two TUs on purpose: C11 + C++17.
+add_executable(displayxr_view_config_test
+    view_config_test.c
+    view_config_test_cxx.cpp)
+target_link_libraries(displayxr_view_config_test PRIVATE
+    displayxr::rules
+    displayxr_ext_headers
+    ${DISPLAYXR_MATH_OPENXR})
+set_target_properties(displayxr_view_config_test PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+add_test(NAME displayxr_view_config_test COMMAND displayxr_view_config_test)

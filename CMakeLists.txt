@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 
+# VERSION tracks the NEXT git tag. The tags are the version of record (consumers
+# pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 0.4.0
+    VERSION 2.14.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -172,7 +174,11 @@ else()
     FetchContent_Declare(
         displayxr_extensions_headers
         GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
-        GIT_TAG 6fdc449ddb12029ec205a4d99844f039cfe835c0
+        # displayxr-extensions@main 2026-09-18 (runtime a0832ebf). Carries
+        # XR_DXR_display_info.h SPEC_VERSION 19 — i.e. the
+        # XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MULTIVIEW_DXR enumerator that
+        # common/dxr_view_config.h prefers over its own fallback (runtime #1486).
+        GIT_TAG 2e3e082380a28f51c2dc4e27a8f149881b0aad37
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
@@ -237,6 +243,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/clip_policy.h  # header-only: near/far/clipFar from XrRearDepthBudgetDXR (#38)
     common/content_bounds.h # header-only: ProjectAabbToCanvasBounds + ChainContentBounds (XR_DXR_depth_budget v2)
     common/content_mask.h # header-only: ContentMaskFromCoverage + ChainContentMask (XR_DXR_depth_budget v3)
+    common/dxr_view_config.h # header-only: DxrSelectViewConfigType() PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
@@ -281,6 +288,13 @@ endif()
 #
 # Keep it header-only: anything added here must compile on Windows, macOS,
 # Linux AND Android with no platform sources and no external dependencies.
+#
+# common/dxr_view_config.h is the same story for the view CONFIGURATION: the
+# PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486) has to be applied by every leg,
+# and the non-Windows legs cannot reach XrSessionManager. It needs OpenXR on
+# the include path (<openxr/openxr.h>, and ideally the consumer's
+# XR_DXR_display_info.h) — which every leg that calls OpenXR already has — so
+# this target still adds no dependency of its own.
 add_library(displayxr_rules INTERFACE)
 add_library(displayxr::rules ALIAS displayxr_rules)
 target_include_directories(displayxr_rules INTERFACE

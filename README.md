@@ -135,10 +135,55 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
+| View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
 **stb ownership:** the lib owns exactly one `STB_IMAGE_IMPLEMENTATION` and one `STB_IMAGE_WRITE_IMPLEMENTATION` TU per platform (Windows: `d3d11_renderer.cpp` / `atlas_capture.cpp`; Apple: `stb_image_impl_macos.cpp` / `atlas_capture_macos.mm`). Consumers must not define them.
+
+### Opting in to `PRIMARY_MULTIVIEW_DXR` (`dxr_view_config.h`)
+
+**The runtime contract** (runtime [#1486](https://github.com/DisplayXR/displayxr-runtime/issues/1486) /
+[#1500](https://github.com/DisplayXR/displayxr-runtime/pull/1500)): `XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO`
+now means **exactly 2 views** — `xrEnumerateViewConfigurationViews` / `xrLocateViews` report 2, and an
+`xrEndFrame` whose projection layer carries more is rejected with `XR_ERROR_VALIDATION_FAILURE`. The device's
+MAX view count across rendering modes moved to a second view configuration,
+`XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MULTIVIEW_DXR` (`XR_DXR_display_info.h`, `SPEC_VERSION` 19), which
+`xrEnumerateViewConfigurations` advertises **only** when the instance enabled `XR_DXR_display_info`. It is
+fixed for the instance lifetime (4 on `sim_display`, 2 on a stereo panel).
+
+So **any** app whose per-frame view count comes from the active DXR rendering mode (the 1/2/3 or V mode keys,
+`xrEnumerateDisplayRenderingModesDXR`) or that sizes zone tiles from the reported view count must begin its
+session with `PRIMARY_MULTIVIEW_DXR` — otherwise it goes black in `sim_display`'s Quad mode, which is always
+enumerable on a dev box. An app hardcoded to 2 views stays on `PRIMARY_STEREO` and needs none of this.
+
+**The opt-in is app-called, not automatic**: this lib never creates the instance, system or session, so it
+cannot enable `XR_DXR_display_info` or pick the configuration on the app's behalf. One line in the app's
+`InitializeOpenXR()`, after `xrGetSystem()` and **before** the first `xrEnumerateViewConfigurationViews()`:
+
+```cpp
+#include "dxr_view_config.h"
+
+xr.viewConfigType = DxrSelectViewConfigType(xr.instance, xr.systemId);   // ← the opt-in
+LOG_INFO("View configuration: %s", DxrViewConfigTypeName(xr.viewConfigType));
+```
+
+`XrSessionManager::viewConfigType` then threads that same value through every view-configuration-typed call the
+lib makes on the app's behalf — `xrEnumerateEnvironmentBlendModes`, `XrSessionBeginInfo::primaryViewConfigurationType`,
+`XrViewLocateInfo::viewConfigurationType` — so the one assignment is the whole Windows change. An app that
+carries its own session code (the macOS / Linux / Android legs) takes the header from `displayxr::rules` and
+assigns its own variable; `grep PRIMARY_STEREO` per leg and account for every hit — a struct default staying
+`PRIMARY_STEREO` is the intended fallback initialiser, but a *typed call site* still naming it is a bug.
+
+The probe is safe to call unconditionally: it enumerates once and returns `PRIMARY_STEREO` on every other path
+(older runtime, extension not enabled, enumerate failure, null handles), so the same binary keeps working
+against a pre-#1486 runtime. Locate into an `XRT_MAX_VIEWS` (8) wide buffer and submit the **active mode's**
+view count (app rule INV-3.1) — never more views than were located or than the swapchain has slices.
+
+The type value comes from the consumer's `XR_DXR_display_info.h` when one is on the include path
+(`__has_include`); a tree pinned to a pre-19 snapshot falls back to the fixed DXR author-ID value, so the header
+compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour (C11 and C++17,
+GPU- and loader-free — they script a fake `xrEnumerateViewConfigurations`).
 
 ### The undock launch contract (`launch_args.h`, `url_fetch.h`, `view_protocol.h`)
 
@@ -187,12 +232,12 @@ The security negatives in `tests/launch_args_test.cpp` are the contract.
 
 When unset (this repo's own CI), the build fetches `displayxr-extensions` at a pinned commit. When the consumer's dir also carries the full Khronos set (every current consumer's does), it wins the include order, so lib TUs and app TUs compile against the same `openxr.h`.
 
-> **`XR_DXR_depth_budget.h` (below) needs a newer pin.** It ships from
-> `displayxr-runtime` PR [#1366](https://github.com/DisplayXR/displayxr-runtime/pull/1366) and auto-syncs to
-> `displayxr-extensions` only once that PR merges to `main`. Until this repo's pinned
-> `GIT_TAG` (the `displayxr_extensions_headers` `FetchContent_Declare` above) is bumped past that
-> sync in a follow-up commit, this repo's own standalone CI build (and any consumer relying on the
-> pinned fallback rather than `DISPLAYXR_EXTENSIONS_INCLUDE_DIR`) will fail to find the header.
+> **The pinned fallback is `displayxr-extensions@2e3e082` (2026-09-18), `XR_DXR_display_info.h`
+> `SPEC_VERSION` 19** — the snapshot that carries `XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MULTIVIEW_DXR`
+> (see the view-configuration opt-in above) as well as `XR_DXR_depth_budget.h`. A consumer that sets
+> `DISPLAYXR_EXTENSIONS_INCLUDE_DIR` supplies its own snapshot instead, and an older one there is what
+> `dxr_view_config.h`'s fallback covers. Bump the `GIT_TAG` in the `displayxr_extensions_headers`
+> `FetchContent_Declare` whenever this repo starts using a newer extension header.
 
 ### Rear-depth-budget clip policy (`clip_policy.h`)
 
@@ -415,6 +460,10 @@ Display3DView views[4];
 display3d_compute_views(eyes, 4, &nominal, &screen, &tunables, &pose, near_offset, far_offset, 0, views);
 // views[0..3] each have their own view_matrix + projection_matrix
 ```
+
+That is the *math* for N views. The OpenXR-level permission to submit N views is a separate, app-called
+opt-in — see [Opting in to `PRIMARY_MULTIVIEW_DXR`](#opting-in-to-primary_multiview_dxr-dxr_view_configh):
+under `PRIMARY_STEREO` the runtime accepts exactly 2.
 
 ## Documentation
 
