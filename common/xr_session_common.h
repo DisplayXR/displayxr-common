@@ -36,6 +36,7 @@
 #include <functional>
 
 #include "view_params.h"
+#include "view_submission.h"  // ADR-041 — located-count submission + inactive-tail aliasing
 #include "mode_switch.h"  // dxr::ModeSwitch — smooth 2D<->3D disparity sequencer
 
 struct InputState; // fwd-decl: XrSessionUpdateModeSwitch consumes the input flags
@@ -215,7 +216,28 @@ struct XrSessionManager {
     bool hasHudSwapchain = false;
 
     // Per-view data (N-view: up to 8 views, matching XRT_MAX_VIEWS)
+    //
+    // `viewCount` is what the last xrLocateViews returned — the LOCATED count,
+    // fixed for the session's lifetime by the begun view configuration.
     uint32_t viewCount = 2;
+
+    // ADR-041 ("Model E", runtime #1533) — the fixed-count submission contract.
+    //
+    // locatedViewCount: viewCountOutput from the last SUCCESSFUL xrLocateViews.
+    //   0 means "never located" — EndFrame then falls back to submitting exactly
+    //   what the caller passed (the pre-ADR-041 behaviour; it cannot know better).
+    // activeViewCount: how many of those views the active rendering mode uses
+    //   this frame. Read from XrViewActivityStateDXR (XR_DXR_display_info
+    //   SPEC_VERSION 21) when the extension is enabled and the runtime filled
+    //   it; otherwise the mode table's viewCount for currentModeIndex.
+    //   Views [activeViewCount, locatedViewCount) are INACTIVE: the runtime
+    //   ignores their pixels, but they must still be SUBMITTED.
+    // locatedViews: the per-view poses/FOVs as this lib transformed them, so an
+    //   aliased inactive view keeps its own pose/fov (only its subImage is
+    //   aliased onto view 0's).
+    uint32_t locatedViewCount = 0;
+    uint32_t activeViewCount = 0;
+    XrView locatedViews[8] = {};
     float eyePositions[8][3] = {};       // [view][x,y,z] — raw per-eye positions in display space
     DirectX::XMMATRIX viewMatrices[8];   // per-view view matrices from LocateViews
     DirectX::XMMATRIX projMatrices[8];   // per-view projection matrices from LocateViews
@@ -331,7 +353,19 @@ XrFovf ComputeKooimaFov(
     float screenWidthM, float screenHeightM);
 
 // End frame and submit layers (projection layer only)
-// viewCount defaults to 2 (stereo); pass 1 for mono submission in 2D mode.
+//
+// ADR-041 (runtime #1533): the layer ALWAYS carries the LOCATED view count —
+// whatever the last successful LocateViews() reported — regardless of what
+// `viewCount` says. `viewCount` is now only the ACTIVE count: how many entries
+// of `views` the app actually filled and rendered. It can shrink how much is
+// COPIED, never how much is SUBMITTED. Views [viewCount, located) are staged
+// internally with their own located pose/fov and view 0's subImage (the runtime
+// discards those pixels). So an existing 2D-mode call passing viewCount = 1
+// still submits 2 views under PRIMARY_STEREO, which is what the runtime now
+// requires — nothing at the call site has to change.
+//
+// The old advice ("pass 1 for mono submission in 2D mode") is therefore
+// harmless but pointless; passing the located count is equally fine.
 // projectionLayerFlags is OR-ed onto XrCompositionLayerProjection::layerFlags
 // (e.g. XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT for transparent
 // backgrounds).
@@ -409,7 +443,8 @@ bool EndFrameWithWindowSpaceLayers(
     const void* frameEndNext = nullptr);
 
 // End frame with both projection layer and window-space HUD layer.
-// viewCount defaults to 2 (stereo); pass 1 for mono submission in 2D mode.
+// viewCount is the ACTIVE count; the projection layer carries the LOCATED count
+// with the inactive tail aliased — see EndFrame above (ADR-041).
 // `srcW`/`srcH` < 0 means "use the full HUD swapchain image"; pass a smaller
 // rect to display only a sub-region of the texture (e.g. just a top button
 // bar) — useful for shrinking the opaque footprint when the body text is

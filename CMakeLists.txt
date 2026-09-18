@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.14.0
+    VERSION 2.15.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -185,7 +185,16 @@ else()
         FetchContent_Populate(displayxr_extensions_headers)
     endif()
     add_library(displayxr_ext_headers INTERFACE)
+    # extensions/ BEFORE the fetched snapshot, standalone path ONLY. The pin
+    # above is SPEC_VERSION 19; ADR-041's XrViewActivityStateDXR needs 21, which
+    # is still on an unmerged runtime branch, so the one header that moved is
+    # vendored here byte-for-byte (see extensions/README.md, incl. how to retire
+    # this directory once runtime #1533 merges). A consumer that sets
+    # DISPLAYXR_EXTENSIONS_INCLUDE_DIR never reaches this branch and keeps its
+    # own snapshot — common/view_submission.h carries the guarded pre-21
+    # fallback for exactly that case.
     target_include_directories(displayxr_ext_headers INTERFACE
+        "${CMAKE_CURRENT_SOURCE_DIR}/extensions"
         "${displayxr_extensions_headers_SOURCE_DIR}/include")
 endif()
 
@@ -243,7 +252,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/clip_policy.h  # header-only: near/far/clipFar from XrRearDepthBudgetDXR (#38)
     common/content_bounds.h # header-only: ProjectAabbToCanvasBounds + ChainContentBounds (XR_DXR_depth_budget v2)
     common/content_mask.h # header-only: ContentMaskFromCoverage + ChainContentMask (XR_DXR_depth_budget v3)
-    common/dxr_view_config.h # header-only: DxrSelectViewConfigType() PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486)
+    common/dxr_view_config.h # header-only: DxrSelectViewConfigType() PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486) + DxrAliasInactiveViews() (ADR-041)
+    common/view_submission.h # header-only: located-count submission staging + XrViewActivityStateDXR read (ADR-041, runtime #1533)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
@@ -288,6 +298,11 @@ endif()
 #
 # Keep it header-only: anything added here must compile on Windows, macOS,
 # Linux AND Android with no platform sources and no external dependencies.
+#
+# common/view_submission.h is in the same bucket as dxr_view_config.h below:
+# the ADR-041 located-count submission rule has to be applied by every leg, and
+# the ones that hand-build their own XrCompositionLayerProjection (macOS, Linux,
+# Android) cannot reach EndFrame() at all.
 #
 # common/dxr_view_config.h is the same story for the view CONFIGURATION: the
 # PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486) has to be applied by every leg,
