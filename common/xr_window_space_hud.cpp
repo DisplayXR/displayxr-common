@@ -22,6 +22,11 @@ bool CreateHudSwapchain(XrSession session, uint32_t width, uint32_t height, XrHu
     // corrupts the upload (CopyTextureRegion on D3D12 / vkCmdCopy on Vulkan).
     // DXGI_FORMAT_R8G8B8A8_UNORM=28, VK_FORMAT_R8G8B8A8_UNORM=37,
     // GL_RGBA8=0x8058, MTLPixelFormatRGBA8Unorm=70.
+    //
+    // #1589: deliberately NOT migrated to the honest-sRGB default (see the twin
+    // note in xr_session_common.cpp::CreateWindowSpaceSwapchain). CPU-uploaded
+    // display-referred pixels; moving it to the `_SRGB` sibling is correct but
+    // must be validated on all four copy paths first.
     const int64_t preferred[] = { 28, 37, 0x8058, 70 };
     int64_t selected = formats[0];
     for (int64_t pref : preferred) {

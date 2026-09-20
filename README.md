@@ -125,6 +125,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | D3D11 reference renderer (cube/grid/textures, mip chains) | `d3d11_renderer.{h,cpp}`, `mip_chain.h` | Windows |
 | Window-space-layer UI helpers (pure OpenXR) | `xr_window_space_hud.{h,cpp}` | both |
 | App-side atlas-capture helper (filename numbering, flash overlay, `RequestRuntimeAtlasCapture`) | `atlas_capture.{h,cpp}`, `atlas_capture_macos.mm` | both |
+| Color-swapchain format policy: the sRGB-vs-UNORM rule + the scene-linear decision it drives (ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589)) | `color_policy.{h,cpp}` | both |
 | View parameter struct | `view_params.h` | both |
 | stb image (read+write headers + the **only** implementation TUs) | `stb_image*.h`, `stb_image_impl_macos.cpp` | both |
 | dGPU hint (`NvOptimusEnablement`, force-included into consumer EXEs) | `optimus_dgpu_hint.c` | Windows |
@@ -184,6 +185,58 @@ The type value comes from the consumer's `XR_DXR_display_info.h` when one is on 
 (`__has_include`); a tree pinned to a pre-19 snapshot falls back to the fixed DXR author-ID value, so the header
 compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour (C11 and C++17,
 GPU- and loader-free — they script a fake `xrEnumerateViewConfigurations`).
+
+### Color: honest sRGB by default (`color_policy.h`, ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589))
+
+> **Behaviour change in `v2.15.0`.** Apps built against this lib now ask for an **`_SRGB`**
+> color swapchain by default. **The bytes on screen do not change** — they are simply
+> declared correctly. Set `DXR_SWAPCHAIN_ENCODING=unorm` to get the old format back.
+
+An OpenXR runtime is entitled to read a `*_UNORM` color swapchain as holding **linear** data
+and an `*_SRGB` one as holding **encoded** data. The DisplayXR runtime passes bytes through
+today, but it is becoming format-honest ([#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589)) — at which point an app that writes
+display-referred bytes into a UNORM swapchain washes out. An **honest `_SRGB` swapchain is
+correct under both** runtimes (pass-through: the app's own `_SRGB` render target encodes;
+format-honest: the runtime decodes on read and re-encodes on write — an identity round-trip),
+so the app population migrates first and the runtime follows.
+
+`SelectColorSwapchainFormat` (`xr_session_common.cpp`, over the pure rule in
+`color_policy.cpp`) therefore picks, from `xrEnumerateSwapchainFormats`:
+
+| `DXR_SWAPCHAIN_ENCODING` | Chosen format |
+|---|---|
+| *unset* (**default**) | `formats[0]` if it is already `_SRGB`; else the advertised **`_SRGB` sibling** of `formats[0]` (same channel order — a BGRA runtime stays BGRA); else the first advertised `_SRGB` code; else `formats[0]`, with one `WARN` line saying no `_SRGB` format exists |
+| `srgb` | the same, but a miss is reported as a fallback |
+| `unorm` | the first advertised plain-UNORM code (preferring `formats[0]`'s own sibling) — the A/B escape hatch and the pre-`v2.15.0` behaviour |
+
+Choosing `_SRGB` is only half the change: an `_SRGB` render target **encodes on write**, so the
+app must hand it **scene-linear** values or its authored colors get encoded twice. `dxr::RenderSceneLinear()`
+is the single predicate for that, and it follows the format automatically:
+
+- `DXR_TRUE_LINEAR` unset → true iff the created color swapchain is `_SRGB`.
+- `DXR_TRUE_LINEAR=0|false|off|no` → forced off.
+- `DXR_TRUE_LINEAR=`anything else → forced on. With `DXR_SWAPCHAIN_ENCODING=unorm` this is the
+  ADR-021 matrix's **true-linear-into-UNORM** cell (linear radiance in a UNORM swapchain).
+
+The D3D11 reference renderer implements that by compiling **both** pixel-shader variants in
+`CreateResources()` (the device exists before `xrCreateSession`, so the format is not knowable
+at compile time) and selecting per draw via `CubePixelShaderForTarget()` /
+`GridPixelShaderForTarget()`. Two rules for app code:
+
+- **Name the `_SRGB` format in the RTV desc.** The runtime hands out **TYPELESS** D3D11/D3D12
+  swapchain textures, so the view is what arms the hardware encode. `CreateRenderTargetView(renderer, tex, (DXGI_FORMAT)xr.swapchain.format, &rtv)`
+  already does the right thing; resolving down to the plain UNORM sibling silently disarms it.
+- **Clear with `ClearRenderTargetViewDisplayReferred()`**, not `ClearRenderTargetView()`, whenever
+  the clear color is an authored display-referred value. `ClearRenderTargetView` takes its value
+  in the view's own space, so an `_SRGB` RTV encodes it and a `(0.05, 0.05, 0.25)` background
+  would come out visibly brighter.
+
+**Not migrated (deliberate):** the window-space HUD swapchain
+(`CreateWindowSpaceSwapchain`, `CreateHudSwapchain`) stays `R8G8B8A8_UNORM`. It is a CPU-upload
+path — the HUD is rasterized on the CPU into display-referred RGBA8 and copied in, so nothing
+in it can encode, and the format also pins the copy family on four graphics APIs
+(`CopyTextureRegion` / `vkCmdCopy*`). Declaring those bytes `_SRGB` is the correct end state and
+costs no quality, but it needs its own verified change.
 
 ### The undock launch contract (`launch_args.h`, `url_fetch.h`, `view_protocol.h`)
 

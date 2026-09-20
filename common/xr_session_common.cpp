@@ -6,6 +6,7 @@
  */
 
 #include "xr_session_common.h"
+#include "color_policy.h" // the one place the sRGB-vs-UNORM decision is made
 #include "display3d_view.h"
 #include "input_handler.h" // InputState — consumed by XrSessionUpdateModeSwitch
 #include "logging.h"
@@ -17,55 +18,61 @@
 
 using namespace DirectX;
 
-// ADR-021 regression-matrix helper. Lets a tester force the color swapchain's
-// encoding state so the runtime's per-client color path can be exercised:
-//   DXR_SWAPCHAIN_ENCODING=srgb  → prefer an advertised *_SRGB format. The
-//       per-frame RTV is created with the swapchain's format, so the GPU
-//       auto-encodes on write (honest encoded). Two such clients blending under
-//       the workspace make the service compositor's Model-B linear-compose path
-//       engage (decode-on-sample → linear atlas → DP encodes at handoff).
-//   DXR_SWAPCHAIN_ENCODING=unorm → prefer a plain UNORM format (the app writes
-//       its bytes raw; today's encoded-into-UNORM default, also the
-//       true-linear-into-UNORM source — content is whatever the renderer wrote).
-//   unset → runtime-preferred (formats[0]), unchanged behavior.
-// Windows-only test code, so MSVC _stricmp is fine.
+// ADR-021 / #1589. DEFAULT = honest sRGB: with DXR_SWAPCHAIN_ENCODING unset we
+// now ask for the `_SRGB` sibling of the runtime's preferred format whenever the
+// runtime advertises one, and the renderer emits scene-linear so the swapchain's
+// own RTV encodes on write. The bytes reaching the runtime are IDENTICAL to the
+// old encoded-into-UNORM default — but they are now *declared* correctly, which
+// is what makes the app correct on today's pass-through runtime AND on the
+// format-honest runtime (#1589), where a UNORM swapchain will mean "linear".
+//
+//   DXR_SWAPCHAIN_ENCODING=srgb  → force an advertised *_SRGB format (same as
+//       the default; kept so the matrix can name the cell explicitly).
+//   DXR_SWAPCHAIN_ENCODING=unorm → force a plain UNORM format. The A/B escape
+//       hatch and the old default: the app writes its bytes raw
+//       (encoded-into-UNORM), or — with DXR_TRUE_LINEAR=1 — linear radiance
+//       into UNORM, the matrix's true-linear cell.
+//   unset → honest sRGB, falling back to formats[0] when the runtime advertises
+//       no *_SRGB format at all (then the bytes stay exactly as before).
+//
+// The rule itself lives in color_policy.{h,cpp} so it is device-free,
+// platform-neutral and unit-tested; this wrapper owns only the log line and the
+// hand-off to the renderer via dxr::NoteColorSwapchainFormat().
 static int64_t
-SelectColorSwapchainFormat(const std::vector<int64_t>& formats)
+SelectColorSwapchainFormat(const std::vector<int64_t>& formats, const char* what)
 {
-    if (formats.empty()) {
+    const char* enc = getenv("DXR_SWAPCHAIN_ENCODING");
+    const dxr::ColorEncodingPreference pref = dxr::ColorEncodingPreferenceFromEnv(enc);
+    const dxr::ColorFormatChoice choice = dxr::ChooseColorSwapchainFormat(formats, pref);
+
+    if (enc != nullptr && *enc != '\0' && pref == dxr::ColorEncodingPreference::HonestSrgb) {
+        LOG_WARN("DXR_SWAPCHAIN_ENCODING='%s' unrecognized (use srgb|unorm); using the default (honest sRGB)", enc);
+    }
+    if (choice.format == 0) {
+        LOG_ERROR("%s: the runtime advertised no swapchain formats", what);
         return 0;
     }
-    const char* enc = getenv("DXR_SWAPCHAIN_ENCODING");
-    if (enc == nullptr) {
-        return formats[0];
-    }
-    // Known *_SRGB codes: DXGI R8G8B8A8_UNORM_SRGB=29, B8G8R8A8_UNORM_SRGB=91;
-    //                     VK R8G8B8A8_SRGB=43, B8G8R8A8_SRGB=50; GL SRGB8_ALPHA8=0x8C43.
-    // Known UNORM codes:  DXGI 28/87; VK 37/44; GL_RGBA8=0x8058.
-    static const int64_t srgb_codes[]  = {29, 91, 43, 50, 0x8C43};
-    static const int64_t unorm_codes[] = {28, 87, 37, 44, 0x8058};
-    const int64_t* prefer = nullptr;
-    size_t n = 0;
-    if (_stricmp(enc, "srgb") == 0) {
-        prefer = srgb_codes;
-        n = sizeof(srgb_codes) / sizeof(srgb_codes[0]);
-    } else if (_stricmp(enc, "unorm") == 0) {
-        prefer = unorm_codes;
-        n = sizeof(unorm_codes) / sizeof(unorm_codes[0]);
-    } else {
-        LOG_INFO("DXR_SWAPCHAIN_ENCODING='%s' unrecognized (use srgb|unorm); using formats[0]", enc);
-        return formats[0];
-    }
-    for (size_t k = 0; k < n; k++) {
-        for (int64_t f : formats) {
-            if (f == prefer[k]) {
-                LOG_INFO("DXR_SWAPCHAIN_ENCODING=%s → selected format %lld (0x%llX)", enc, f, f);
-                return f;
-            }
+    if (choice.fellBack) {
+        if (pref == dxr::ColorEncodingPreference::ForceUnorm) {
+            LOG_WARN("%s: DXR_SWAPCHAIN_ENCODING=unorm but no known UNORM format advertised; using formats[0] %lld (0x%llX)",
+                     what, choice.format, choice.format);
+        } else {
+            // Not a failure — an older/minimal runtime simply has no sRGB
+            // sibling to offer. Bytes stay exactly as they were.
+            LOG_WARN("%s: no *_SRGB format advertised — falling back to formats[0] %lld (0x%llX); "
+                     "the app keeps writing display-referred bytes into a non-sRGB swapchain",
+                     what, choice.format, choice.format);
         }
+    } else {
+        LOG_INFO("%s: selected %s format %lld (0x%llX)%s",
+                 what, choice.isSrgb ? "honest _SRGB" : "UNORM",
+                 choice.format, choice.format,
+                 pref == dxr::ColorEncodingPreference::HonestSrgb ? " (default)" : " (DXR_SWAPCHAIN_ENCODING)");
     }
-    LOG_INFO("DXR_SWAPCHAIN_ENCODING=%s: no matching format advertised; using formats[0]", enc);
-    return formats[0];
+    // First non-zero note wins — the projection swapchain is the authority for
+    // whether the app's shaders must emit scene-linear (dxr::RenderSceneLinear).
+    dxr::NoteColorSwapchainFormat(choice.format);
+    return choice.format;
 }
 
 // Pick the environment blend mode to submit at xrEndFrame.
@@ -243,9 +250,11 @@ bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize) {
         LOG_DEBUG("  Format[%u]: %lld (0x%llX)", i, formats[i], formats[i]);
     }
 
-    // ADR-021: honor DXR_SWAPCHAIN_ENCODING (srgb|unorm) when set; else runtime-preferred (formats[0]).
-    int64_t selectedFormat = SelectColorSwapchainFormat(formats);
-    LOG_INFO("Selected swapchain format: %lld (0x%llX)", selectedFormat, selectedFormat);
+    // ADR-021 / #1589: honest sRGB by default; DXR_SWAPCHAIN_ENCODING=unorm to A/B.
+    int64_t selectedFormat = SelectColorSwapchainFormat(formats, "Color swapchain");
+    if (selectedFormat == 0) {
+        return false;
+    }
 
     const auto& view = xr.configViews[0];
 
@@ -337,9 +346,13 @@ bool CreateQuadLayerSwapchain(XrSessionManager& xr, uint32_t width, uint32_t hei
     std::vector<int64_t> formats(formatCount);
     XR_CHECK(xrEnumerateSwapchainFormats(xr.session, formatCount, &formatCount, formats.data()));
 
-    // ADR-021: honor DXR_SWAPCHAIN_ENCODING (srgb|unorm) when set; else runtime-preferred (formats[0]).
-    int64_t selectedFormat = SelectColorSwapchainFormat(formats);
-    LOG_INFO("Selected quad swapchain format: %lld (0x%llX)", selectedFormat, selectedFormat);
+    // ADR-021 / #1589: same rule as the projection swapchain, so both layers
+    // carry the same encoding and the renderer's one scene-linear decision is
+    // right for both.
+    int64_t selectedFormat = SelectColorSwapchainFormat(formats, "Quad swapchain");
+    if (selectedFormat == 0) {
+        return false;
+    }
 
     XrSwapchainCreateInfo swapchainInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -824,6 +837,15 @@ bool CreateWindowSpaceSwapchain(XrSessionManager& xr, SwapchainInfo& out,
     // would cause a format family mismatch in D3D12 CopyTextureRegion, silently
     // failing the copy.
     // Well-known R8G8B8A8_UNORM codes: DXGI=28, VK=37, GL_RGBA8=0x8058.
+    //
+    // #1589: this one deliberately does NOT follow the honest-sRGB default. It
+    // is a CPU-upload path — the HUD is rasterized on the CPU into
+    // display-referred RGBA8 and copied in, so nothing here can encode. Making
+    // it `_SRGB` is the right end state (the bytes ARE encoded, so an `_SRGB`
+    // texture would simply be declaring them honestly, at no quality cost), but
+    // it changes the copy-format family on four graphics APIs and so needs its
+    // own verified change; it is NOT part of the chooser migration. Until then
+    // the HUD is a known display-referred-into-UNORM source.
     int64_t selectedFormat = formats[0];
     const int64_t preferredFormats[] = { 28, 37, 0x8058 };
     for (int64_t pref : preferredFormats) {

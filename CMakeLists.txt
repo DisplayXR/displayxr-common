@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.14.0
+    VERSION 2.15.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -217,6 +217,8 @@ set(DISPLAYXR_COMMON_SOURCES
     common/atlas_capture.h
     common/view_params.h
     common/mip_chain.h
+    common/color_policy.cpp # ADR-021/#1589 color-swapchain format rule (device-free)
+    common/color_policy.h
     common/xr_window_space_hud.cpp
     common/xr_window_space_hud.h
     common/rig_mode.cpp   # platform-neutral display<->camera rig toggle + reset

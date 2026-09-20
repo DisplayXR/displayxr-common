@@ -25,6 +25,7 @@
 #include "auto_fit.h"
 #include "auto_fit_canvas.h"
 #include "clip_policy.h"
+#include "color_policy.h"
 #include "content_bounds.h"
 #include "content_mask.h"
 #include "dxr_view_math.h"
@@ -1222,6 +1223,138 @@ static void test_content_mask()
     }
 }
 
+// ---------------------------------------------------------------------------
+// ADR-021 / #1589 — the color-swapchain selection rule.
+//
+// The property under test is the one the whole migration rests on: with the env
+// unset the chooser must land on the `_SRGB` SIBLING of the runtime's preferred
+// format (so channel order is preserved), must fall back to formats[0] when the
+// runtime advertises no `_SRGB` format at all, and `=unorm` must still reach the
+// plain UNORM format so the A/B leg exists.
+// ---------------------------------------------------------------------------
+static void test_color_policy()
+{
+    using dxr::ColorEncodingPreference;
+
+    // --- Format classification and the sibling map. ---
+    CHECK(dxr::IsSrgbColorFormat(29), "DXGI R8G8B8A8_UNORM_SRGB is sRGB");
+    CHECK(dxr::IsSrgbColorFormat(91), "DXGI B8G8R8A8_UNORM_SRGB is sRGB");
+    CHECK(dxr::IsSrgbColorFormat(43) && dxr::IsSrgbColorFormat(50), "VK sRGB codes");
+    CHECK(dxr::IsSrgbColorFormat(0x8C43), "GL_SRGB8_ALPHA8 is sRGB");
+    CHECK(!dxr::IsSrgbColorFormat(28) && !dxr::IsSrgbColorFormat(87), "DXGI UNORM codes are not sRGB");
+    CHECK(dxr::IsUnormColorFormat(28) && dxr::IsUnormColorFormat(0x8058), "UNORM codes classify");
+    CHECK(dxr::SrgbSiblingOf(28) == 29 && dxr::SrgbSiblingOf(87) == 91, "DXGI siblings");
+    CHECK(dxr::SrgbSiblingOf(37) == 43 && dxr::SrgbSiblingOf(44) == 50, "VK siblings");
+    CHECK(dxr::SrgbSiblingOf(0x8058) == 0x8C43, "GL sibling");
+    CHECK(dxr::SrgbSiblingOf(12345) == 0, "an unknown format has no sibling");
+    CHECK(dxr::UnormSiblingOf(91) == 87, "the sibling map is symmetric");
+
+    // --- Env parsing. ---
+    CHECK(dxr::ColorEncodingPreferenceFromEnv(nullptr) == ColorEncodingPreference::HonestSrgb,
+          "unset means honest sRGB — the new default");
+    CHECK(dxr::ColorEncodingPreferenceFromEnv("") == ColorEncodingPreference::HonestSrgb,
+          "empty means honest sRGB");
+    CHECK(dxr::ColorEncodingPreferenceFromEnv("SRGB") == ColorEncodingPreference::ForceSrgb,
+          "srgb is case-insensitive");
+    CHECK(dxr::ColorEncodingPreferenceFromEnv("Unorm") == ColorEncodingPreference::ForceUnorm,
+          "unorm is case-insensitive");
+    CHECK(dxr::ColorEncodingPreferenceFromEnv("nonsense") == ColorEncodingPreference::HonestSrgb,
+          "an unrecognised value falls back to the default, never to UNORM");
+
+    // --- The default: the sibling of formats[0], not merely 'some sRGB'. ---
+    {
+        // A BGRA-preferring runtime (what the D3D11 compositor advertises).
+        const std::vector<int64_t> formats = {87, 28, 91, 29};
+        dxr::ColorFormatChoice c =
+            dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::HonestSrgb);
+        CHECK(c.format == 91, "default takes B8G8R8A8_UNORM_SRGB — formats[0]'s own sibling");
+        CHECK(c.isSrgb && !c.fellBack, "a satisfied default is not a fallback");
+
+        c = dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::ForceUnorm);
+        CHECK(c.format == 87 && !c.isSrgb && !c.fellBack,
+              "=unorm keeps the runtime's preferred UNORM format (the A/B leg)");
+
+        c = dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::ForceSrgb);
+        CHECK(c.format == 91, "=srgb agrees with the default when both can be satisfied");
+    }
+
+    // --- formats[0] already sRGB: taken as-is, no re-derivation. ---
+    {
+        const std::vector<int64_t> formats = {29, 28};
+        dxr::ColorFormatChoice c =
+            dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::HonestSrgb);
+        CHECK(c.format == 29 && c.isSrgb, "an already-sRGB formats[0] is kept");
+        c = dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::ForceUnorm);
+        CHECK(c.format == 28 && !c.isSrgb, "=unorm still finds the UNORM sibling");
+    }
+
+    // --- No sibling advertised, but another sRGB format is. ---
+    {
+        const std::vector<int64_t> formats = {87, 29};
+        dxr::ColorFormatChoice c =
+            dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::HonestSrgb);
+        CHECK(c.format == 29 && c.isSrgb && !c.fellBack,
+              "with no sibling, the first advertised sRGB format is taken");
+    }
+
+    // --- No sRGB format at all: exactly today's behaviour, flagged. ---
+    {
+        const std::vector<int64_t> formats = {87, 28};
+        dxr::ColorFormatChoice c =
+            dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::HonestSrgb);
+        CHECK(c.format == 87, "no sRGB advertised -> formats[0], byte-for-byte as before");
+        CHECK(!c.isSrgb && c.fellBack, "and the fallback is reported so the caller can warn");
+    }
+
+    // --- Empty list: no crash, no format. ---
+    {
+        const std::vector<int64_t> formats;
+        dxr::ColorFormatChoice c =
+            dxr::ChooseColorSwapchainFormat(formats, ColorEncodingPreference::HonestSrgb);
+        CHECK(c.format == 0, "an empty format list yields 0, not formats[0]");
+    }
+
+    // --- The transfer functions round-trip, and match the #1589 oracle values. ---
+    {
+        CHECK(std::fabs(dxr::SceneLinearToDisplayReferred(0.0f)) < 1e-6f, "0 -> 0");
+        CHECK(std::fabs(dxr::SceneLinearToDisplayReferred(1.0f) - 1.0f) < 1e-6f, "1 -> 1");
+        // #1589 §5.1: L=0.5 -> 188/255, L=0.2 -> 124/255.
+        CHECK(std::lround(dxr::SceneLinearToDisplayReferred(0.5f) * 255.0f) == 188,
+              "sRGB OETF(0.5) == 188/255");
+        CHECK(std::lround(dxr::SceneLinearToDisplayReferred(0.2f) * 255.0f) == 124,
+              "sRGB OETF(0.2) == 124/255");
+        for (float v = 0.0f; v <= 1.0f; v += 0.05f) {
+            float rt = dxr::SceneLinearToDisplayReferred(dxr::DisplayReferredToSceneLinear(v));
+            CHECK(std::fabs(rt - v) < 1e-4f, "decode then encode is the identity");
+        }
+    }
+
+    // --- The renderer's scene-linear decision follows the noted format. ---
+    {
+        // DXR_TRUE_LINEAR is an explicit override, so these assertions only
+        // hold when it is absent from the harness's own environment.
+        const char* forced = std::getenv("DXR_TRUE_LINEAR");
+        const bool overridden = forced != nullptr && *forced != '\0';
+
+        // Before any note: nothing is known, so no gratuitous linearisation.
+        CHECK(!dxr::ColorSwapchainIsSrgb(), "no format noted yet");
+        if (!overridden) {
+            CHECK(!dxr::RenderSceneLinear(),
+                  "with no format and no override, shaders write authored bytes");
+        }
+
+        // Sticky: the projection swapchain is the authority.
+        dxr::NoteColorSwapchainFormat(91);
+        CHECK(dxr::ColorSwapchainIsSrgb(), "an _SRGB swapchain was noted");
+        if (!overridden) {
+            CHECK(dxr::RenderSceneLinear(),
+                  "an _SRGB swapchain drives DXR_LINEARIZE on, with no env var");
+        }
+        dxr::NoteColorSwapchainFormat(28);
+        CHECK(dxr::ColorSwapchainIsSrgb(), "a later quad/zone swapchain must not overwrite the first note");
+    }
+}
+
 int main()
 {
     test_capture_numbering();
@@ -1237,6 +1370,7 @@ int main()
     test_clip_policy();
     test_content_bounds();
     test_content_mask();
+    test_color_policy();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();
