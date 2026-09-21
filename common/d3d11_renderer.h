@@ -26,8 +26,16 @@ struct D3D11Renderer {
     ComPtr<IDXGIFactory2> dxgiFactory;
 
     // Pipeline state
+    //
+    // Two pixel-shader variants per program (ADR-021 / #1589): the plain one
+    // writes the authored DISPLAY-REFERRED colors (correct into a UNORM
+    // swapchain), the `...Linear` one decodes them to scene-linear (correct
+    // into an `_SRGB` swapchain, whose RTV re-encodes on write — same bytes).
+    // Both are compiled in CreateResources() because the device exists before
+    // xrCreateSession; the choice is made per draw from the swapchain format.
     ComPtr<ID3D11VertexShader> cubeVertexShader;
     ComPtr<ID3D11PixelShader> cubePixelShader;
+    ComPtr<ID3D11PixelShader> cubePixelShaderLinear;
     ComPtr<ID3D11InputLayout> cubeInputLayout;
     ComPtr<ID3D11Buffer> cubeVertexBuffer;
     ComPtr<ID3D11Buffer> cubeIndexBuffer;
@@ -36,6 +44,7 @@ struct D3D11Renderer {
     // Grid rendering
     ComPtr<ID3D11VertexShader> gridVertexShader;
     ComPtr<ID3D11PixelShader> gridPixelShader;
+    ComPtr<ID3D11PixelShader> gridPixelShaderLinear;
     ComPtr<ID3D11InputLayout> gridInputLayout;
     ComPtr<ID3D11Buffer> gridVertexBuffer;
     int gridVertexCount = 0;
@@ -106,11 +115,37 @@ void RenderScene(
 // Create a render target view for an OpenXR swapchain image.
 // Format must be specified explicitly because swapchain textures use TYPELESS format
 // (required by OpenXR D3D11 spec). Pass the concrete format from xrCreateSwapchain.
+//
+// ADR-021 / #1589: pass the format the swapchain was CREATED with, including
+// its `_SRGB` suffix. Naming the `_SRGB` format in the RTV desc is what arms the
+// hardware encode-on-write over the runtime's TYPELESS resource; resolving it
+// down to the plain UNORM sibling silently disarms it.
 bool CreateRenderTargetView(
     D3D11Renderer& renderer,
     ID3D11Texture2D* texture,
     DXGI_FORMAT format,
     ID3D11RenderTargetView** rtv
+);
+
+// Which pixel shader matches the color swapchain the app created — the
+// display-referred variant for a UNORM swapchain, the scene-linear one for an
+// `_SRGB` swapchain (dxr::RenderSceneLinear(), see color_policy.h). RenderScene
+// and RenderCubeWithMVP use these; an app with its own draw loop should too.
+ID3D11PixelShader* CubePixelShaderForTarget(const D3D11Renderer& renderer);
+ID3D11PixelShader* GridPixelShaderForTarget(const D3D11Renderer& renderer);
+
+// Clear a render target with a DISPLAY-REFERRED color.
+//
+// ClearRenderTargetView interprets its value in the RTV's own space, so an
+// `_SRGB` RTV encodes the clear color — a background authored as (0.05, 0.05,
+// 0.25) would come out visibly brighter than it does on a UNORM target. This
+// wrapper decodes first when the target encodes, so the cleared bytes are
+// identical in both cells. Use it wherever a clear color is an authored,
+// display-referred value (i.e. everywhere except a true-linear source).
+void ClearRenderTargetViewDisplayReferred(
+    D3D11Renderer& renderer,
+    ID3D11RenderTargetView* rtv,
+    const float displayReferredRGBA[4]
 );
 
 // Create a depth stencil view

@@ -6,6 +6,7 @@
  */
 
 #include "d3d11_renderer.h"
+#include "color_policy.h"
 #include "logging.h"
 #include "mip_chain.h"
 #include <d3dcompiler.h>
@@ -88,14 +89,22 @@ float4 PSMain(PSInput input) : SV_TARGET {
 
     float3 col = basecolor * ao * diffuse;
 #ifdef DXR_LINEARIZE
-    // ADR-021 true-linear test (DXR_TRUE_LINEAR): the cube normally writes
-    // display-referred bytes (authored for a UNORM passthrough swapchain). To be
-    // an HONEST source for an sRGB swapchain, emit scene-linear here so the sRGB
-    // RTV re-encodes back to the intended display value — i.e. the swapchain ends
-    // up holding correctly-encoded bytes in an sRGB-typed texture. This lets the
-    // workspace Model-B path (decode-on-sample → linear compose → DP output
-    // encode) be verified end-to-end: correct color ⟹ the matched round-trip
-    // holds; too-dark ⟹ a missing DP encode; too-bright ⟹ a missing decode.
+    // ADR-021 / #1589. The cube's authored colors (and its basecolor/AO
+    // textures) are DISPLAY-REFERRED — they were authored for a UNORM
+    // pass-through swapchain. When the swapchain is `_SRGB` the render target
+    // encodes on write, so emitting those numbers raw would encode them twice.
+    // Decoding here makes the round-trip an identity: the bytes stored in the
+    // `_SRGB` swapchain are EXACTLY the bytes the UNORM path stored, and they
+    // are now honestly declared as encoded.
+    //
+    // Compiled as a second pixel-shader variant and selected at draw time by
+    // dxr::RenderSceneLinear() — the format is only known after
+    // xrCreateSwapchain, which runs long after these shaders compile.
+    //
+    // Forcing it ON with DXR_SWAPCHAIN_ENCODING=unorm gives the matrix's
+    // true-linear-into-UNORM cell instead: linear radiance in a UNORM
+    // swapchain. Correct color on screen ⟹ the matched round-trip holds;
+    // too-dark ⟹ a missing encode; too-bright ⟹ a missing decode.
     col = (col <= 0.04045) ? (col / 12.92) : pow((col + 0.055) / 1.055, 2.4);
 #endif
     return float4(col, 1.0);
@@ -125,17 +134,27 @@ PSInput VSMain(VSInput input) {
 }
 
 float4 PSMain(PSInput input) : SV_TARGET {
-    return color;
+    float3 col = color.rgb;
+#ifdef DXR_LINEARIZE
+    // Same rule as the cube PS: the grid color is authored display-referred, so
+    // decode it when the render target will encode on write. Without this the
+    // grid (and every other constant-color draw) would brighten on an `_SRGB`
+    // swapchain while the textured cube stayed put.
+    col = (col <= 0.04045) ? (col / 12.92) : pow((col + 0.055) / 1.055, 2.4);
+#endif
+    return float4(col, color.a);
 }
 )";
 
-static bool CompileShader(const char* source, const char* entryPoint, const char* target, ID3DBlob** blob) {
-    LOG_DEBUG("Compiling shader: %s (%s)", entryPoint, target);
+// ADR-021 / #1589: `linearize` defines DXR_LINEARIZE so the pixel shaders emit
+// SCENE-LINEAR. Both variants are compiled up front and chosen per draw, because
+// the D3D11 device (and therefore these shaders) is created before
+// xrCreateSession — the swapchain format simply is not known yet. Harmless for
+// shaders that don't reference the macro.
+static bool CompileShader(const char* source, const char* entryPoint, const char* target,
+                          ID3DBlob** blob, bool linearize = false) {
+    LOG_DEBUG("Compiling shader: %s (%s)%s", entryPoint, target, linearize ? " [scene-linear]" : "");
     ComPtr<ID3DBlob> errorBlob;
-    // ADR-021: when DXR_TRUE_LINEAR is set, define DXR_LINEARIZE so the cube PS
-    // emits scene-linear (honest source for an sRGB swapchain). Harmless for
-    // shaders that don't reference the macro (e.g. the grid).
-    static const bool linearize = (getenv("DXR_TRUE_LINEAR") != nullptr);
     const D3D_SHADER_MACRO macros[] = { { "DXR_LINEARIZE", "1" }, { nullptr, nullptr } };
     HRESULT hr = D3DCompile(
         source, strlen(source),
@@ -325,6 +344,44 @@ bool InitializeD3D11(D3D11Renderer& renderer) {
     return result;
 }
 
+// ADR-021 / #1589: pick the pixel-shader variant that matches the color
+// swapchain the app ended up creating. `_SRGB` swapchain ⇒ the RTV encodes on
+// write ⇒ the shader must hand it scene-linear values (see color_policy.h).
+// Falls back to the display-referred variant if the linear one failed to build.
+ID3D11PixelShader* CubePixelShaderForTarget(const D3D11Renderer& renderer) {
+    if (dxr::RenderSceneLinear() && renderer.cubePixelShaderLinear) {
+        return renderer.cubePixelShaderLinear.Get();
+    }
+    return renderer.cubePixelShader.Get();
+}
+
+ID3D11PixelShader* GridPixelShaderForTarget(const D3D11Renderer& renderer) {
+    if (dxr::RenderSceneLinear() && renderer.gridPixelShaderLinear) {
+        return renderer.gridPixelShaderLinear.Get();
+    }
+    return renderer.gridPixelShader.Get();
+}
+
+void ClearRenderTargetViewDisplayReferred(
+    D3D11Renderer& renderer,
+    ID3D11RenderTargetView* rtv,
+    const float displayReferredRGBA[4]
+) {
+    // ClearRenderTargetView takes the clear value in the RTV's own space, so an
+    // `_SRGB` RTV encodes it — a display-referred clear color would come out
+    // brighter than it does on a UNORM target. Decode it here for exactly the
+    // same reason the pixel shaders decode: identical bytes, honestly declared.
+    // Alpha is linear in both spaces and is never converted.
+    float c[4] = { displayReferredRGBA[0], displayReferredRGBA[1],
+                   displayReferredRGBA[2], displayReferredRGBA[3] };
+    if (dxr::RenderSceneLinear()) {
+        for (int i = 0; i < 3; i++) {
+            c[i] = dxr::DisplayReferredToSceneLinear(c[i]);
+        }
+    }
+    renderer.context->ClearRenderTargetView(rtv, c);
+}
+
 bool CreateResources(D3D11Renderer& renderer) {
     HRESULT hr;
 
@@ -361,6 +418,19 @@ bool CreateResources(D3D11Renderer& renderer) {
         &renderer.cubeInputLayout);
     if (FAILED(hr)) return false;
 
+    // Scene-linear twin of the cube PS (DXR_LINEARIZE). Selected per draw once
+    // the swapchain format is known — see CubePixelShaderForTarget().
+    {
+        ComPtr<ID3DBlob> psLinearBlob;
+        if (!CompileShader(g_cubeShaderSource, "PSMain", "ps_5_0", &psLinearBlob, /*linearize=*/true)) {
+            return false;
+        }
+        hr = renderer.device->CreatePixelShader(
+            psLinearBlob->GetBufferPointer(), psLinearBlob->GetBufferSize(),
+            nullptr, &renderer.cubePixelShaderLinear);
+        if (FAILED(hr)) return false;
+    }
+
     // Compile grid shaders
     if (!CompileShader(g_gridShaderSource, "VSMain", "vs_5_0", &vsBlob)) {
         return false;
@@ -378,6 +448,17 @@ bool CreateResources(D3D11Renderer& renderer) {
         psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
         nullptr, &renderer.gridPixelShader);
     if (FAILED(hr)) return false;
+
+    {
+        ComPtr<ID3DBlob> psLinearBlob;
+        if (!CompileShader(g_gridShaderSource, "PSMain", "ps_5_0", &psLinearBlob, /*linearize=*/true)) {
+            return false;
+        }
+        hr = renderer.device->CreatePixelShader(
+            psLinearBlob->GetBufferPointer(), psLinearBlob->GetBufferSize(),
+            nullptr, &renderer.gridPixelShaderLinear);
+        if (FAILED(hr)) return false;
+    }
 
     // Create grid input layout
     D3D11_INPUT_ELEMENT_DESC gridInputElements[] = {
@@ -593,11 +674,13 @@ void CleanupD3D11(D3D11Renderer& renderer) {
     renderer.textureSampler.Reset();
     renderer.cubeVertexShader.Reset();
     renderer.cubePixelShader.Reset();
+    renderer.cubePixelShaderLinear.Reset();
     renderer.cubeInputLayout.Reset();
     renderer.cubeVertexBuffer.Reset();
     renderer.cubeIndexBuffer.Reset();
     renderer.gridVertexShader.Reset();
     renderer.gridPixelShader.Reset();
+    renderer.gridPixelShaderLinear.Reset();
     renderer.gridInputLayout.Reset();
     renderer.gridVertexBuffer.Reset();
     renderer.constantBuffer.Reset();
@@ -679,7 +762,7 @@ void RenderScene(
     renderer.context->IASetVertexBuffers(0, 1, renderer.cubeVertexBuffer.GetAddressOf(), &stride, &offset);
     renderer.context->IASetIndexBuffer(renderer.cubeIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
     renderer.context->VSSetShader(renderer.cubeVertexShader.Get(), nullptr, 0);
-    renderer.context->PSSetShader(renderer.cubePixelShader.Get(), nullptr, 0);
+    renderer.context->PSSetShader(CubePixelShaderForTarget(renderer), nullptr, 0);
     renderer.context->VSSetConstantBuffers(0, 1, renderer.constantBuffer.GetAddressOf());
     renderer.context->PSSetConstantBuffers(0, 1, renderer.constantBuffer.GetAddressOf());
 
@@ -708,7 +791,7 @@ void RenderScene(
     stride = sizeof(GridVertex);
     renderer.context->IASetVertexBuffers(0, 1, renderer.gridVertexBuffer.GetAddressOf(), &stride, &offset);
     renderer.context->VSSetShader(renderer.gridVertexShader.Get(), nullptr, 0);
-    renderer.context->PSSetShader(renderer.gridPixelShader.Get(), nullptr, 0);
+    renderer.context->PSSetShader(GridPixelShaderForTarget(renderer), nullptr, 0);
 
     UpdateConstantBuffer(renderer, gridWVP, XMFLOAT4(0.3f, 0.3f, 0.35f, 1.0f)); // Gray grid
     renderer.context->Draw(renderer.gridVertexCount, 0);
@@ -790,7 +873,7 @@ void RenderCubeWithMVP(
     renderer.context->IASetVertexBuffers(0, 1, renderer.cubeVertexBuffer.GetAddressOf(), &stride, &offset);
     renderer.context->IASetIndexBuffer(renderer.cubeIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
     renderer.context->VSSetShader(renderer.cubeVertexShader.Get(), nullptr, 0);
-    renderer.context->PSSetShader(renderer.cubePixelShader.Get(), nullptr, 0);
+    renderer.context->PSSetShader(CubePixelShaderForTarget(renderer), nullptr, 0);
     renderer.context->VSSetConstantBuffers(0, 1, renderer.constantBuffer.GetAddressOf());
     renderer.context->PSSetConstantBuffers(0, 1, renderer.constantBuffer.GetAddressOf());
 
