@@ -136,7 +136,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
-| View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
+| View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — submit every located view, aliasing the ones the active mode does not use (ADR-041) | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -178,12 +178,28 @@ assigns its own variable; `grep PRIMARY_STEREO` per leg and account for every hi
 
 The probe is safe to call unconditionally: it enumerates once and returns `PRIMARY_STEREO` on every other path
 (older runtime, extension not enabled, enumerate failure, null handles), so the same binary keeps working
-against a pre-#1486 runtime. Locate into an `XRT_MAX_VIEWS` (8) wide buffer and submit the **active mode's**
-view count (app rule INV-3.1) — never more views than were located or than the swapchain has slices.
+against a pre-#1486 runtime. Locate into an `XRT_MAX_VIEWS` (8) wide buffer.
+
+**Submit every located view (ADR-041, runtime [#1612](https://github.com/DisplayXR/displayxr-runtime/issues/1612)).**
+Under `PRIMARY_MULTIVIEW_DXR` the located view count is fixed for the session; what changes per frame is how
+many of those views the active rendering mode uses (1 in a 2D mode). Every `xrEndFrame` projection layer must
+still carry **all** located views — a runtime enforcing ADR-041 rejects an under-submitted layer with
+`XR_ERROR_VALIDATION_FAILURE`, and the panel keeps showing the last accepted (3D) frame. Render only the active
+views, fill `projViews[0, active)`, then let the helper alias the rest onto view 0's subimage:
+
+```cpp
+uint32_t active = modeIs3D ? modeViewCount : 1;                 // what you rendered
+DxrAliasInactiveViews(projViews, views, viewCountOutput, active); // views = xrLocateViews output
+layer.viewCount = viewCountOutput;                               // NOT `active`
+```
+
+Each aliased view keeps its own located pose/fov; only the subimage is shared. The runtime ignores those
+pixels. The call is a no-op when `active == 0` (nothing rendered — skip the layer instead) or
+`active >= located`.
 
 The type value comes from the consumer's `XR_DXR_display_info.h` when one is on the include path
 (`__has_include`); a tree pinned to a pre-19 snapshot falls back to the fixed DXR author-ID value, so the header
-compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour (C11 and C++17,
+compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour, and the aliasing contract (C11 and C++17,
 GPU- and loader-free — they script a fake `xrEnumerateViewConfigurations`).
 
 ### Color: honest sRGB by default (`color_policy.h`, ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589))

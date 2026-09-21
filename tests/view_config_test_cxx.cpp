@@ -27,5 +27,14 @@ dxr_view_config_cxx_check(void)
 	    XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
 		return 1;
 	}
+	// ADR-041 aliasing compiles and behaves the same from C++17.
+	XrView views[2] = {};
+	XrCompositionLayerProjectionView pv[2] = {};
+	pv[0].subImage.swapchain = (XrSwapchain)(uintptr_t)0x7;
+	DxrAliasInactiveViews(pv, views, 2, 1);
+	if (pv[1].subImage.swapchain != pv[0].subImage.swapchain ||
+	    pv[1].type != XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW) {
+		return 1;
+	}
 	return 0;
 }
