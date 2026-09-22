@@ -127,6 +127,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Window-space-layer UI helpers (pure OpenXR) | `xr_window_space_hud.{h,cpp}` | both |
 | App-side atlas-capture helper (filename numbering, flash overlay, `RequestRuntimeAtlasCapture`) | `atlas_capture.{h,cpp}`, `atlas_capture_macos.mm` | both |
 | Color-swapchain format policy: the sRGB-vs-UNORM rule + the scene-linear decision it drives (ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589)) | `color_policy.{h,cpp}` | both |
+| Display-referred **clear** policy: per-API, per-TARGET ([#1647](https://github.com/DisplayXR/displayxr-runtime/issues/1647)) — the rule, plus wrappers for Vulkan / D3D12 / GL / D3D11 | `clear_policy.h`, `vk_clear.h`, `d3d12_clear.h`, `gl_clear.h`, `d3d11_renderer.{h,cpp}` | both |
 | View parameter struct | `view_params.h` | both |
 | stb image (read+write headers + the **only** implementation TUs) | `stb_image*.h`, `stb_image_impl_macos.cpp` | both |
 | dGPU hint (`NvOptimusEnablement`, force-included into consumer EXEs) | `optimus_dgpu_hint.c` | Windows |
@@ -247,6 +248,55 @@ at compile time) and selecting per draw via `CubePixelShaderForTarget()` /
   the clear color is an authored display-referred value. `ClearRenderTargetView` takes its value
   in the view's own space, so an `_SRGB` RTV encodes it and a `(0.05, 0.05, 0.25)` background
   would come out visibly brighter.
+
+#### Clearing with an authored color, on any API (`clear_policy.h`, [#1647](https://github.com/DisplayXR/displayxr-runtime/issues/1647))
+
+Every API takes a clear value in the attachment's **own** space, so the same trap exists
+everywhere: a navy background authored `13,13,64` and written raw into an `_SRGB` target
+measured `63,63,137` on a panel. The rule, once:
+
+> The question is **what space the content written into this target is in**, and the target's
+> format answers it **only when that target is the thing that encodes**. Where a later blit or
+> resolve does the encoding, the caller must say.
+
+So each wrapper has two entry points — derive from the target's format, or state the space:
+
+| API | header | derive from | note |
+|---|---|---|---|
+| Vulkan | `vk_clear.h` | the attachment's `VkFormat` | covers `pClearValues`, `vkCmdClearColorImage`, `vkCmdClearAttachments`, dynamic rendering |
+| Direct3D 12 | `d3d12_clear.h` | the `DXGI_FORMAT` **the RTV was created with** | a `D3D12_CPU_DESCRIPTOR_HANDLE` carries no format and cannot be queried back — unlike D3D11 |
+| Direct3D 11 | `d3d11_renderer.h` | `rtv->GetDesc()` | see the behaviour-change note below |
+| OpenGL | `gl_clear.h` | `GL_FRAMEBUFFER_SRGB` **and** the attachment's `..._COLOR_ENCODING` | the format alone is not the answer |
+| Metal | `clear_policy.h` | `MetalClearValueSpace()` | predicate only — no Metal consumer enumerates for `_SRGB` yet |
+
+```cpp
+// Rendering straight into the swapchain image — the attachment encodes.
+clears[0].color = dxr::VkDisplayReferredClearColor(colorFormat_, kBackground);
+
+// Rendering into an internal UNORM image and blitting into an _SRGB swapchain:
+// the attachment's format says "verbatim" but its CONTENT is scene-linear,
+// because the blit does the encode. The format cannot express that; say it.
+clears[0].color = dxr::VkDisplayReferredClearColor(
+    swapchainIsSrgb_ ? dxr::ClearValueSpace::SceneLinear
+                     : dxr::ClearValueSpace::DisplayReferred, kBackground);
+```
+
+Two things that are easy to get wrong:
+
+- **Never pass a target format to `IsSrgbColorFormat()`.** That predicate is a *union* of every
+  API's codes — correct for a swapchain-format list (a session enumerates one API), wrong for an
+  arbitrary target, because the codes collide. `91` is `DXGI_FORMAT_B8G8R8A8_UNORM_SRGB` **and**
+  `VK_FORMAT_R16G16B16A16_UNORM`; `71` is `MTLPixelFormatRGBA8Unorm_sRGB` **and**
+  `VK_FORMAT_R16_SNORM`. Use the API-scoped predicate for the API you hold.
+- **An unclassified format is cleared with the authored value and warned about once** — never
+  converted on a guess. Not converting reproduces today's bytes exactly, so it can never be a new
+  regression; guessing would darken silently.
+
+**Behaviour change in D3D11.** `ClearRenderTargetViewDisplayReferred()` used to decide from the
+process-wide `dxr::RenderSceneLinear()` flag and never looked at the view, so it *darkened* a
+UNORM target it was handed. It now asks `rtv->GetDesc()`. Unchanged for a renderer that draws
+straight into the swapchain — which every in-tree caller is, and which is why the old flag was
+right in practice rather than merely lucky.
 
 #### If you blit into the swapchain (Vulkan)
 
