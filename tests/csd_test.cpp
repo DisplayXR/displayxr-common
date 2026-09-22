@@ -46,8 +46,10 @@ main()
 	TitleBar bar;
 	bar.configure(2.0f);
 	bar.setTitle("DisplayXR");
-	CHECK(bar.height() == 92, "46 logical px at scale 2 is 92 device px");
-	CHECK(bar.cornerRadius() == 24, "12 logical px radius at scale 2 is 24 device px");
+	CHECK(bar.logicalHeight() == 58, "default bar is 58 logical px (1.5x title)");
+	CHECK(bar.height() == 116, "58 logical px at scale 2 is 116 device px");
+	CHECK(bar.cornerRadius() == 28, "14 logical px radius at scale 2 is 28 device px");
+	CHECK(bar.style().titlePx == 22.5f, "title is 1.5x libadwaita's 15 px");
 
 	// Fractional scales round the height up to even.
 	{
@@ -86,6 +88,7 @@ main()
 		TitleBar b2;
 		b2.configure(2.0f);
 		b2.setStyle(dense);
+		CHECK(b2.height() == bar.height(), "setStyle keeps the height in step with the metrics");
 		CHECK(std::abs(AlphaAt(b2.render(W), W, 60, midY) - (int)std::lround(0.9f * 255.f)) <= 1,
 		      "Style::opacity drives the body alpha");
 		// Premultiplied: no colour channel exceeds alpha.
@@ -118,9 +121,10 @@ main()
 	CHECK(bar.hitTest(W / 2, bar.height() / 2, W) == Hit::Drag, "bar body is a drag");
 	CHECK(bar.hitTest(W / 2, (int)bar.height(), W) == Hit::Outside, "below the bar is outside");
 	CHECK(bar.hitTest(-1, 10, W) == Hit::Outside, "left of the bar is outside");
-	// Close is the rightmost button: 9 + 12 logical px from the edge.
-	CHECK(bar.hitTest((int)W - 42, bar.height() / 2, W) == Hit::Close, "close button");
-	CHECK(bar.hitTest((int)W - 42 - 72, bar.height() / 2, W) == Hit::Minimize, "minimize button");
+	// Close is the rightmost button: its centre 11 + 15 logical px from the
+	// edge; minimize one diameter + gap (30 + 14) further left. Scale 2.
+	CHECK(bar.hitTest((int)W - 52, bar.height() / 2, W) == Hit::Close, "close button");
+	CHECK(bar.hitTest((int)W - 52 - 88, bar.height() / 2, W) == Hit::Minimize, "minimize button");
 	CHECK(bar.hitTest(W / 2, 2, W) == Hit::ResizeTop, "top band resizes");
 	CHECK(bar.hitTest(2, 2, W) == Hit::ResizeTopLeft, "top-left corner resizes");
 	CHECK(bar.hitTest((int)W - 3, 2, W) == Hit::ResizeTopRight, "top-right corner resizes");
@@ -151,6 +155,17 @@ main()
 		std::vector<uint32_t> xrgb((size_t)W * bar.height());
 		bar.pack(xrgb.data(), W, 0x00ff0000u, 0x0000ff00u, 0x000000ffu, 0u);
 		CHECK((xrgb[W / 2] >> 24) == 0xff, "no-alpha visual pads the unused byte with ones");
+	}
+
+	// Metrics are a parameter too: the old 46 px libadwaita bar is one Style away.
+	{
+		dxr_csd::Style small;
+		small.barHeight = 46.f;
+		small.titlePx = 15.f;
+		TitleBar b3;
+		b3.configure(2.0f);
+		b3.setStyle(small);
+		CHECK(b3.height() == 92, "Style::barHeight drives height()");
 	}
 
 	// ── Double click ──────────────────────────────────────────────────────
