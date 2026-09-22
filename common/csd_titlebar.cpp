@@ -24,17 +24,8 @@ namespace dxr_csd {
 
 namespace {
 
-// ── Metrics, in LOGICAL px (x scale_). Approximates a libadwaita header bar:
-// 46 px tall, 24 px circular window buttons at the right edge, bold ~11 pt
-// title. Close enough not to look broken beside other GNOME windows; this is
-// deliberately not a widget toolkit.
-constexpr float kBtnR = 12.0f;       // button radius (24 px circles)
-constexpr float kBtnRightPad = 9.0f; // bar edge -> close button edge
-constexpr float kBtnGap = 12.0f;     // between button edges
-constexpr float kBtnHitHalf = 17.0f; // hit square half-size (bigger than the circle, as GTK)
-constexpr float kTitlePx = 15.0f;    // bold title pixel height
-constexpr float kIconHalf = 4.0f;    // half-extent of the x / - glyphs
-constexpr float kIconStroke = 1.3f;  // icon line thickness
+// Size metrics live in Style (csd_titlebar.h). Only the resize hit zones are
+// fixed: they are about pointer precision, not about the look.
 constexpr float kResizeBand = 5.0f;  // top-edge resize band height
 constexpr float kResizeCorner = 16.0f; // top-corner resize square
 
@@ -127,14 +118,14 @@ struct Layout
 };
 
 Layout
-MakeLayout(float scale, uint32_t winW, uint32_t barH)
+MakeLayout(const Style &st, float scale, uint32_t winW, uint32_t barH)
 {
 	Layout l;
-	l.r = kBtnR * scale;
-	l.hit = kBtnHitHalf * scale;
+	l.r = st.buttonRadius * scale;
+	l.hit = st.buttonHitHalf * scale;
 	l.cy = (float)barH * 0.5f;
-	l.closeCx = (float)winW - (kBtnRightPad + kBtnR) * scale;
-	l.minCx = l.closeCx - (2.f * kBtnR + kBtnGap) * scale;
+	l.closeCx = (float)winW - (st.buttonRightPad + st.buttonRadius) * scale;
+	l.minCx = l.closeCx - (2.f * st.buttonRadius + st.buttonGap) * scale;
 	return l;
 }
 
@@ -252,12 +243,19 @@ TitleBar::configure(float scale)
 	// Even, so an integer-scaled compositor never has to split the
 	// bar/content boundary — and so the content's origin stays on an even
 	// device pixel whenever the window's does.
-	height_ = (uint32_t)std::lround(kLogicalHeight * scale_);
+	height_ = (uint32_t)std::lround((float)logicalHeight() * scale_);
 	height_ += height_ & 1u;
 	if (!fontTried_) {
 		loadFont();
 	}
 	dirty_ = true;
+}
+
+int32_t
+TitleBar::logicalHeight() const
+{
+	const long h = std::lround(style_.barHeight);
+	return h < 16 ? 16 : (int32_t)h;
 }
 
 uint32_t
@@ -284,7 +282,7 @@ TitleBar::hitTest(int x, int y, uint32_t winW) const
 			return left ? Hit::ResizeTopLeft : right ? Hit::ResizeTopRight : Hit::ResizeTop;
 		}
 	}
-	const Layout l = MakeLayout(scale_, winW, height_);
+	const Layout l = MakeLayout(style_, scale_, winW, height_);
 	auto inBtn = [&](float cx) {
 		return std::fabs((float)x - cx) <= l.hit && std::fabs((float)y - l.cy) <= l.hit;
 	};
@@ -352,7 +350,7 @@ void
 TitleBar::setStyle(const Style &s)
 {
 	style_ = s;
-	dirty_ = true;
+	configure(scale_); // the bar height follows Style::barHeight
 }
 
 void
@@ -411,8 +409,9 @@ TitleBar::rasterize(uint32_t w)
 		}
 	}
 
-	const Layout l = MakeLayout(scale_, w, h);
-	const bool showButtons = w > (uint32_t)(2.f * (kBtnRightPad + 2.f * kBtnR + kBtnGap) * scale_);
+	const Layout l = MakeLayout(style_, scale_, w, h);
+	const bool showButtons =
+	    w > (uint32_t)(2.f * (st.buttonRightPad + 2.f * st.buttonRadius + st.buttonGap) * scale_);
 
 	// ── 3. Button discs: faint white, brighter hovered, brighter still pressed.
 	auto drawDisc = [&](float cx, Hit which) {
@@ -451,8 +450,8 @@ TitleBar::rasterize(uint32_t w)
 		}
 	};
 	auto drawGlyph = [&](float cx, Hit which) {
-		const float half = kIconHalf * scale_;
-		const float stroke = 0.5f * kIconStroke * scale_;
+		const float half = st.iconHalf * scale_;
+		const float stroke = 0.5f * st.iconStroke * scale_;
 		const int x0 = (int)(cx - half - stroke - 2), x1 = (int)(cx + half + stroke + 2);
 		const int y0 = (int)(l.cy - half - stroke - 2), y1 = (int)(l.cy + half + stroke + 2);
 		for (int y = y0; y <= y1; ++y) {
@@ -480,7 +479,7 @@ TitleBar::rasterize(uint32_t w)
 	if (fontOk_ && !title_.empty()) {
 		stbtt_fontinfo font;
 		if (stbtt_InitFont(&font, fontData_.data(), stbtt_GetFontOffsetForIndex(fontData_.data(), 0))) {
-			const float fs = stbtt_ScaleForPixelHeight(&font, kTitlePx * scale_);
+			const float fs = stbtt_ScaleForPixelHeight(&font, st.titlePx * scale_);
 			int ascent = 0, descent = 0, lineGap = 0;
 			stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
 			const float margin = ((float)w - (l.minCx - l.hit)) + 6.f * scale_;
