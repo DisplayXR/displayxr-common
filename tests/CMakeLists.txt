@@ -39,3 +39,12 @@ set_target_properties(displayxr_view_config_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_test(NAME displayxr_view_config_test COMMAND displayxr_view_config_test)
+
+# csd_titlebar contract test (displayxr-common#52): rounded-corner alpha, hit
+# testing, packing, double-click. Window-system free, so it runs everywhere.
+add_executable(displayxr_csd_test csd_test.cpp)
+target_link_libraries(displayxr_csd_test PRIVATE displayxr::csd)
+set_target_properties(displayxr_csd_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+add_test(NAME displayxr_csd_test COMMAND displayxr_csd_test)
