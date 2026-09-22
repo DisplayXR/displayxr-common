@@ -8,10 +8,11 @@
 
 Shared native helper code for the [DisplayXR](https://github.com/DisplayXR/displayxr-runtime) ecosystem — the **canonical, versioned home** for the off-axis Kooima projection math and the C++ app scaffolding that were previously copy-vendored across the runtime test apps, the demos, and the Unreal/Unity plug-ins ([#396](https://github.com/DisplayXR/displayxr-runtime/issues/396)).
 
-It exposes two CMake targets:
+It exposes these CMake targets:
 
 - **`displayxr::math`** — pure-C off-axis Kooima projection (display-centric + camera-centric rigs, FOV + matrices). Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — perspective-correct multiview 3D for physical displays with eye tracking. Linked by **everything**, including the Unity/Unreal engine plug-ins.
 - **`displayxr::common`** — C++17 app scaffolding (depends on `displayxr::math`): logging, Win32 input + window management, OpenXR session/swapchain/frame lifecycle, D2D/DirectWrite text + HUD rendering, the D3D11 reference renderer, window-space-layer UI helpers, the thin app-side atlas-capture helper, and the vendored stb image headers. Linked by **C++ apps only** (runtime test apps, standalone demos) — not by engines.
+- **`displayxr::csd`** — client-side window chrome: the ONE header-bar painter for weaving desktop windows (metrics, hit testing, interaction state, and a premultiplied RGBA raster with GNOME's 12 px rounded top corners). Window-system neutral and OpenXR-free; the X11 / Wayland glue stays with whoever owns the window. See [Client-side window chrome](#client-side-window-chrome-csd_titlebarh).
 
 ## What It Does
 
@@ -535,6 +536,46 @@ if (const uint8_t* cov = punch.coverage()) {
                                  punch.coverageWidth(), winW, winH, nullptr, 64, 64, cells);
 }
 ```
+
+## Client-side window chrome (`csd_titlebar.h`)
+
+A windowed 3D app on Linux draws its own title bar. On X11 that is how the app
+owns the drag, so each step goes through the display processor's lattice snap.
+On Wayland it is the only option, because GNOME's mutter offers no
+server-side decorations. `displayxr::csd` is the single implementation
+([#52](https://github.com/DisplayXR/displayxr-common/issues/52)). It covers
+what must look and behave the same everywhere:
+
+- **Metrics.** A 46 px bar, 24 px round buttons, and a bold ellipsised title,
+  all in logical px multiplied by the desktop scale. The height is rounded to
+  an even number of device px.
+- **`hitTest()`.** Drag, Minimize, Close, and the resize band along the bar's
+  top edge and corners.
+- **State.** Hover, pressed, focused, maximised (square corners, no resize
+  band), and `DoubleClick` for maximise and restore.
+- **`render(w)`.** A **premultiplied RGBA8** raster. The top corners are
+  rounded with an anti-aliased 12 logical px radius and have **alpha 0**
+  outside it. `pack()` repacks the raster for any 32-bit channel layout: an
+  X11 visual's masks, or the wl_shm ARGB8888 masks.
+
+The window system stays with whoever owns the window:
+
+| window system | glue | alpha at the corners |
+|---|---|---|
+| X11 | the app: `XPutImage` into the top-level | real on a 32-bit ARGB visual under a compositing manager; call `setRoundCorners(false)` on an opaque visual |
+| native Wayland | runtime `test_apps/common/dxr_linux_window`: a `wl_subsurface` holding a `wl_shm` ARGB8888 buffer | always real |
+
+**The bar is outside the 3D viewport.** The window or surface bound to the
+runtime must be the content rect only. Then the canvas, the Kooima projection,
+the swapchain and the atlas all exclude the bar, and the weave never lands on a
+chrome pixel. The bottom corners belong to the woven content and stay square.
+
+```cmake
+target_link_libraries(your_linux_app PRIVATE displayxr::csd)
+```
+
+The title font comes from `DXR_CSD_FONT`, then fontconfig's bold sans-serif,
+then well-known paths. With no font, the bar is drawn without a title.
 
 ## Integration
 

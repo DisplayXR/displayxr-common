@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.16.0
+    VERSION 2.17.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -51,6 +51,33 @@ target_include_directories(displayxr_math_core PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 set_target_properties(displayxr_math_core PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+# ---------------------------------------------------------------------------
+# displayxr::csd — client-side window chrome (displayxr-common#52)
+#
+# THE header-bar painter for weaving desktop windows: metrics, hit testing,
+# interaction state and a premultiplied RGBA raster with GNOME's rounded top
+# corners. Knows no window system (the X11 / Wayland glue stays with the app /
+# helper that owns the window) and needs no OpenXR, so it sits outside the
+# DISPLAYXR_BUILD_MATH_OPENXR gate. Its own target — not part of
+# displayxr::common — so a consumer pinned to an older displayxr::common can
+# still take just this.
+# ---------------------------------------------------------------------------
+add_library(displayxr_csd STATIC
+    common/csd_titlebar.cpp
+    common/csd_titlebar.h
+    common/stb_truetype.h
+)
+add_library(displayxr::csd ALIAS displayxr_csd)
+target_include_directories(displayxr_csd PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:common>
+)
+set_target_properties(displayxr_csd PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+)
 
 # ---------------------------------------------------------------------------
 # displayxr::math_xrt — xrt-typed FOV-only wrapper for the DisplayXR runtime
