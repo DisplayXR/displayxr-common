@@ -1243,6 +1243,33 @@ static void test_color_policy()
     CHECK(dxr::IsSrgbColorFormat(0x8C43), "GL_SRGB8_ALPHA8 is sRGB");
     CHECK(!dxr::IsSrgbColorFormat(28) && !dxr::IsSrgbColorFormat(87), "DXGI UNORM codes are not sRGB");
     CHECK(dxr::IsUnormColorFormat(28) && dxr::IsUnormColorFormat(0x8058), "UNORM codes classify");
+
+    // IsSrgbColorFormat() is the rule a Vulkan consumer applies to pick its
+    // INTERNAL color-target format when it blits into the swapchain (the
+    // pair (internal, swapchain) is what encodes, or does not). So the four
+    // VK codes in play, both ways, plus one DXGI / GL / Metal pair each way.
+    CHECK(dxr::IsSrgbColorFormat(43), "VK_FORMAT_R8G8B8A8_SRGB is sRGB");
+    CHECK(dxr::IsSrgbColorFormat(50), "VK_FORMAT_B8G8R8A8_SRGB is sRGB");
+    CHECK(dxr::IsSrgbColorFormat(57), "VK_FORMAT_A8B8G8R8_SRGB_PACK32 is sRGB");
+    CHECK(!dxr::IsSrgbColorFormat(37), "VK_FORMAT_R8G8B8A8_UNORM is not sRGB");
+    CHECK(!dxr::IsSrgbColorFormat(44), "VK_FORMAT_B8G8R8A8_UNORM is not sRGB");
+    CHECK(!dxr::IsSrgbColorFormat(51), "VK_FORMAT_A8B8G8R8_UNORM_PACK32 is not sRGB");
+    CHECK(dxr::IsSrgbColorFormat(29) && !dxr::IsSrgbColorFormat(28), "DXGI R8G8B8A8 both ways");
+    CHECK(dxr::IsSrgbColorFormat(0x8C43) && !dxr::IsSrgbColorFormat(0x8058), "GL RGBA8 both ways");
+    CHECK(dxr::IsSrgbColorFormat(71) && !dxr::IsSrgbColorFormat(70), "Metal RGBA8Unorm both ways");
+    CHECK(!dxr::IsSrgbColorFormat(0) && !dxr::IsSrgbColorFormat(12345),
+          "an unknown format is not sRGB — the blit pairing rule then picks UNORM");
+    // The pairing rule itself, as a Vulkan consumer would write it.
+    {
+        auto internalFormat = [](int64_t swapchainFormat) {
+            return dxr::IsSrgbColorFormat(swapchainFormat) ? 43 /* VK R8G8B8A8_SRGB */
+                                                           : 37 /* VK R8G8B8A8_UNORM */;
+        };
+        CHECK(internalFormat(43) == 43 && internalFormat(50) == 43,
+              "an sRGB swapchain takes an sRGB internal target (identity round-trip)");
+        CHECK(internalFormat(37) == 37 && internalFormat(44) == 37,
+              "a UNORM swapchain takes a UNORM internal target (raw byte copy)");
+    }
     CHECK(dxr::SrgbSiblingOf(28) == 29 && dxr::SrgbSiblingOf(87) == 91, "DXGI siblings");
     CHECK(dxr::SrgbSiblingOf(37) == 43 && dxr::SrgbSiblingOf(44) == 50, "VK siblings");
     CHECK(dxr::SrgbSiblingOf(0x8058) == 0x8C43, "GL sibling");

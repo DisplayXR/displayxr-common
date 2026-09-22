@@ -64,7 +64,24 @@ ColorEncodingPreferenceFromEnv(const char *value);
 ColorEncodingPreference
 ColorEncodingPreferenceFromEnvironment();
 
-//! Is `format` a known `_SRGB` color code (DXGI / Vulkan / GL / Metal)?
+/*!
+ * Is `format` a known `_SRGB` color code (DXGI / Vulkan / GL / Metal)?
+ *
+ * Also THE rule for a Vulkan app's own internal color target when the frame
+ * ends in a `vkCmdBlitImage` into the swapchain image rather than a direct
+ * render into it. `vkCmdBlitImage` converts through the two IMAGES' formats,
+ * so the pair has to agree:
+ *
+ *     internalFormat = dxr::IsSrgbColorFormat(swapchainFormat)
+ *                          ? <your _SRGB format>   // e.g. VK_FORMAT_R8G8B8A8_SRGB
+ *                          : <your UNORM format>;  // e.g. VK_FORMAT_R8G8B8A8_UNORM
+ *
+ * `_SRGB`→`_SRGB` decodes then re-encodes (identity) and UNORM→UNORM copies the
+ * bytes; the two MIXED pairs are half-conversions — display-referred UNORM into
+ * `_SRGB` encodes a second time (washed out), `_SRGB` into UNORM decodes and
+ * never re-encodes (too dark). See README § *If you blit into the swapchain
+ * (Vulkan)*.
+ */
 bool
 IsSrgbColorFormat(int64_t format);
 
