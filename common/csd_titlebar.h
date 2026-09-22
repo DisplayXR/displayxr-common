@@ -39,8 +39,8 @@
  * TRANSLUCENT, ROUNDED. The bar is a translucent dark material (Style: about
  * 65 % opacity, dark tint) with the desktop showing through, a 1 px lighter
  * top edge, and a soft shadow under the title and glyphs so they stay legible
- * over light and dark desktops alike. Its top corners are rounded (12 logical
- * px, GNOME's radius) with alpha 0 outside the radius. Everything is
+ * over light and dark desktops alike. Its top corners are rounded (14 logical
+ * px, scaled up from GNOME's 12 with the larger title) with alpha 0 outside the radius. Everything is
  * PREMULTIPLIED alpha, anti-aliased. Both only read as intended where the
  * surface carries alpha — a Wayland ARGB8888 buffer, or an X11 32-bit ARGB
  * visual under a compositing manager. On an opaque surface call
@@ -134,7 +134,19 @@ struct Style
 	float tintR = 0.118f;           //!< dark tint (≈ #1e1e1e)
 	float tintG = 0.118f;
 	float tintB = 0.118f;
-	float cornerRadius = 12.0f;     //!< top-corner radius (GNOME / libadwaita)
+	// ── Metrics, LOGICAL px. The title is 1.5x libadwaita's (15 -> 22.5 px)
+	//    for legibility at a distance from a 3D panel; the bar, buttons and
+	//    corner radius grow with it so the proportions stay balanced
+	//    (46 -> 58 px bar, 24 -> 30 px buttons, 12 -> 14 px radius).
+	float titlePx = 22.5f;          //!< bold title pixel height
+	float barHeight = 58.0f;        //!< bar height
+	float buttonRadius = 15.0f;     //!< window-button disc radius
+	float buttonGap = 14.0f;        //!< between button edges
+	float buttonRightPad = 11.0f;   //!< bar edge -> close button edge
+	float buttonHitHalf = 21.0f;    //!< hit square half-size (bigger than the disc, as GTK)
+	float iconHalf = 5.0f;          //!< half-extent of the x / - glyphs
+	float iconStroke = 1.6f;        //!< glyph line thickness
+	float cornerRadius = 14.0f;     //!< top-corner radius
 	float highlightAlpha = 0.16f;   //!< white, 1 px top edge
 	float separatorAlpha = 0.35f;   //!< black, 1 px bottom edge (bar vs scene)
 	float textShadowAlpha = 0.55f;  //!< black, soft shadow under title + glyphs
@@ -148,8 +160,10 @@ struct Style
 class TitleBar
 {
 public:
-	//! Bar height in LOGICAL px (libadwaita's header bar).
-	static constexpr float kLogicalHeight = 46.0f;
+	//! Bar height in LOGICAL px (Style::barHeight, rounded). The glue needs
+	//! it in logical units (a Wayland subsurface position, an X11 layout).
+	int32_t
+	logicalHeight() const;
 
 	/*!
 	 * Set the logical -> device scale and load the title font (once).
@@ -159,7 +173,7 @@ public:
 	void
 	configure(float scale);
 
-	//! Bar height in DEVICE px — kLogicalHeight x scale, rounded up to even
+	//! Bar height in DEVICE px — Style::barHeight x scale, rounded up to even
 	//! (so an integer-scaled compositor never splits the bar/content seam).
 	uint32_t
 	height() const
@@ -215,7 +229,8 @@ public:
 		return hasAlpha_;
 	}
 
-	//! Replace the look (opacity, tint, radius, ...). Marks dirty.
+	//! Replace the look (opacity, tint, metrics, ...). Marks dirty and
+	//! recomputes height() — set it BEFORE the glue lays the window out.
 	void
 	setStyle(const Style &s);
 	const Style &
@@ -298,7 +313,7 @@ private:
 
 	bool dirty_ = true;
 	float scale_ = 1.0f;
-	uint32_t height_ = 46;
+	uint32_t height_ = 58;
 	Hit hover_ = Hit::Outside;
 	Hit pressed_ = Hit::Outside;
 	bool focused_ = true;
