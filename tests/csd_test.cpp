@@ -4,15 +4,18 @@
  * @file
  * @brief  Contract test for csd_titlebar.h (displayxr-common#52).
  *
- * The rounded corners are the part a reviewer cannot see in a diff and a user
- * sees immediately, so their alpha is pinned here: fully transparent at the
- * corner, fully opaque in the bar's body and below the radius, and square when
- * maximised or switched off. Window-system free — runs on every CI runner.
+ * The material and the rounded corners are the parts a reviewer cannot see in
+ * a diff and a user sees immediately, so their alpha is pinned here:
+ * transparent outside the corner radius, translucent (Style::opacity) in the
+ * body, square when maximised, and fully opaque on a surface without alpha.
+ * Window-system free — runs on every CI runner.
  */
 
 #include "csd_titlebar.h"
 
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <vector>
 
@@ -58,12 +61,16 @@ main()
 		const std::vector<uint8_t> &px = bar.render(W);
 		CHECK(px.size() == (size_t)W * bar.height() * 4, "raster is w x h RGBA8");
 		CHECK(!bar.dirty(), "render clears dirty");
+		const int bodyA = (int)std::lround(bar.style().opacity * 255.f);
+		const int midY = (int)bar.height() / 2;
 		CHECK(AlphaAt(px, W, 0, 0) == 0, "top-left corner pixel is transparent");
 		CHECK(AlphaAt(px, W, W - 1, 0) == 0, "top-right corner pixel is transparent");
-		CHECK(AlphaAt(px, W, W / 2, 0) == 255, "top edge centre is opaque");
-		CHECK(AlphaAt(px, W, 0, bar.cornerRadius()) == 255, "left edge below the radius is opaque");
-		CHECK(AlphaAt(px, W, 0, bar.height() - 1) == 255, "bottom-left is square (content owns it)");
-		CHECK(AlphaAt(px, W, W - 1, bar.height() - 1) == 255, "bottom-right is square");
+		CHECK(std::abs(AlphaAt(px, W, 60, midY) - bodyA) <= 1, "body is translucent at Style::opacity");
+		CHECK(AlphaAt(px, W, 60, midY) < 255, "body is not opaque (the desktop shows through)");
+		CHECK(AlphaAt(px, W, W / 2, 0) > AlphaAt(px, W, 60, midY), "top highlight is a denser rim");
+		CHECK(AlphaAt(px, W, 0, bar.cornerRadius()) > 0, "left edge below the radius is covered");
+		CHECK(AlphaAt(px, W, 0, bar.height() - 1) > 0, "bottom-left is square (content owns it)");
+		CHECK(AlphaAt(px, W, W - 1, bar.height() - 1) > 0, "bottom-right is square");
 		// Anti-aliased: somewhere in the corner square the alpha is partial.
 		bool partial = false;
 		for (uint32_t y = 0; y < bar.cornerRadius(); ++y) {
@@ -73,6 +80,14 @@ main()
 			}
 		}
 		CHECK(partial, "corner edge is anti-aliased");
+		// Opacity is a parameter: a denser material raises the body alpha.
+		dxr_csd::Style dense = bar.style();
+		dense.opacity = 0.9f;
+		TitleBar b2;
+		b2.configure(2.0f);
+		b2.setStyle(dense);
+		CHECK(std::abs(AlphaAt(b2.render(W), W, 60, midY) - (int)std::lround(0.9f * 255.f)) <= 1,
+		      "Style::opacity drives the body alpha");
 		// Premultiplied: no colour channel exceeds alpha.
 		bool premul = true;
 		for (size_t i = 0; i < px.size(); i += 4) {
@@ -85,11 +100,19 @@ main()
 	bar.setMaximized(true);
 	CHECK(bar.dirty(), "maximise marks dirty");
 	CHECK(bar.cornerRadius() == 0, "maximised has no radius");
-	CHECK(AlphaAt(bar.render(W), W, 0, 0) == 255, "maximised corner is opaque");
+	CHECK(AlphaAt(bar.render(W), W, 0, 0) > 0, "maximised corner is covered (square)");
 	bar.setMaximized(false);
-	bar.setRoundCorners(false);
-	CHECK(AlphaAt(bar.render(W), W, 0, 0) == 255, "round corners off -> opaque corner");
-	bar.setRoundCorners(true);
+	bar.setSurfaceHasAlpha(false);
+	CHECK(bar.cornerRadius() == 0, "no alpha -> no radius");
+	{
+		const std::vector<uint8_t> &px = bar.render(W);
+		bool opaque = true;
+		for (size_t i = 3; i < px.size(); i += 4) {
+			opaque &= px[i] == 255;
+		}
+		CHECK(opaque, "no alpha -> every pixel opaque (the opaque-visual fallback)");
+	}
+	bar.setSurfaceHasAlpha(true);
 
 	// ── Hit testing ────────────────────────────────────────────────────────
 	CHECK(bar.hitTest(W / 2, bar.height() / 2, W) == Hit::Drag, "bar body is a drag");
@@ -123,7 +146,8 @@ main()
 		std::vector<uint32_t> argb((size_t)W * bar.height());
 		bar.pack(argb.data(), W, 0x00ff0000u, 0x0000ff00u, 0x000000ffu, 0xff000000u);
 		CHECK((argb[0] >> 24) == 0, "ARGB8888 corner alpha 0");
-		CHECK((argb[W / 2] >> 24) == 0xff, "ARGB8888 body alpha 255");
+		CHECK((argb[(size_t)W * (bar.height() / 2) + 60] >> 24) == (uint32_t)(std::lround(bar.style().opacity * 255.f)),
+		      "ARGB8888 body alpha is the material's");
 		std::vector<uint32_t> xrgb((size_t)W * bar.height());
 		bar.pack(xrgb.data(), W, 0x00ff0000u, 0x0000ff00u, 0x000000ffu, 0u);
 		CHECK((xrgb[W / 2] >> 24) == 0xff, "no-alpha visual pads the unused byte with ones");

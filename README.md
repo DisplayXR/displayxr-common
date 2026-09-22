@@ -12,7 +12,7 @@ It exposes these CMake targets:
 
 - **`displayxr::math`** — pure-C off-axis Kooima projection (display-centric + camera-centric rigs, FOV + matrices). Implements the [Kooima algorithm](http://csc.lsu.edu/~kooima/articles/genperspective/) — perspective-correct multiview 3D for physical displays with eye tracking. Linked by **everything**, including the Unity/Unreal engine plug-ins.
 - **`displayxr::common`** — C++17 app scaffolding (depends on `displayxr::math`): logging, Win32 input + window management, OpenXR session/swapchain/frame lifecycle, D2D/DirectWrite text + HUD rendering, the D3D11 reference renderer, window-space-layer UI helpers, the thin app-side atlas-capture helper, and the vendored stb image headers. Linked by **C++ apps only** (runtime test apps, standalone demos) — not by engines.
-- **`displayxr::csd`** — client-side window chrome: the ONE header-bar painter for weaving desktop windows (metrics, hit testing, interaction state, and a premultiplied RGBA raster with GNOME's 12 px rounded top corners). Window-system neutral and OpenXR-free; the X11 / Wayland glue stays with whoever owns the window. See [Client-side window chrome](#client-side-window-chrome-csd_titlebarh).
+- **`displayxr::csd`** — client-side window chrome: the ONE header-bar painter for weaving desktop windows (metrics, hit testing, interaction state, and a premultiplied RGBA raster: a translucent dark material with GNOME's 12 px rounded top corners, tunable through one `Style`). Window-system neutral and OpenXR-free; the X11 / Wayland glue stays with whoever owns the window. See [Client-side window chrome](#client-side-window-chrome-csd_titlebarh).
 
 ## What It Does
 
@@ -553,22 +553,31 @@ what must look and behave the same everywhere:
   top edge and corners.
 - **State.** Hover, pressed, focused, maximised (square corners, no resize
   band), and `DoubleClick` for maximise and restore.
-- **`render(w)`.** A **premultiplied RGBA8** raster. The top corners are
+- **`render(w)`.** A **premultiplied RGBA8** raster of a **translucent**
+  bar. By default it is a dark tint at about 65 % opacity, so the desktop
+  shows through. A 1 px lighter top rim and a soft shadow under the title and
+  glyphs keep it legible over light and dark desktops. The top corners are
   rounded with an anti-aliased 12 logical px radius and have **alpha 0**
   outside it. `pack()` repacks the raster for any 32-bit channel layout: an
   X11 visual's masks, or the wl_shm ARGB8888 masks.
+- **`Style`.** The look is one parameter set: opacity (focused and
+  backdrop), tint, corner radius, rim, separator, text shadow and button
+  fills. `setStyle()` retunes it without touching the raster code.
 
 The window system stays with whoever owns the window:
 
 | window system | glue | alpha at the corners |
 |---|---|---|
-| X11 | the app: `XPutImage` into the top-level | real on a 32-bit ARGB visual under a compositing manager; call `setRoundCorners(false)` on an opaque visual |
-| native Wayland | runtime `test_apps/common/dxr_linux_window`: a `wl_subsurface` holding a `wl_shm` ARGB8888 buffer | always real |
+| X11 | the app: `XPutImage` into the top-level | real on a 32-bit ARGB visual under a compositing manager. On an opaque visual, call `setSurfaceHasAlpha(false)`: the bar is then painted opaque with square corners. |
+| native Wayland | runtime `test_apps/common/dxr_linux_window`: a `wl_subsurface` holding a `wl_shm` ARGB8888 buffer, with no opaque region | always real |
 
 **The bar is outside the 3D viewport.** The window or surface bound to the
 runtime must be the content rect only. Then the canvas, the Kooima projection,
 the swapchain and the atlas all exclude the bar, and the weave never lands on a
-chrome pixel. The bottom corners belong to the woven content and stay square.
+chrome pixel. Only the chrome is translucent. The 3D content stays opaque and
+weaves exactly as before, and neither the weave nor a display processor's
+background capture ever sees the bar. The bottom corners belong to the woven
+content and stay square.
 
 ```cmake
 target_link_libraries(your_linux_app PRIVATE displayxr::csd)

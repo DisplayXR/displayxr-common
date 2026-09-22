@@ -36,13 +36,22 @@
  * the Kooima projection, the swapchain and the atlas all exclude the bar and
  * the weave never lands on a chrome pixel.
  *
- * ROUNDED CORNERS. rasterize() gives the top corners an anti-aliased radius
- * (12 logical px, GNOME's) with alpha 0 outside it, PREMULTIPLIED. So the
- * corners only read as rounded where the surface carries alpha — a Wayland
- * ARGB8888 buffer, or an X11 32-bit ARGB visual under a compositing manager.
- * On an opaque X11 visual turn them off (setRoundCorners(false)): premultiplied
- * alpha 0 is black there. The BOTTOM corners belong to the woven content
- * surface and are deliberately square — rounding them would need alpha in the
+ * TRANSLUCENT, ROUNDED. The bar is a translucent dark material (Style: about
+ * 65 % opacity, dark tint) with the desktop showing through, a 1 px lighter
+ * top edge, and a soft shadow under the title and glyphs so they stay legible
+ * over light and dark desktops alike. Its top corners are rounded (12 logical
+ * px, GNOME's radius) with alpha 0 outside the radius. Everything is
+ * PREMULTIPLIED alpha, anti-aliased. Both only read as intended where the
+ * surface carries alpha — a Wayland ARGB8888 buffer, or an X11 32-bit ARGB
+ * visual under a compositing manager. On an opaque surface call
+ * setSurfaceHasAlpha(false): the bar is then painted fully opaque with square
+ * corners (premultiplied alpha 0 would be black there).
+ *
+ * The translucency is the CHROME's only. The 3D content below is a different
+ * surface / window, stays opaque and weaves exactly as before; the bar is
+ * never in the atlas, so neither the weave nor a display processor's
+ * background capture ever sees it. The BOTTOM corners belong to that woven
+ * content and are deliberately square — rounding them would need alpha in the
  * weave output and would clip content.
  *
  * Portable C++17, no dependencies beyond the vendored stb_truetype.h.
@@ -109,13 +118,38 @@ private:
 	int x_ = 0, y_ = 0;
 };
 
+/*!
+ * The bar's look, in one place so it can be tuned without touching the
+ * raster. Colours are sRGB 0..1; alphas 0..1; lengths LOGICAL px.
+ *
+ * Legibility budget of the defaults: over a pure-white desktop the 65 % dark
+ * tint composites to about sRGB 0.43, which keeps white title text above a
+ * 4.5:1 contrast ratio before the text shadow is even counted; over a dark
+ * desktop it is darker still.
+ */
+struct Style
+{
+	float opacity = 0.65f;          //!< bar background alpha, focused window
+	float backdropOpacity = 0.55f;  //!< ... unfocused window
+	float tintR = 0.118f;           //!< dark tint (≈ #1e1e1e)
+	float tintG = 0.118f;
+	float tintB = 0.118f;
+	float cornerRadius = 12.0f;     //!< top-corner radius (GNOME / libadwaita)
+	float highlightAlpha = 0.16f;   //!< white, 1 px top edge
+	float separatorAlpha = 0.35f;   //!< black, 1 px bottom edge (bar vs scene)
+	float textShadowAlpha = 0.55f;  //!< black, soft shadow under title + glyphs
+	float textShadowOffset = 1.0f;  //!< shadow drop, down
+	float buttonFill = 0.12f;       //!< white, button circle at rest
+	float buttonFillHover = 0.20f;  //!< ... hovered
+	float buttonFillPressed = 0.32f; //!< ... pressed
+	float backdropTextAlpha = 0.55f; //!< title / glyph alpha, unfocused window
+};
+
 class TitleBar
 {
 public:
 	//! Bar height in LOGICAL px (libadwaita's header bar).
 	static constexpr float kLogicalHeight = 46.0f;
-	//! Top-corner radius in LOGICAL px (GNOME / libadwaita windows).
-	static constexpr float kLogicalCornerRadius = 12.0f;
 
 	/*!
 	 * Set the logical -> device scale and load the title font (once).
@@ -139,7 +173,7 @@ public:
 	}
 
 	//! Effective corner radius in device px: 0 when square (maximised, tiled,
-	//! fullscreen, or setRoundCorners(false)).
+	//! or setSurfaceHasAlpha(false)).
 	uint32_t
 	cornerRadius() const;
 
@@ -168,9 +202,27 @@ public:
 	{
 		return maximized_;
 	}
-	//! Whether rounded corners are wanted at all (false on an opaque surface).
+	/*!
+	 * Whether the surface the bar lands on carries alpha (Wayland ARGB8888,
+	 * X11 ARGB visual + compositing manager). False: the bar is painted fully
+	 * opaque with square corners — the fallback for an opaque X11 visual.
+	 */
 	void
-	setRoundCorners(bool r);
+	setSurfaceHasAlpha(bool a);
+	bool
+	surfaceHasAlpha() const
+	{
+		return hasAlpha_;
+	}
+
+	//! Replace the look (opacity, tint, radius, ...). Marks dirty.
+	void
+	setStyle(const Style &s);
+	const Style &
+	style() const
+	{
+		return style_;
+	}
 	//! Whether the top edge offers resize hits (false for a fixed-size window).
 	void
 	setResizable(bool r);
@@ -190,7 +242,9 @@ public:
 	/*!
 	 * Rasterise the bar @p w device px wide if dirty or the width changed,
 	 * and clear the dirty flag. The result is PREMULTIPLIED RGBA8, sRGB,
-	 * row-major, `w * height() * 4` bytes, alpha 0 outside the corners.
+	 * row-major, `w * height() * 4` bytes: translucent (Style::opacity) in
+	 * the body, alpha 0 outside the rounded corners, opaque throughout when
+	 * setSurfaceHasAlpha(false).
 	 */
 	const std::vector<uint8_t> &
 	render(uint32_t w);
@@ -207,7 +261,8 @@ public:
 	 * given masks (8 bits each). @p dstStrideWords is the row pitch in
 	 * uint32_t units. @p aMask 0 = the destination has no alpha channel: the
 	 * pixels are written as they would composite over black, and the unused
-	 * bits are set to ones (harmless padding on a depth-24 X11 visual).
+	 * bits are set to ones (harmless padding on a depth-24 X11 visual) — use
+	 * it with setSurfaceHasAlpha(false), which makes every pixel opaque.
 	 *
 	 * wl_shm ARGB8888: r 0x00ff0000, g 0x0000ff00, b 0x000000ff, a 0xff000000.
 	 */
@@ -248,7 +303,8 @@ private:
 	Hit pressed_ = Hit::Outside;
 	bool focused_ = true;
 	bool maximized_ = false;
-	bool roundCorners_ = true;
+	bool hasAlpha_ = true;
+	Style style_;
 	bool resizable_ = true;
 };
 

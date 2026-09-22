@@ -38,17 +38,11 @@ constexpr float kIconStroke = 1.3f;  // icon line thickness
 constexpr float kResizeBand = 5.0f;  // top-edge resize band height
 constexpr float kResizeCorner = 16.0f; // top-corner resize square
 
-// libadwaita dark palette, sRGB. The 3D content below is typically dark, so
-// the dark variant is the one that does not look like a hole punched in it.
-struct Rgb
+//! One PREMULTIPLIED pixel (sRGB-encoded channels scaled by alpha).
+struct Px
 {
-	float r, g, b;
+	float r, g, b, a;
 };
-constexpr Rgb kBgFocused = {0x30 / 255.f, 0x30 / 255.f, 0x30 / 255.f};
-constexpr Rgb kBgBackdrop = {0x24 / 255.f, 0x24 / 255.f, 0x24 / 255.f};
-constexpr Rgb kBorder = {0x1a / 255.f, 0x1a / 255.f, 0x1a / 255.f};
-constexpr Rgb kHighlight = {0x3a / 255.f, 0x3a / 255.f, 0x3a / 255.f};
-constexpr Rgb kFg = {1.f, 1.f, 1.f};
 
 inline float
 Clamp01(float v)
@@ -56,10 +50,15 @@ Clamp01(float v)
 	return v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
 }
 
-inline Rgb
-Mix(Rgb a, Rgb b, float t)
+//! Porter-Duff source-over of a flat colour (straight, 0..1) at @p alpha.
+inline void
+Over(Px &d, float r, float g, float b, float alpha)
 {
-	return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t};
+	const float k = 1.f - alpha;
+	d.r = r * alpha + d.r * k;
+	d.g = g * alpha + d.g * k;
+	d.b = b * alpha + d.b * k;
+	d.a = alpha + d.a * k;
 }
 
 //! Distance from p to segment ab.
@@ -264,10 +263,10 @@ TitleBar::configure(float scale)
 uint32_t
 TitleBar::cornerRadius() const
 {
-	if (!roundCorners_ || maximized_) {
+	if (!hasAlpha_ || maximized_ || style_.cornerRadius <= 0.f) {
 		return 0;
 	}
-	return (uint32_t)std::lround(kLogicalCornerRadius * scale_);
+	return (uint32_t)std::lround(style_.cornerRadius * scale_);
 }
 
 Hit
@@ -341,12 +340,19 @@ TitleBar::setMaximized(bool m)
 }
 
 void
-TitleBar::setRoundCorners(bool r)
+TitleBar::setSurfaceHasAlpha(bool a)
 {
-	if (r != roundCorners_) {
-		roundCorners_ = r;
+	if (a != hasAlpha_) {
+		hasAlpha_ = a;
 		dirty_ = true;
 	}
+}
+
+void
+TitleBar::setStyle(const Style &s)
+{
+	style_ = s;
+	dirty_ = true;
 }
 
 void
@@ -382,65 +388,91 @@ void
 TitleBar::rasterize(uint32_t w)
 {
 	const uint32_t h = height_;
-	std::vector<Rgb> px((size_t)w * h);
+	const size_t n = (size_t)w * h;
+	const Style &st = style_;
 
-	const Rgb bg = focused_ ? kBgFocused : kBgBackdrop;
-	const Rgb fg = focused_ ? kFg : Mix(bg, kFg, 0.5f);
-	std::fill(px.begin(), px.end(), bg);
+	// ── 1. Background material. Translucent dark tint where the surface has
+	//    alpha; fully opaque (same tint) where it does not.
+	const float bgA = hasAlpha_ ? Clamp01(focused_ ? st.opacity : st.backdropOpacity) : 1.f;
+	std::vector<Px> px(n, Px{st.tintR * bgA, st.tintG * bgA, st.tintB * bgA, bgA});
 
+	// ── 2. Edges: a lighter 1 px top highlight (reads as the lit rim of a
+	//    glass pane, and outlines the bar over a dark desktop) and a dark 1 px
+	//    separator where the bar meets the content.
 	const uint32_t line = std::max(1u, (uint32_t)std::lround(scale_));
-	// A faint highlight along the top edge (libadwaita draws one inside the
-	// rounded window outline), and the shade line separating bar from scene.
 	for (uint32_t y = 0; y < line && y < h; ++y) {
 		for (uint32_t x = 0; x < w; ++x) {
-			px[(size_t)y * w + x] = kHighlight;
+			Over(px[(size_t)y * w + x], 1.f, 1.f, 1.f, st.highlightAlpha);
 		}
 	}
-	for (uint32_t y = h - line; y < h; ++y) {
+	for (uint32_t y = h > line ? h - line : 0; y < h; ++y) {
 		for (uint32_t x = 0; x < w; ++x) {
-			px[(size_t)y * w + x] = kBorder;
+			Over(px[(size_t)y * w + x], 0.f, 0.f, 0.f, st.separatorAlpha);
 		}
 	}
 
 	const Layout l = MakeLayout(scale_, w, h);
+	const bool showButtons = w > (uint32_t)(2.f * (kBtnRightPad + 2.f * kBtnR + kBtnGap) * scale_);
 
-	// Buttons: a faint circle (brighter on hover, brighter still pressed) with
-	// a symbolic glyph. Coverage is analytic, so edges are antialiased.
-	auto drawButton = [&](float cx, Hit which) {
-		float fill = 0.10f;
+	// ── 3. Button discs: faint white, brighter hovered, brighter still pressed.
+	auto drawDisc = [&](float cx, Hit which) {
+		float fill = st.buttonFill;
 		if (hover_ == which) {
-			fill = 0.15f;
+			fill = st.buttonFillHover;
 		}
 		if (pressed_ == which) {
-			fill = 0.30f;
+			fill = st.buttonFillPressed;
 		}
-		const float half = kIconHalf * scale_;
-		const float stroke = 0.5f * kIconStroke * scale_;
 		const int x0 = std::max(0, (int)(cx - l.r - 2)), x1 = std::min((int)w - 1, (int)(cx + l.r + 2));
 		const int y0 = std::max(0, (int)(l.cy - l.r - 2)), y1 = std::min((int)h - 1, (int)(l.cy + l.r + 2));
 		for (int y = y0; y <= y1; ++y) {
 			for (int x = x0; x <= x1; ++x) {
 				const float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
 				const float d = std::sqrt((fx - cx) * (fx - cx) + (fy - l.cy) * (fy - l.cy));
-				const float circle = Clamp01(l.r - d + 0.5f) * fill;
-				Rgb &p = px[(size_t)y * w + x];
-				p = Mix(p, kFg, circle);
-				float glyph;
-				if (which == Hit::Close) {
-					const float d1 = SegDist(fx, fy, cx - half, l.cy - half, cx + half, l.cy + half);
-					const float d2 = SegDist(fx, fy, cx - half, l.cy + half, cx + half, l.cy - half);
-					glyph = Clamp01(stroke - std::min(d1, d2) + 0.5f);
-				} else {
-					const float yy = l.cy + half * 0.75f;
-					glyph = Clamp01(stroke - SegDist(fx, fy, cx - half, yy, cx + half, yy) + 0.5f);
+				const float cov = Clamp01(l.r - d + 0.5f);
+				if (cov > 0.f) {
+					Over(px[(size_t)y * w + x], 1.f, 1.f, 1.f, cov * fill);
 				}
-				p = Mix(p, fg, glyph);
 			}
 		}
 	};
-	if (w > (uint32_t)(2.f * (kBtnRightPad + 2.f * kBtnR + kBtnGap) * scale_)) {
-		drawButton(l.closeCx, Hit::Close);
-		drawButton(l.minCx, Hit::Minimize);
+	if (showButtons) {
+		drawDisc(l.closeCx, Hit::Close);
+		drawDisc(l.minCx, Hit::Minimize);
+	}
+
+	// ── 4. Foreground coverage (glyphs + title) into one mask, so the soft
+	//    shadow below it is computed once for everything legible.
+	std::vector<float> fg(n, 0.f);
+	auto plot = [&](int x, int y, float c) {
+		if (x >= 0 && y >= 0 && x < (int)w && y < (int)h && c > 0.f) {
+			float &m = fg[(size_t)y * w + x];
+			m = std::max(m, Clamp01(c));
+		}
+	};
+	auto drawGlyph = [&](float cx, Hit which) {
+		const float half = kIconHalf * scale_;
+		const float stroke = 0.5f * kIconStroke * scale_;
+		const int x0 = (int)(cx - half - stroke - 2), x1 = (int)(cx + half + stroke + 2);
+		const int y0 = (int)(l.cy - half - stroke - 2), y1 = (int)(l.cy + half + stroke + 2);
+		for (int y = y0; y <= y1; ++y) {
+			for (int x = x0; x <= x1; ++x) {
+				const float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
+				float d;
+				if (which == Hit::Close) {
+					d = std::min(SegDist(fx, fy, cx - half, l.cy - half, cx + half, l.cy + half),
+					             SegDist(fx, fy, cx - half, l.cy + half, cx + half, l.cy - half));
+				} else {
+					const float yy = l.cy + half * 0.75f;
+					d = SegDist(fx, fy, cx - half, yy, cx + half, yy);
+				}
+				plot(x, y, stroke - d + 0.5f);
+			}
+		}
+	};
+	if (showButtons) {
+		drawGlyph(l.closeCx, Hit::Close);
+		drawGlyph(l.minCx, Hit::Minimize);
 	}
 
 	// Title, centred on the bar and ellipsized so it never runs under the
@@ -458,9 +490,9 @@ TitleBar::rasterize(uint32_t w)
 			auto measure = [&](const std::vector<int> &c) {
 				float adv = 0.f;
 				for (size_t i = 0; i < c.size(); ++i) {
-					int a = 0, lsb = 0;
-					stbtt_GetCodepointHMetrics(&font, c[i], &a, &lsb);
-					adv += (float)a * fs;
+					int adv_ = 0, lsb = 0;
+					stbtt_GetCodepointHMetrics(&font, c[i], &adv_, &lsb);
+					adv += (float)adv_ * fs;
 					if (i + 1 < c.size()) {
 						adv += (float)stbtt_GetCodepointKernAdvance(&font, c[i], c[i + 1]) * fs;
 					}
@@ -496,24 +528,16 @@ TitleBar::rasterize(uint32_t w)
 				    &font, fs, fs, penX - std::floor(penX), 0.f, cps[i], &gw, &gh, &xoff, &yoff);
 				if (bmp != nullptr) {
 					for (int gy = 0; gy < gh; ++gy) {
-						const int y = (int)baseline + yoff + gy;
-						if (y < 0 || y >= (int)h) {
-							continue;
-						}
 						for (int gx = 0; gx < gw; ++gx) {
-							const int x = (int)std::floor(penX) + xoff + gx;
-							if (x < 0 || x >= (int)w) {
-								continue;
-							}
-							Rgb &p = px[(size_t)y * w + x];
-							p = Mix(p, fg, bmp[gy * gw + gx] / 255.f);
+							plot((int)std::floor(penX) + xoff + gx, (int)baseline + yoff + gy,
+							     bmp[gy * gw + gx] / 255.f);
 						}
 					}
 					stbtt_FreeBitmap(bmp, nullptr);
 				}
-				int a = 0, lsb = 0;
-				stbtt_GetCodepointHMetrics(&font, cps[i], &a, &lsb);
-				penX += (float)a * fs;
+				int adv_ = 0, lsb = 0;
+				stbtt_GetCodepointHMetrics(&font, cps[i], &adv_, &lsb);
+				penX += (float)adv_ * fs;
 				if (i + 1 < cps.size()) {
 					penX += (float)stbtt_GetCodepointKernAdvance(&font, cps[i], cps[i + 1]) * fs;
 				}
@@ -521,19 +545,80 @@ TitleBar::rasterize(uint32_t w)
 		}
 	}
 
-	// Opaque everywhere except the rounded top corners — including in a
-	// transparent-background app: the bar is window chrome, not scene.
-	// Premultiplied, so a partially covered corner pixel scales its colour too.
+	// ── 5. Soft text shadow: the foreground mask, dropped by
+	//    textShadowOffset and box-blurred (radius ~1 logical px), in black.
+	//    It is what keeps white text legible where a light desktop shows
+	//    through the translucent material.
+	if (st.textShadowAlpha > 0.f) {
+		const int drop = std::max(1, (int)std::lround(st.textShadowOffset * scale_));
+		const int rad = std::max(1, (int)std::lround(scale_));
+		std::vector<float> tmp(n, 0.f), sh(n, 0.f);
+		for (uint32_t y = 0; y < h; ++y) { // horizontal box
+			float acc = 0.f;
+			const int win = 2 * rad + 1;
+			for (int x = -rad; x < (int)w; ++x) {
+				const int add = x + rad, sub = x - rad - 1;
+				if (add < (int)w) {
+					acc += fg[(size_t)y * w + add];
+				}
+				if (sub >= 0) {
+					acc -= fg[(size_t)y * w + sub];
+				}
+				if (x >= 0) {
+					tmp[(size_t)y * w + x] = acc / (float)win;
+				}
+			}
+		}
+		for (uint32_t x = 0; x < w; ++x) { // vertical box, with the drop
+			for (uint32_t y = 0; y < h; ++y) {
+				float acc = 0.f;
+				for (int k = -rad; k <= rad; ++k) {
+					const int sy = (int)y - drop + k;
+					if (sy >= 0 && sy < (int)h) {
+						acc += tmp[(size_t)sy * w + x];
+					}
+				}
+				sh[(size_t)y * w + x] = acc / (float)(2 * rad + 1);
+			}
+		}
+		for (size_t i = 0; i < n; ++i) {
+			if (sh[i] > 0.f) {
+				Over(px[i], 0.f, 0.f, 0.f, Clamp01(sh[i]) * st.textShadowAlpha);
+			}
+		}
+	}
+
+	// ── 6. The foreground itself: white, dimmed on an unfocused window.
+	const float fgA = focused_ ? 1.f : st.backdropTextAlpha;
+	for (size_t i = 0; i < n; ++i) {
+		if (fg[i] > 0.f) {
+			Over(px[i], 1.f, 1.f, 1.f, fg[i] * fgA);
+		}
+	}
+
+	// ── 7. Rounded top corners: scale the whole premultiplied pixel by the
+	//    corner coverage (alpha 0 outside the radius, anti-aliased edge). With
+	//    no alpha on the surface, force every pixel opaque instead.
 	const float r = (float)cornerRadius();
-	pixels_.assign((size_t)w * h * 4, 0);
+	pixels_.assign(n * 4, 0);
 	for (uint32_t y = 0; y < h; ++y) {
 		for (uint32_t x = 0; x < w; ++x) {
 			const size_t i = (size_t)y * w + x;
-			const float a = CornerCoverage(x, y, w, r);
-			pixels_[i * 4 + 0] = (uint8_t)std::lround(Clamp01(px[i].r) * a * 255.f);
-			pixels_[i * 4 + 1] = (uint8_t)std::lround(Clamp01(px[i].g) * a * 255.f);
-			pixels_[i * 4 + 2] = (uint8_t)std::lround(Clamp01(px[i].b) * a * 255.f);
-			pixels_[i * 4 + 3] = (uint8_t)std::lround(a * 255.f);
+			Px p = px[i];
+			if (!hasAlpha_) {
+				// Composite over black (the premultiplied colour already is).
+				p.a = 1.f;
+			} else {
+				const float c = CornerCoverage(x, y, w, r);
+				p.r *= c;
+				p.g *= c;
+				p.b *= c;
+				p.a *= c;
+			}
+			pixels_[i * 4 + 0] = (uint8_t)std::lround(Clamp01(p.r) * 255.f);
+			pixels_[i * 4 + 1] = (uint8_t)std::lround(Clamp01(p.g) * 255.f);
+			pixels_[i * 4 + 2] = (uint8_t)std::lround(Clamp01(p.b) * 255.f);
+			pixels_[i * 4 + 3] = (uint8_t)std::lround(Clamp01(p.a) * 255.f);
 		}
 	}
 }
