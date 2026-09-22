@@ -235,22 +235,8 @@ RenderSceneLinear()
     return ColorSwapchainIsSrgb();
 }
 
-float
-DisplayReferredToSceneLinear(float c)
-{
-    if (c <= 0.04045f) {
-        return c / 12.92f;
-    }
-    return std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
-float
-SceneLinearToDisplayReferred(float c)
-{
-    if (c <= 0.0031308f) {
-        return c * 12.92f;
-    }
-    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-}
+// DisplayReferredToSceneLinear / SceneLinearToDisplayReferred moved to the
+// header as `inline` so header-only consumers (displayxr::rules, and through it
+// clear_policy.h on the Android legs) can reach them. Same math.
 
 } // namespace dxr

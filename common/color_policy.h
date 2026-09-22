@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -154,12 +155,33 @@ ColorSwapchainIsSrgb();
 bool
 RenderSceneLinear();
 
+/*!
+ * The two transfer curves are `inline` IN THE HEADER on purpose: they are the
+ * only part of this file a header-only consumer needs, and `displayxr::rules`
+ * (the INTERFACE target the Android legs consume — `displayxr::common` is
+ * STATIC and carries Win32/AppKit sources, so it cannot be linked there at
+ * all) can offer them only if there is no `.cpp` to link. `clear_policy.h`
+ * depends on that. Same math, same call sites, no behaviour change.
+ */
+
 //! Standard sRGB EOTF: display-referred [0,1] → scene-linear [0,1].
-float
-DisplayReferredToSceneLinear(float c);
+inline float
+DisplayReferredToSceneLinear(float c)
+{
+    if (c <= 0.04045f) {
+        return c / 12.92f;
+    }
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
 
 //! Standard sRGB OETF: scene-linear [0,1] → display-referred [0,1].
-float
-SceneLinearToDisplayReferred(float c);
+inline float
+SceneLinearToDisplayReferred(float c)
+{
+    if (c <= 0.0031308f) {
+        return c * 12.92f;
+    }
+    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
 
 } // namespace dxr

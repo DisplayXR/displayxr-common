@@ -25,7 +25,9 @@
 #include "auto_fit.h"
 #include "auto_fit_canvas.h"
 #include "clip_policy.h"
+#include "clear_policy.h"
 #include "color_policy.h"
+#include "gl_clear.h"
 #include "content_bounds.h"
 #include "content_mask.h"
 #include "dxr_view_math.h"
@@ -47,6 +49,23 @@
 #include "hud_renderer_macos.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
+#endif
+
+// The API-typed clear wrappers need their SDK headers, which a bare CI runner
+// may not have. Compile-check them opportunistically — when the SDK IS present
+// this proves the header chain, and when it is not the pure rule in
+// clear_policy.h (which carries all the logic) is still fully tested below.
+#if defined(__has_include)
+#if __has_include(<vulkan/vulkan.h>)
+#include "vk_clear.h"
+#define DXR_SMOKE_HAS_VK_CLEAR 1
+#endif
+#ifdef _WIN32
+#if __has_include(<d3d12.h>)
+#include "d3d12_clear.h"
+#define DXR_SMOKE_HAS_D3D12_CLEAR 1
+#endif
+#endif
 #endif
 
 static int g_failures = 0;
@@ -1232,6 +1251,223 @@ static void test_content_mask()
 // runtime advertises no `_SRGB` format at all, and `=unorm` must still reach the
 // plain UNORM format so the A/B leg exists.
 // ---------------------------------------------------------------------------
+// ── clear_policy.h (runtime #1647) ──────────────────────────────────────────
+//
+// The rule under test: what space a clear value handed to a given target must
+// be in. Three things are worth more than row count here —
+//   1. the CROSS-API negatives, because the one defect this file exists to
+//      prevent is reusing color_policy.h's union table on a target format;
+//   2. the 8-bit value pinning, so the test reads as the bug report it came
+//      from rather than as arithmetic;
+//   3. alpha, with a value that would actually move if it were converted.
+
+//! 8-bit code the panel would show for a scene-linear value the hardware encodes.
+static int encoded_u8(float sceneLinear)
+{
+    return (int)std::lround(dxr::SceneLinearToDisplayReferred(sceneLinear) * 255.0f);
+}
+
+static void test_clear_policy()
+{
+    using dxr::ClearValueSpace;
+
+    // --- Vulkan table (values verified against vulkan_core.h). ---
+    CHECK(dxr::VulkanClearValueSpace(43) == ClearValueSpace::SceneLinear,
+          "VK_FORMAT_R8G8B8A8_SRGB encodes on write -> clear must be scene-linear");
+    CHECK(dxr::VulkanClearValueSpace(50) == ClearValueSpace::SceneLinear,
+          "VK_FORMAT_B8G8R8A8_SRGB encodes on write");
+    CHECK(dxr::VulkanClearValueSpace(57) == ClearValueSpace::SceneLinear,
+          "VK_FORMAT_A8B8G8R8_SRGB_PACK32 encodes on write");
+    CHECK(dxr::VulkanClearValueSpace(15) == ClearValueSpace::SceneLinear &&
+              dxr::VulkanClearValueSpace(22) == ClearValueSpace::SceneLinear &&
+              dxr::VulkanClearValueSpace(29) == ClearValueSpace::SceneLinear &&
+              dxr::VulkanClearValueSpace(36) == ClearValueSpace::SceneLinear,
+          "the 1/2/3-channel VK sRGB codes encode too");
+    CHECK(dxr::VulkanClearValueSpace(37) == ClearValueSpace::DisplayReferred,
+          "VK_FORMAT_R8G8B8A8_UNORM stores verbatim -> clear stays display-referred");
+    CHECK(dxr::VulkanClearValueSpace(44) == ClearValueSpace::DisplayReferred &&
+              dxr::VulkanClearValueSpace(51) == ClearValueSpace::DisplayReferred,
+          "VK BGRA8 / A8B8G8R8_PACK32 UNORM store verbatim");
+
+    // --- DXGI table (values verified against dxgiformat.h). ---
+    CHECK(dxr::DxgiClearValueSpace(29) == ClearValueSpace::SceneLinear &&
+              dxr::DxgiClearValueSpace(91) == ClearValueSpace::SceneLinear &&
+              dxr::DxgiClearValueSpace(93) == ClearValueSpace::SceneLinear,
+          "the three DXGI _UNORM_SRGB codes encode on write");
+    CHECK(dxr::DxgiClearValueSpace(28) == ClearValueSpace::DisplayReferred &&
+              dxr::DxgiClearValueSpace(87) == ClearValueSpace::DisplayReferred &&
+              dxr::DxgiClearValueSpace(88) == ClearValueSpace::DisplayReferred,
+          "the DXGI 8-bit UNORM codes store verbatim");
+    // The runtime hands out TYPELESS swapchain textures and the VIEW arms the
+    // encode, so a resource format cannot answer. Unknown is the honest answer
+    // and it is what makes "pass the RTV's format, not the texture's" enforceable.
+    CHECK(dxr::DxgiClearValueSpace(27) == ClearValueSpace::Unknown &&
+              dxr::DxgiClearValueSpace(90) == ClearValueSpace::Unknown &&
+              dxr::DxgiClearValueSpace(92) == ClearValueSpace::Unknown,
+          "DXGI _TYPELESS codes are Unknown — the view decides, not the resource");
+
+    // --- Metal table (values verified against MTLPixelFormat.h). ---
+    CHECK(dxr::MetalClearValueSpace(71) == ClearValueSpace::SceneLinear &&
+              dxr::MetalClearValueSpace(81) == ClearValueSpace::SceneLinear &&
+              dxr::MetalClearValueSpace(11) == ClearValueSpace::SceneLinear &&
+              dxr::MetalClearValueSpace(31) == ClearValueSpace::SceneLinear,
+          "the Metal *Unorm_sRGB codes encode on write");
+    CHECK(dxr::MetalClearValueSpace(70) == ClearValueSpace::DisplayReferred &&
+              dxr::MetalClearValueSpace(80) == ClearValueSpace::DisplayReferred &&
+              dxr::MetalClearValueSpace(10) == ClearValueSpace::DisplayReferred &&
+              dxr::MetalClearValueSpace(30) == ClearValueSpace::DisplayReferred,
+          "the Metal *Unorm codes store verbatim");
+
+    // --- THE CROSS-API NEGATIVES. ---
+    //
+    // color_policy.h's IsSrgbColorFormat() is a UNION of every API's codes. It
+    // is right where it is used (a session enumerates one API's codes) and
+    // WRONG as a per-target predicate, because the codes collide. Each pair
+    // below is one place a shared table would silently mis-convert a clear;
+    // together they are the reason these predicates are API-scoped, and they
+    // are what fails if anyone "simplifies" them back into one table.
+    CHECK(dxr::IsSrgbColorFormat(91) && dxr::VulkanClearValueSpace(91) != ClearValueSpace::SceneLinear,
+          "91: DXGI B8G8R8A8_UNORM_SRGB, but VK_FORMAT_R16G16B16A16_UNORM — must not convert as VK");
+    CHECK(dxr::DxgiClearValueSpace(91) == ClearValueSpace::SceneLinear,
+          "91 as DXGI really is sRGB — the collision is real, not a typo in the table");
+    CHECK(dxr::IsSrgbColorFormat(71) && dxr::VulkanClearValueSpace(71) != ClearValueSpace::SceneLinear,
+          "71: Metal RGBA8Unorm_sRGB, but VK_FORMAT_R16_SNORM — must not convert as VK");
+    CHECK(dxr::MetalClearValueSpace(71) == ClearValueSpace::SceneLinear,
+          "71 as Metal really is sRGB");
+    CHECK(dxr::IsSrgbColorFormat(81) && dxr::VulkanClearValueSpace(81) != ClearValueSpace::SceneLinear,
+          "81: Metal BGRA8Unorm_sRGB, but VK_FORMAT_R16G16_UINT — must not convert as VK");
+    CHECK(dxr::IsUnormColorFormat(87) && dxr::VulkanClearValueSpace(87) == ClearValueSpace::Unknown,
+          "87: DXGI B8G8R8A8_UNORM, but VK_FORMAT_R16G16B16_SSCALED — not a VK clear target");
+    CHECK(dxr::IsUnormColorFormat(28) && dxr::VulkanClearValueSpace(28) == ClearValueSpace::Unknown,
+          "28: DXGI R8G8B8A8_UNORM, but VK_FORMAT_R8G8B8_SINT — not a VK clear target");
+    // The one code that collides harmlessly, pinned so nobody "fixes" it.
+    CHECK(dxr::VulkanClearValueSpace(29) == ClearValueSpace::SceneLinear &&
+              dxr::DxgiClearValueSpace(29) == ClearValueSpace::SceneLinear,
+          "29 is sRGB under BOTH (VK R8G8B8_SRGB / DXGI R8G8B8A8_UNORM_SRGB) — a benign collision");
+    // Metal 70/80 vs VK 70/80: VK_FORMAT_R16_UNORM / R16G16_SSCALED.
+    CHECK(dxr::VulkanClearValueSpace(70) == ClearValueSpace::Unknown &&
+              dxr::VulkanClearValueSpace(80) == ClearValueSpace::Unknown,
+          "Metal's UNORM codes are not VK 8-bit codes");
+
+    // --- Non-8-bit and unrecognised codes decline to guess. ---
+    CHECK(dxr::VulkanClearValueSpace(97) == ClearValueSpace::Unknown,
+          "VK_FORMAT_R16G16B16A16_SFLOAT: applies no transfer function, but what its CONTENT "
+          "is in is the caller's call — say Unknown rather than answer DisplayReferred");
+    CHECK(dxr::VulkanClearValueSpace(0) == ClearValueSpace::Unknown &&
+              dxr::DxgiClearValueSpace(12345) == ClearValueSpace::Unknown &&
+              dxr::MetalClearValueSpace(-1) == ClearValueSpace::Unknown,
+          "unrecognised codes are Unknown on every API");
+
+    // --- THE BUG REPORT, AS A TEST. ---
+    //
+    // A navy background authored 13,13,64 and written UNCONVERTED into an
+    // `_SRGB` target measured 63,63,137 on a panel (#1644). Both directions:
+    // the unconverted write reproduces the regression, and the helper's
+    // conversion round-trips back to the authored bytes.
+    {
+        const float navy[4] = {13.0f / 255.0f, 13.0f / 255.0f, 64.0f / 255.0f, 1.0f};
+
+        // Unconverted into an _SRGB target: the hardware encodes on write.
+        // 13 lands at 63.8 — a truncating reader sees 63, a rounding one 64;
+        // the reported 63 is reproduced either way. 64 -> 137 is exact.
+        const int rBad = encoded_u8(navy[0]);
+        const int bBad = encoded_u8(navy[2]);
+        CHECK(rBad >= 63 && rBad <= 64, "authored 13 written raw into _SRGB reads back as 63-64");
+        CHECK(bBad == 137, "authored 64 written raw into _SRGB reads back as exactly 137");
+
+        // With the helper: convert first, let the target encode, get the
+        // authored bytes back. This is the whole point of the change.
+        float fixed[4];
+        const ClearValueSpace applied =
+            dxr::ApplyClearValueSpace(ClearValueSpace::SceneLinear, navy, fixed);
+        CHECK(applied == ClearValueSpace::SceneLinear, "ApplyClearValueSpace reports what it did");
+        CHECK(encoded_u8(fixed[0]) == 13, "13 -> scene-linear -> encoded on write -> 13");
+        CHECK(encoded_u8(fixed[1]) == 13, "13 -> scene-linear -> encoded on write -> 13");
+        CHECK(encoded_u8(fixed[2]) == 64, "64 -> scene-linear -> encoded on write -> 64");
+        CHECK(fixed[0] < navy[0], "the converted clear really is darker before the encode");
+
+        // On a verbatim target the SAME authored value must pass through
+        // untouched — this is the case the old process-wide flag got wrong,
+        // darkening a UNORM target it was handed.
+        float verbatim[4];
+        dxr::ApplyClearValueSpace(ClearValueSpace::DisplayReferred, navy, verbatim);
+        CHECK(verbatim[0] == navy[0] && verbatim[1] == navy[1] && verbatim[2] == navy[2],
+              "a display-referred target gets the authored value unchanged");
+    }
+
+    // --- Alpha is never converted, with a value that WOULD move. ---
+    {
+        const float half[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+        float out[4];
+        dxr::ApplyClearValueSpace(ClearValueSpace::SceneLinear, half, out);
+        CHECK(std::fabs(out[3] - 0.5f) < 1e-6f, "alpha is linear in both spaces — never converted");
+        CHECK(std::fabs(out[0] - 0.5f) > 0.05f, "...and RGB at the same value DID move");
+    }
+
+    // --- Unknown copies through unconverted, and says so. ---
+    {
+        const float in[4] = {0.05f, 0.05f, 0.25f, 1.0f};
+        float out[4] = {9, 9, 9, 9};
+        const ClearValueSpace applied = dxr::ApplyClearValueSpace(ClearValueSpace::Unknown, in, out);
+        CHECK(applied == ClearValueSpace::Unknown, "Unknown is returned, not silently swallowed");
+        CHECK(out[0] == in[0] && out[1] == in[1] && out[2] == in[2] && out[3] == in[3],
+              "Unknown reproduces today's shipped bytes exactly — never a new regression");
+    }
+
+    // --- Output may alias input (call sites clear in place). ---
+    {
+        float c[4] = {0.5f, 0.25f, 0.125f, 1.0f};
+        const float before0 = c[0];
+        dxr::ApplyClearValueSpace(ClearValueSpace::SceneLinear, c, c);
+        CHECK(c[0] < before0 && c[3] == 1.0f, "in-place conversion is safe");
+    }
+
+    // --- The OpenGL truth table: format alone is NOT the answer. ---
+    {
+        auto st = [](int encoding, bool toggle, bool queryable) {
+            dxr::GlDrawBufferState s;
+            s.colorEncoding = encoding;
+            s.framebufferSrgbEnabled = toggle;
+            s.srgbQueryable = queryable;
+            return s;
+        };
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlSrgb, true, true)) == ClearValueSpace::SceneLinear,
+              "GL: sRGB attachment + GL_FRAMEBUFFER_SRGB enabled -> encodes on write");
+        // The case the in-tree GL apps are actually in today: an _SRGB
+        // swapchain with the toggle never enabled, so nothing encodes and the
+        // authored bytes are correct. A format-only rule would convert here
+        // and darken them.
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlSrgb, false, true)) == ClearValueSpace::DisplayReferred,
+              "GL: sRGB attachment with the toggle OFF encodes nothing");
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlLinear, true, true)) == ClearValueSpace::DisplayReferred,
+              "GL: GL_LINEAR means NO encoding applied, whatever the toggle says");
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlLinear, false, true)) == ClearValueSpace::DisplayReferred,
+              "GL: plain attachment, toggle off");
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlSrgb, true, false)) == ClearValueSpace::Unknown,
+              "GL: no queryable sRGB write control (GLES 2 / pre-3.0) -> Unknown, never a guess");
+        CHECK(dxr::GlClearValueSpace(st(dxr::kGlColorEncodingUnknown, true, true)) ==
+                  ClearValueSpace::Unknown,
+              "GL: the encoding query failed -> Unknown");
+        CHECK(dxr::GlClearValueSpace(dxr::GlDrawBufferState{}) == ClearValueSpace::Unknown,
+              "GL: a default-constructed state is Unknown, so a missed query cannot read as UNORM");
+        // A null entry point must not be called, and must degrade to Unknown.
+        CHECK(dxr::GlClearValueSpace(dxr::GlQueryDrawBufferState(nullptr, nullptr)) ==
+                  ClearValueSpace::Unknown,
+              "GL: no entry points (no loader / no context) -> Unknown, no GL call issued");
+    }
+
+    // --- The one-shot warning really is one-shot. ---
+    CHECK(dxr::ReportUnknownClearTarget("smoke-test", 424242),
+          "an unclassified target warns the first time");
+    CHECK(!dxr::ReportUnknownClearTarget("smoke-test", 424242),
+          "...and never again — a clear runs per view per frame");
+    CHECK(dxr::ReportUnknownClearTarget("smoke-test-other", 424242),
+          "de-duplication is per (api, code), not per code");
+
+    CHECK(std::strcmp(dxr::ClearValueSpaceName(ClearValueSpace::SceneLinear), "scene-linear") == 0,
+          "ClearValueSpaceName is usable in a log line");
+}
+
 static void test_color_policy()
 {
     using dxr::ColorEncodingPreference;
@@ -1398,6 +1634,7 @@ int main()
     test_content_bounds();
     test_content_mask();
     test_color_policy();
+    test_clear_policy();
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();

@@ -365,6 +365,17 @@ ID3D11PixelShader* GridPixelShaderForTarget(const D3D11Renderer& renderer) {
 void ClearRenderTargetViewDisplayReferred(
     D3D11Renderer& renderer,
     ID3D11RenderTargetView* rtv,
+    dxr::ClearValueSpace space,
+    const float displayReferredRGBA[4]
+) {
+    float c[4];
+    dxr::ApplyClearValueSpace(space, displayReferredRGBA, c);
+    renderer.context->ClearRenderTargetView(rtv, c);
+}
+
+void ClearRenderTargetViewDisplayReferred(
+    D3D11Renderer& renderer,
+    ID3D11RenderTargetView* rtv,
     const float displayReferredRGBA[4]
 ) {
     // ClearRenderTargetView takes the clear value in the RTV's own space, so an
@@ -372,14 +383,23 @@ void ClearRenderTargetViewDisplayReferred(
     // brighter than it does on a UNORM target. Decode it here for exactly the
     // same reason the pixel shaders decode: identical bytes, honestly declared.
     // Alpha is linear in both spaces and is never converted.
-    float c[4] = { displayReferredRGBA[0], displayReferredRGBA[1],
-                   displayReferredRGBA[2], displayReferredRGBA[3] };
-    if (dxr::RenderSceneLinear()) {
-        for (int i = 0; i < 3; i++) {
-            c[i] = dxr::DisplayReferredToSceneLinear(c[i]);
+    //
+    // #1647: ask THE VIEW, not the process-wide dxr::RenderSceneLinear() flag.
+    // The view is what arms the hardware encode (the runtime hands out TYPELESS
+    // swapchain textures, so the resource format answers nothing), and reading
+    // a global instead meant this function darkened a UNORM target it was
+    // handed — which cost a caller a raw-clear workaround. GetDesc() is one
+    // call per view per frame, not per pixel.
+    dxr::ClearValueSpace space = dxr::ClearValueSpace::Unknown;
+    if (rtv != nullptr) {
+        D3D11_RENDER_TARGET_VIEW_DESC desc = {};
+        rtv->GetDesc(&desc);
+        space = dxr::DxgiClearValueSpace((int64_t)desc.Format);
+        if (space == dxr::ClearValueSpace::Unknown) {
+            dxr::ReportUnknownClearTarget("D3D11", (long long)desc.Format);
         }
     }
-    renderer.context->ClearRenderTargetView(rtv, c);
+    ClearRenderTargetViewDisplayReferred(renderer, rtv, space, displayReferredRGBA);
 }
 
 bool CreateResources(D3D11Renderer& renderer) {

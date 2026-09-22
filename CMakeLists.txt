@@ -246,6 +246,9 @@ set(DISPLAYXR_COMMON_SOURCES
     common/mip_chain.h
     common/color_policy.cpp # ADR-021/#1589 color-swapchain format rule (device-free)
     common/color_policy.h
+    common/clear_policy.h   # header-only: per-API, per-TARGET display-referred clear rule (#1647)
+    common/vk_clear.h       # header-only: VkClearColorValue/VkClearValue wrappers (#1647)
+    common/gl_clear.h       # header-only: GL_FRAMEBUFFER_SRGB-aware clear rule, no GL header (#1647)
     common/xr_window_space_hud.cpp
     common/xr_window_space_hud.h
     common/rig_mode.cpp   # platform-neutral display<->camera rig toggle + reset
@@ -288,6 +291,7 @@ if(WIN32)
         common/optimus_dgpu_hint.c
         common/d3d11_renderer.cpp
         common/d3d11_renderer.h
+        common/d3d12_clear.h  # header-only: D3D12 clear wrapper — the RTV format must be passed (#1647)
         common/text_overlay.cpp
         common/text_overlay.h
         common/hud_renderer.cpp

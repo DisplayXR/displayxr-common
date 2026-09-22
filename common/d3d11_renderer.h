@@ -17,6 +17,8 @@
 #include <wrl/client.h>
 #include <string>
 
+#include "clear_policy.h"  // dxr::ClearValueSpace (the explicit-space overload)
+
 using Microsoft::WRL::ComPtr;
 
 struct D3D11Renderer {
@@ -142,9 +144,31 @@ ID3D11PixelShader* GridPixelShaderForTarget(const D3D11Renderer& renderer);
 // wrapper decodes first when the target encodes, so the cleared bytes are
 // identical in both cells. Use it wherever a clear color is an authored,
 // display-referred value (i.e. everywhere except a true-linear source).
+//
+// BEHAVIOUR CHANGE, #1647: this used to decide from the PROCESS-WIDE
+// dxr::RenderSceneLinear() flag and never look at the view it was handed, so
+// on a UNORM target — an app's own window back buffer, say — it converted
+// anyway and DARKENED the clear. It now asks the view (`rtv->GetDesc()`), so
+// any target can be handed to it. The behaviour is unchanged for a renderer
+// that draws straight into the swapchain, which every in-tree caller is: there
+// the view's format and the process-wide flag always agree, which is also why
+// the old flag was not simply wrong.
+//
+// If the attachment is NOT what encodes — an internal UNORM image whose content
+// is scene-linear because a later blit/resolve into an `_SRGB` target does the
+// encoding — the format cannot answer and the caller must state the space with
+// the overload below. See clear_policy.h.
 void ClearRenderTargetViewDisplayReferred(
     D3D11Renderer& renderer,
     ID3D11RenderTargetView* rtv,
+    const float displayReferredRGBA[4]
+);
+
+// As above, for a target whose space the caller states outright.
+void ClearRenderTargetViewDisplayReferred(
+    D3D11Renderer& renderer,
+    ID3D11RenderTargetView* rtv,
+    dxr::ClearValueSpace space,
     const float displayReferredRGBA[4]
 );
 
