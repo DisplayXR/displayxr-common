@@ -303,7 +303,26 @@ bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize) {
     }
 
     XrSwapchainCreateInfo swapchainInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    // TRANSFER_DST because a consumer is allowed to *blit* into the swapchain
+    // image instead of rendering into it directly, and every Vulkan consumer
+    // does exactly that: it renders its scene into an internal image and ends
+    // the frame with vkCmdBlitImage into the acquired swapchain image. The
+    // runtime maps these bits 1:1 onto VkImageUsageFlags and adds only
+    // SAMPLED + TRANSFER_SRC of its own, so without this bit the image has no
+    // VK_IMAGE_USAGE_TRANSFER_DST_BIT and the validation layer fires
+    // VUID-vkCmdBlitImage-dstImage-00224 (plus
+    // VUID-VkImageMemoryBarrier-oldLayout-01213 for the TRANSFER_DST_OPTIMAL
+    // transition) on every frame. Real drivers tolerate it; strict ones
+    // (Mesa lavapipe) do not.
+    //
+    // Not gated on the graphics API, because the bit is a no-op everywhere
+    // else: D3D11 builds its BindFlags from COLOR/DEPTH/SAMPLED/UNORDERED only
+    // (any D3D11 texture is already a valid CopyResource destination — there
+    // is no bind flag for it), D3D12's resource flags ignore it and its app
+    // resource state is RENDER_TARGET whenever COLOR is set, and the runtime's
+    // own swapchains already ask for exactly COLOR|TRANSFER_DST|SAMPLED.
+    swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                               XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     swapchainInfo.format = selectedFormat;
     swapchainInfo.sampleCount = view.recommendedSwapchainSampleCount;
     swapchainInfo.width = width;
@@ -355,7 +374,11 @@ bool CreateQuadLayerSwapchain(XrSessionManager& xr, uint32_t width, uint32_t hei
     }
 
     XrSwapchainCreateInfo swapchainInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    // TRANSFER_DST for the same reason as the projection swapchain above: a
+    // quad-layer producer may blit or copy its UI image in rather than render
+    // into the acquired image, and the runtime adds no TRANSFER_DST of its own.
+    swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                               XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     swapchainInfo.format = selectedFormat;
     swapchainInfo.sampleCount = 1;
     swapchainInfo.width = width;

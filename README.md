@@ -247,6 +247,49 @@ at compile time) and selecting per draw via `CubePixelShaderForTarget()` /
   in the view's own space, so an `_SRGB` RTV encodes it and a `(0.05, 0.05, 0.25)` background
   would come out visibly brighter.
 
+#### If you blit into the swapchain (Vulkan)
+
+The two rules above are for the **render-into-the-swapchain** case, where the RTV does the
+encode and you hand it linear. A Vulkan app usually does not do that: it renders into an
+**internal color image** and ends the frame with `vkCmdBlitImage` (or `vkCmdCopyImage`) into
+the acquired swapchain image. The encode then happens — or does not — inside the blit, and it
+is decided by the **pair** of formats, because `vkCmdBlitImage` converts through each image's
+own format:
+
+(The blit itself is legal because `v2.16.0` adds `XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT` to the
+projection and quad swapchains. The runtime maps the usage bits 1:1 onto `VkImageUsageFlags`
+and adds only `SAMPLED` + `TRANSFER_SRC` of its own, so before that the image carried no
+`VK_IMAGE_USAGE_TRANSFER_DST_BIT` and the validation layer fired
+`VUID-vkCmdBlitImage-dstImage-00224` on every frame — tolerated by real drivers, rejected by
+strict ones.)
+
+| internal image | swapchain | what the blit does | result |
+|---|---|---|---|
+| `_SRGB` | `_SRGB` | decode → re-encode (identity) | ✅ correct |
+| UNORM | UNORM | raw byte copy, no conversion | ✅ correct (display-referred throughout) |
+| UNORM (display-referred) | `_SRGB` | encodes bytes that were already encoded | ❌ washed out |
+| `_SRGB` | UNORM | decodes, never re-encodes | ❌ too dark |
+
+So pick the internal format **from the swapchain format**, never as a constant:
+
+```cpp
+VkFormat internalFormat = dxr::IsSrgbColorFormat(xr.swapchain.format)
+                              ? VK_FORMAT_R8G8B8A8_SRGB
+                              : VK_FORMAT_R8G8B8A8_UNORM;
+```
+
+and keep `dxr::RenderSceneLinear()` as the shader-side predicate exactly as above — with an
+`_SRGB` internal image the internal render target is what encodes, so the shaders still emit
+scene-linear.
+
+**Storage-image exception.** An `_SRGB` image cannot be a Vulkan storage image (no
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`), so a compute pass that writes the color target cannot
+simply take the `_SRGB` format. Create the image with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` +
+`VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` and a `VkImageFormatListCreateInfo` carrying **both**
+siblings, then make the storage view in the UNORM sibling and the sampled / attachment view in
+the `_SRGB` one — the same recipe the runtime's Vulkan compositor uses for its own swapchain
+images. The bytes are unchanged; only the view decides whether a read decodes.
+
 **Not migrated (deliberate):** the window-space HUD swapchain
 (`CreateWindowSpaceSwapchain`, `CreateHudSwapchain`) stays `R8G8B8A8_UNORM`. It is a CPU-upload
 path — the HUD is rasterized on the CPU into display-referred RGBA8 and copied in, so nothing
