@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.17.0
+    VERSION 2.20.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
