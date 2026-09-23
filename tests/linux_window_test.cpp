@@ -166,6 +166,9 @@ test_x11_window(bool demo_shape)
 		desc.x11_header_bar = true;
 		desc.x11_drag_button = 3;
 		desc.wayland_drag_button = 3;
+		desc.has_position = true; // content top-left, below the bar
+		desc.x = 200;
+		desc.y = 300;
 	}
 
 	DxrLinuxWindow win;
@@ -247,6 +250,33 @@ test_x11_window(bool demo_shape)
 	win.set_keep_above(true);
 	win.set_keep_above(false);
 	(void)pump_for(win, 3);
+
+	// Ctrl+T: a transparent background hides the header bar, and the CONTENT
+	// (the bound window — the runtime's rect) must not move or resize.
+	if (demo_shape) {
+		auto content_rect = [&](int *x, int *y, uint32_t *cw, uint32_t *ch) {
+			::Window child = 0;
+			XTranslateCoordinates(dpy, win.x11_bound_window(), DefaultRootWindow(dpy), 0, 0, x, y, &child);
+			win.current_size(cw, ch);
+		};
+		int x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+		uint32_t w0 = 0, h0 = 0, w1 = 0, h1 = 0, w2 = 0, h2 = 0;
+		(void)pump_for(win, 3);
+		content_rect(&x0, &y0, &w0, &h0);
+		CHECK(win.header_bar_visible(), "bar shown while opaque");
+		win.set_transparent_background(true);
+		(void)pump_for(win, 5);
+		content_rect(&x1, &y1, &w1, &h1);
+		CHECK(!win.header_bar_visible(), "bar hidden while transparent");
+		CHECK(x1 == x0 && y1 == y0 && w1 == w0 && h1 == h0, "transparent: content rect unchanged");
+		win.set_transparent_background(false);
+		(void)pump_for(win, 5);
+		content_rect(&x2, &y2, &w2, &h2);
+		CHECK(win.header_bar_visible(), "bar back when opaque");
+		CHECK(x2 == x0 && y2 == y0 && w2 == w0 && h2 == h0, "opaque again: content rect unchanged");
+		std::printf("content rect: (%d,%d %ux%u) -> transparent (%d,%d %ux%u) -> opaque (%d,%d %ux%u)\n", x0, y0,
+		            w0, h0, x1, y1, w1, h1, x2, y2, w2, h2);
+	}
 
 	// B-key decoration toggle: a WM frame on, then off again.
 	CHECK(!win.is_decorated(), "starts undecorated");
@@ -429,6 +459,17 @@ test_wayland_window()
 	CHECK(!win.is_decorated(), "wayland: title bar hidden");
 	win.set_decorated(true);
 	CHECK(win.is_decorated(), "wayland: title bar shown");
+	for (int i = 0; i < 3; i++) {
+		win.pump_events({}, &running);
+	}
+	uint32_t sw0 = 0, sh0 = 0, sw1 = 0, sh1 = 0;
+	win.current_size(&sw0, &sh0);
+	win.set_transparent_background(true);
+	CHECK(!win.header_bar_visible(), "wayland: title bar hidden while transparent");
+	win.current_size(&sw1, &sh1);
+	CHECK(sw0 == sw1 && sh0 == sh1, "wayland: declared size unchanged by the transparency toggle");
+	win.set_transparent_background(false);
+	CHECK(win.header_bar_visible(), "wayland: title bar back when opaque");
 	CHECK(win.toggle_fullscreen(), "F11 on Wayland");
 	for (int i = 0; i < 5; i++) {
 		win.pump_events({}, &running);

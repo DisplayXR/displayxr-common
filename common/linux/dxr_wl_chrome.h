@@ -243,6 +243,18 @@ public:
 		return m_hidden;
 	}
 
+	/*!
+	 * Suppress the bar while the app draws a transparent background
+	 * (DxrLinuxWindow::set_transparent_background). Independent of
+	 * set_hidden(), which is the user's decoration choice.
+	 */
+	void
+	set_suppressed(bool suppressed)
+	{
+		m_suppressed = suppressed;
+		m_bar.invalidate();
+	}
+
 	//! Human-readable mode for the create log.
 	const char *
 	mode_name() const;
@@ -362,6 +374,8 @@ private:
 
 	//! set_hidden(): the bar is suppressed even where it would be shown.
 	bool m_hidden = false;
+	//! set_suppressed(): hidden for a transparent background.
+	bool m_suppressed = false;
 
 	//! Runs before each compositor drag starts (#1609). Empty = none.
 	std::function<void()> m_drag_prepare;

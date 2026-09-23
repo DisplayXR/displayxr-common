@@ -696,6 +696,8 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		}
 	}
 	m_transparent = argb;
+	// Launched drawing transparent: the header bar starts hidden.
+	m_transparent_bg = argb && desc.transparent_background;
 
 	// Header bar (desc.x11_header_bar): built whenever the WM does not draw
 	// the frame, SHOWN only while windowed (x11_bar_visible()). Its height
@@ -715,7 +717,7 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		// handle and two buttons.
 		m_x_bar.setResizable(false);
 		m_x_bar.setTitle(desc.title != nullptr ? desc.title : "");
-		bar_h = (want_fullscreen || m_x_wm_drag) ? 0 : m_x_bar.height();
+		bar_h = (want_fullscreen || m_x_wm_drag || m_transparent_bg) ? 0 : m_x_bar.height();
 		DXRW_INFO("X11 header bar: %u px (scale %.2f), %s, title font %s", m_x_bar.height(), m_x_bar.scale(),
 		          argb ? "translucent with rounded corners (ARGB visual)" : "opaque, square (no ARGB visual)",
 		          m_x_bar.fontPath().empty() ? "NONE (set DXR_CSD_FONT)" : m_x_bar.fontPath().c_str());
@@ -1163,7 +1165,7 @@ DxrLinuxWindow::x11_bar_visible() const
 {
 	// Windowed only: a fullscreen app has no title bar anywhere on GNOME, and
 	// the bar must never eat pixels out of a panel-sized weave.
-	return m_x_bar_enabled && m_x_content != 0 && !m_x_fullscreen && !m_x_wm_drag;
+	return m_x_bar_enabled && m_x_content != 0 && !m_x_fullscreen && !m_x_wm_drag && !m_transparent_bg;
 }
 
 int
@@ -2691,6 +2693,10 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		m_wl_chrome.set_hidden(true); // before the first configure: never shown
 		DXRW_INFO("Wayland: title bar hidden at start (desc.wayland_title_bar = false)");
 	}
+	if (m_transparent_bg) {
+		m_wl_chrome.set_suppressed(true);
+		DXRW_INFO("Wayland: title bar hidden at start (transparent background)");
+	}
 	// Drag lattice (#1609): probed once here so a press never has to find out.
 	m_wl_placement.connect();
 	DXRW_INFO("drag lattice: compositor placement service — %s", m_wl_placement.describe());
@@ -2913,6 +2919,7 @@ DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc)
 #ifdef DXR_APP_HAVE_WAYLAND
 	if (backend == DxrWindowBackend::Wayland) {
 		m_transparent = desc.transparent; // native on Wayland: no visual to find
+		m_transparent_bg = desc.transparent && desc.transparent_background;
 		if (!create_wayland(desc)) {
 			destroy_wayland();
 			m_backend = DxrWindowBackend::Auto;
@@ -3974,6 +3981,53 @@ DxrLinuxWindow::set_keep_above(bool above)
 		m_warned_keep_above = true;
 		DXRW_INFO("Wayland: keep-above requested — no protocol for it on Wayland; ignored");
 	}
+}
+
+void
+DxrLinuxWindow::set_transparent_background(bool transparent)
+{
+	if (!m_transparent) {
+		return; // not transparent-capable: nothing is ever drawn see-through
+	}
+	if (transparent == m_transparent_bg) {
+		return;
+	}
+	if (m_backend == DxrWindowBackend::X11 && m_x_display != nullptr && m_x_window != 0) {
+		const bool was_visible = x11_bar_visible();
+		m_transparent_bg = transparent;
+		const bool now_visible = x11_bar_visible();
+		if (was_visible != now_visible) {
+			// Keep the CONTENT where it is: the top-level gains / loses the
+			// bar above it, so it moves by exactly the bar's height and
+			// resizes by it. The content child's root origin and size — the
+			// runtime's window rect — do not change.
+			const int bar = (int)m_x_bar.height();
+			int top_x = 0, top_y = 0;
+			x11_root_origin(m_x_display, m_x_window, &top_x, &top_y);
+			const int dy = now_visible ? -bar : bar;
+			const uint32_t new_h = now_visible ? m_x_content_h + (uint32_t)bar : m_x_content_h;
+			XMoveResizeWindow(m_x_display, m_x_window, top_x, top_y + dy, m_x_top_w, new_h);
+			m_x_top_h = new_h;
+			x11_layout_content();
+			m_x_bar.invalidate();
+			XFlush(m_x_display);
+		}
+		DXRW_INFO("X11: transparent background %s — header bar %s", transparent ? "ON" : "OFF",
+		          now_visible ? "shown" : (m_x_bar_enabled ? "hidden (content rect unchanged)" : "n/a (none)"));
+		return;
+	}
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+	if (m_backend == DxrWindowBackend::Wayland && m_wl_surface != nullptr) {
+		m_transparent_bg = transparent;
+		m_wl_chrome.set_suppressed(transparent);
+		m_wl_chrome.update(m_wl_config_w, m_wl_config_h, wl_surface_scale());
+		wl_display_flush(m_wl_display);
+		DXRW_INFO("Wayland: transparent background %s — title bar %s", transparent ? "ON" : "OFF",
+		          transparent ? "hidden (content surface and declared size unchanged)" : "restored");
+		return;
+	}
+#endif
+	m_transparent_bg = transparent;
 }
 
 void

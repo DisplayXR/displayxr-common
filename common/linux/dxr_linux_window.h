@@ -335,6 +335,10 @@ struct DxrLinuxWindowDesc
 	//! moves the window, as before); demos use 3 to match their X11 leg.
 	uint32_t wayland_drag_button = 0;
 
+	//! With `transparent`: the app STARTS drawing a transparent background,
+	//! so the header bar starts hidden (see set_transparent_background()).
+	bool transparent_background = false;
+
 	//! Keep above other windows from the start (X11 _NET_WM_STATE_ABOVE,
 	//! set before the map). Wayland has no such protocol; ignored there.
 	bool keep_above = false;
@@ -467,6 +471,32 @@ public:
 	is_transparent() const
 	{
 		return m_transparent;
+	}
+
+	/*!
+	 * Tell the window the app now draws a transparent (or opaque) background —
+	 * call it from the transparency toggle (Ctrl+T). While transparent, the
+	 * header bar is hidden on both backends, as Windows hides its chrome: a
+	 * translucent bar floating over a click-through window is wrong.
+	 *
+	 * The CONTENT rect never changes size: on X11 the top-level loses the
+	 * bar's height and moves down by it, so the bound content window stays
+	 * exactly where it was (same root origin, same size — the runtime's
+	 * content rect, present origin and 1:1 check see no change); on Wayland
+	 * the title-bar subsurface is unmapped and the window geometry becomes the
+	 * content surface (same buffer, same declared size; the compositor may
+	 * keep the frame's top edge, and the runtime follows the surface through
+	 * the geometry service). The drag button and Super+drag still move the
+	 * window. Turning it off restores the bar. Logged on every transition.
+	 * No-op for a window created without `transparent`.
+	 */
+	void
+	set_transparent_background(bool transparent);
+
+	bool
+	transparent_background() const
+	{
+		return m_transparent_bg;
 	}
 
 	//! Float above other windows (X11 _NET_WM_STATE_ABOVE); logged no-op on
@@ -657,6 +687,8 @@ private:
 	uint32_t m_mods = 0;
 	//! Last CONTENT size reported through a Resize event.
 	uint32_t m_reported_w = 0, m_reported_h = 0;
+	//! set_transparent_background() state: the bar is hidden while true.
+	bool m_transparent_bg = false;
 	//! One-shot guard for the set_keep_above() Wayland no-op log.
 	bool m_warned_keep_above = false;
 
