@@ -3236,6 +3236,7 @@ DxrLinuxWindow::session_binding_chain(const void *next)
 	return next;
 }
 
+#ifdef DXR_APP_HAVE_WAYLAND
 void
 DxrLinuxWindow::wl_declared_size(uint32_t *w, uint32_t *h) const
 {
@@ -3317,6 +3318,7 @@ DxrLinuxWindow::wl_apply_buffer_mapping()
 	          m_wl_config_w, m_wl_config_h);
 #endif
 }
+#endif // DXR_APP_HAVE_WAYLAND
 
 void
 DxrLinuxWindow::attach_session(XrInstance instance, XrSession session)
