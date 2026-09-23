@@ -20,14 +20,16 @@
  *
  * BACKEND SELECTION (select(), and the one policy point in the .cpp):
  *   1. An explicit request (--platform=x11|wayland) always wins.
- *   2. Auto PREFERS X11 for now: connect to an X server — XWayland counts —
- *      and use it if that works. Windowed weaving and the phase-snapped drag
- *      are proven there at any scale.
- *   3. Fall back to native Wayland when X11 is unavailable.
- *   4. The "Wayland-ready" probe (the compositor offers
- *      wp_fractional_scale_v1 + wp_viewporter AND the window-geometry
- *      extension owns its name on the session bus) is run and LOGGED on every
- *      auto run, but only acted on once kAutoPrefersReadyWayland is flipped.
+ *   2. Auto prefers NATIVE Wayland when the compositor is "Wayland-ready":
+ *      it offers wp_fractional_scale_v1 + wp_viewporter AND the
+ *      window-geometry extension owns its name on the session bus. (Measured:
+ *      35% GPU native vs 60% through XWayland on an integrated GPU.)
+ *   3. Otherwise X11 — connect to an X server, XWayland counts. This is what
+ *      Ubuntu 22.04 (no fractional-scale protocol) and sessions without the
+ *      extension get.
+ *   4. Native Wayland is also the fallback when no X server answers. The
+ *      verdict is LOGGED on every auto run, and the whole policy is one
+ *      constant in the .cpp (kAutoPrefersReadyWayland).
  *   It NEVER reads WAYLAND_DISPLAY, XDG_SESSION_TYPE or any other environment
  *   variable to decide: the only questions asked are "does a connection
  *   succeed" and "what does the server advertise". (XOpenDisplay and
@@ -126,7 +128,8 @@
 // so the real definitions have to come first.
 #include <wayland-client.h>
 #ifdef DXR_APP_HAVE_WL_CHROME
-#include "dxr_wl_chrome.h" // title bar for the native-Wayland leg (#1654)
+#include "dxr_wl_chrome.h"    // title bar for the native-Wayland leg (#1654)
+#include "dxr_wl_placement.h" // drag lattice: a phase-snapped compositor drag (#1609)
 #endif
 #endif
 
@@ -825,6 +828,38 @@ private:
 #ifdef DXR_APP_HAVE_WL_CHROME
 	//! Title bar (client-side decorations) — see dxr_wl_chrome.h, #1654.
 	DxrWlChrome m_wl_chrome;
+
+	/*!
+	 * @name Drag lattice (#1609)
+	 *
+	 * The compositor runs the title-bar drag (xdg_toplevel.move), and the
+	 * window first hands it a table of phase-correct displacements to snap
+	 * every proposed position to — see dxr_wl_placement.h.
+	 * @{
+	 */
+	DxrWlPlacement m_wl_placement;
+	//! Output scale of the drag in progress (the reachable step, device px).
+	uint32_t m_wl_lattice_q = 0;
+	//! Built for the drag in progress; answers DragLatticeNeeded while it runs.
+	bool m_wl_lattice_active = false;
+	//! The drag origin the compositor recorded (frame top-left, logical).
+	int32_t m_wl_lattice_start_x = 0, m_wl_lattice_start_y = 0;
+	//! DXR_WL_TEST_LATTICE state.
+	uint64_t m_wl_test_lattice_pumps = 0;
+	bool m_wl_test_lattice_done = false;
+
+	//! Chrome hook: derive + send the table, just before the grab starts.
+	void
+	wl_drag_prepare();
+	/*!
+	 * Probe the display processor over a grid of displacements centred on
+	 * (@p cx, @p cy) LOGICAL px and send the phase-correct, reachable ones.
+	 * @return false when there is nothing to constrain (the DP declined, or
+	 *         accepts every position) or the compositor refused the table.
+	 */
+	bool
+	wl_send_lattice(bool extend, int32_t cx, int32_t cy);
+	/*! @} */
 #endif
 
 	//! Logical -> device scale of the surface, for the chrome's raster.

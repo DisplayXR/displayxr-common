@@ -646,16 +646,24 @@ and every demo use it; never copy it into an app.
 
 1. An explicit `--platform=x11|wayland|auto` (`parse_platform_args`; the old
    `--backend=` spelling is accepted) always wins.
-2. `auto` **prefers X11 today**: if `XOpenDisplay` succeeds — XWayland counts —
-   it is used. Windowed weaving and the phase-snapped drag are proven there at
-   any scale.
-3. Native Wayland is the fallback when no X server answers.
-4. The **Wayland-ready** verdict (the compositor advertises
-   `wp_fractional_scale_v1` + `wp_viewporter`, and the window-geometry GNOME
-   Shell extension owns `org.displayxr.WindowGeometry` on the session bus) is
-   probed and logged on every `auto` run. One constant in
-   `dxr_linux_window.cpp` (`kAutoPrefersReadyWayland`) flips `auto` to prefer
-   native Wayland when it is ready.
+2. `auto` **prefers native Wayland when the compositor is Wayland-ready**. The
+   compositor must advertise `wp_fractional_scale_v1` + `wp_viewporter`, and
+   the window-geometry GNOME Shell extension must own
+   `org.displayxr.WindowGeometry` on the session bus. On an integrated GPU,
+   native Wayland measured 35% GPU against 60% through XWayland, and XWayland
+   was reported occasionally choppy.
+3. Otherwise **X11**: if `XOpenDisplay` succeeds (XWayland counts), it is used.
+   This covers Ubuntu 22.04, whose GNOME 42 has no fractional-scale protocol,
+   and sessions without the extension.
+4. Native Wayland is also the fallback when no X server answers.
+
+The verdict is logged on every `auto` run. The policy is one constant in
+`dxr_linux_window.cpp` (`kAutoPrefersReadyWayland`).
+
+On native Wayland the helper hands the compositor a drag lattice at each press
+(`dxr_wl_placement`, needs `libdbus-1-dev` at build time). The compositor then
+keeps the weave phase still while it drags the window. This needs the
+extension version that serves the lattice.
 
 No environment variable (`WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, …) is read to
 decide: the only questions are "does the connection succeed" and "what does the
@@ -694,8 +702,9 @@ target_link_libraries(your_linux_app PRIVATE displayxr::linux_window)
 
 Build dependencies: `libx11-dev` (required), plus the optional
 `libxrandr-dev`, `libxext-dev` (XShape), `libwayland-dev` + `libwayland-bin`
-(the Wayland leg; the protocol XML is vendored) and `libxkbcommon-dev`.
-libdbus-1 is loaded at run time, not linked.
+(the Wayland leg; the protocol XML is vendored), `libxkbcommon-dev`, and
+`libdbus-1-dev` (the Wayland drag lattice). The Wayland-ready probe loads
+libdbus-1 at run time.
 
 ## Integration
 

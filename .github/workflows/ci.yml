@@ -59,7 +59,7 @@ jobs:
           sudo apt-get update
           pkgs="cmake ninja-build libx11-dev libxrandr-dev libxext-dev xvfb"
           if [ "${{ matrix.wayland }}" = "on" ]; then
-            pkgs="$pkgs libwayland-dev libwayland-bin libxkbcommon-dev weston"
+            pkgs="$pkgs libwayland-dev libwayland-bin libxkbcommon-dev libdbus-1-dev weston"
           fi
           sudo apt-get install -y --no-install-recommends $pkgs
 

@@ -90,9 +90,11 @@ test_select(const DxrWindowProbe &p)
 	if (a == DxrWindowBackend::Wayland) {
 		CHECK(p.wayland_connects, "auto never picks Wayland without a compositor");
 	}
-	// The policy today: X11 whenever it connects.
-	if (p.x11_connects) {
-		CHECK(a == DxrWindowBackend::X11, "auto prefers X11 when an X server answers");
+	// The policy: native Wayland when ready, else X11 whenever it connects.
+	if (p.wayland_ready()) {
+		CHECK(a == DxrWindowBackend::Wayland, "auto prefers native Wayland when the compositor is ready");
+	} else if (p.x11_connects) {
+		CHECK(a == DxrWindowBackend::X11, "auto prefers X11 when Wayland is not ready and an X server answers");
 	}
 	// A runtime without the xlib binding is never handed an X11 window.
 	const DxrWindowBackend nx = DxrLinuxWindow::select(DxrWindowBackend::Auto, false, true, &why);

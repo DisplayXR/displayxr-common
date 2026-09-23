@@ -23,8 +23,9 @@
 #                     is vendored in wayland-protocols/, so wayland-protocols
 #                     need not be installed
 #   libxkbcommon-dev  layout-aware keysyms on Wayland (else a US table)
-# libdbus-1 is loaded at RUN time for the Wayland-ready probe, so it is not a
-# build dependency at all.
+#   libdbus-1-dev     the phase-snapped Wayland drag (the compositor's drag
+#                     lattice, dxr_wl_placement). The Wayland-ready probe
+#                     loads libdbus-1 at RUN time and needs no build dependency.
 #
 # The OpenXR headers come from the same place displayxr::common takes them
 # (displayxr_ext_headers + the Khronos set), so XR_DXR_xlib_window_binding.h,
@@ -148,7 +149,26 @@ target_sources(displayxr_linux_window PRIVATE
     ${_dxr_lw_generated}
     "${_dxr_lw_dir}/dxr_wl_chrome.cpp"
     "${_dxr_lw_dir}/dxr_wl_chrome.h"
+    "${_dxr_lw_dir}/dxr_wl_placement.cpp"
+    "${_dxr_lw_dir}/dxr_wl_placement.h"
 )
+
+# libdbus-1 (optional, libdbus-1-dev): the client of the compositor's drag
+# lattice (dxr_wl_placement, runtime #1609/#1686), which keeps the interlace
+# phase still while the compositor drags a native-Wayland window. Without it
+# the Wayland drag runs unconstrained, exactly as before.
+if(PkgConfig_FOUND)
+    pkg_check_modules(DXR_LW_DBUS QUIET dbus-1)
+endif()
+if(DXR_LW_DBUS_FOUND)
+    target_include_directories(displayxr_linux_window PRIVATE ${DXR_LW_DBUS_INCLUDE_DIRS})
+    target_link_directories(displayxr_linux_window PUBLIC ${DXR_LW_DBUS_LIBRARY_DIRS})
+    target_link_libraries(displayxr_linux_window PRIVATE ${DXR_LW_DBUS_LIBRARIES})
+    target_compile_definitions(displayxr_linux_window PRIVATE DXR_APP_HAVE_DBUS)
+    set(_dxr_lw_lattice "drag lattice ENABLED (libdbus ${DXR_LW_DBUS_VERSION})")
+else()
+    set(_dxr_lw_lattice "libdbus-1 NOT found — Wayland drags unconstrained (install libdbus-1-dev)")
+endif()
 target_include_directories(displayxr_linux_window PRIVATE "${_dxr_lw_gen}")
 # PUBLIC: the header's class layout depends on these (the Wayland members), so
 # every TU that includes it must see the same definitions as the library.
@@ -168,4 +188,4 @@ else()
 endif()
 
 message(STATUS "displayxr::linux_window: Wayland backend ENABLED "
-               "(wayland-client ${DXR_LW_WAYLAND_CLIENT_VERSION}, ${_dxr_lw_xkb})")
+               "(wayland-client ${DXR_LW_WAYLAND_CLIENT_VERSION}, ${_dxr_lw_xkb}, ${_dxr_lw_lattice})")

@@ -116,20 +116,24 @@ DxrLinuxWindow::parse_backend(const char *text, DxrWindowBackend *out)
 namespace {
 
 /*!
- * THE policy point. Auto prefers X11 today; flip this to prefer native
- * Wayland whenever the probe says the compositor is ready for it
- * (DxrWindowProbe::wayland_ready()). The verdict is computed and logged on
- * every auto run either way, so the flip is a one-line change backed by logs
- * already collected in the field.
+ * THE policy point. `auto` prefers NATIVE Wayland when the probe says the
+ * compositor is ready for it (DxrWindowProbe::wayland_ready():
+ * wp_fractional_scale_v1 + wp_viewporter advertised AND the window-geometry
+ * GNOME Shell extension owning org.displayxr.WindowGeometry on the session
+ * bus), and X11 otherwise — which is what still covers Ubuntu 22.04 (GNOME 42
+ * has no wp_fractional_scale_v1) and any session without the extension.
+ * --platform=x11|wayland overrides it either way; the verdict is logged on
+ * every auto run.
  *
- * Why X11 first today: windowed weaving and the phase-snapped drag are proven
- * on X11 (including XWayland) at any scale; on native Wayland the mid-drag
- * weave still shimmers, and GNOME 42 (Ubuntu 22.04) has no
- * wp_fractional_scale_v1. Why the probe exists: native Wayland measurably
- * costs less GPU than going through XWayland, so it is the end state once the
- * Wayland drag fix ships.
+ * Why native first: measured in the field on an integrated GPU, native
+ * Wayland ran at 35% GPU against 60% for the same app through XWayland, and
+ * XWayland was reported "occasionally choppy". The reason this used to be
+ * false — the mid-drag weave shimmer on Wayland — is fixed by the
+ * compositor's drag lattice (runtime #1609/#1686, validated on a 3840x2160
+ * panel; dxr_wl_placement is its client here). Set it back to false to make
+ * X11 the default again.
  */
-constexpr bool kAutoPrefersReadyWayland = false;
+constexpr bool kAutoPrefersReadyWayland = true;
 
 //! Session-bus probe through a run-time-loaded libdbus-1 (so the helper has
 //! no build dependency on it). Answers "does org.displayxr.WindowGeometry
@@ -1465,6 +1469,14 @@ DxrLinuxWindow::s_frac_preferred_scale(void *data, struct wp_fractional_scale_v1
 	// A windowed surface's declared buffer is configure x this scale, so the
 	// mapping (and, in pump(), the runtime's declared geometry) follows it.
 	self->wl_apply_buffer_mapping();
+#ifdef DXR_APP_HAVE_WL_CHROME
+	// The title bar is its own surface with its own buffer: redraw it at the
+	// new scale too, or it stays rasterised for the monitor the window left
+	// (the right size, since its viewport destination is logical, but blurry).
+	if (self->m_wl_config_w > 0 && self->m_wl_config_h > 0) {
+		self->m_wl_chrome.update(self->m_wl_config_w, self->m_wl_config_h, self->wl_surface_scale());
+	}
+#endif
 }
 
 void
@@ -2187,6 +2199,11 @@ DxrLinuxWindow::wl_content_pointer(const DxrWlPointerEvent &pe)
 		    m_wl_toplevel != nullptr && m_wl_seat != nullptr) {
 			ev.window_drag = true;
 			if (pe.pressed) {
+#ifdef DXR_APP_HAVE_WL_CHROME
+				// The same phase-snapped drag the title bar runs (#1609):
+				// hand the compositor this drag's lattice first.
+				wl_drag_prepare();
+#endif
 				xdg_toplevel_move(m_wl_toplevel, m_wl_seat, pe.serial);
 				DXRW_INFO("drag: compositor move (button %u)", ev.button);
 			}
@@ -2261,6 +2278,166 @@ DxrLinuxWindow::s_kb_repeat_info(void *data, struct wl_keyboard *kb, int32_t rat
 	(void)rate;
 	(void)delay;
 }
+
+#ifdef DXR_APP_HAVE_WL_CHROME
+/*
+ *
+ * Drag lattice (#1609).
+ *
+ */
+
+namespace {
+//! Half-extent of one table, LOGICAL px. A drag that goes further asks for
+//! the next table (DragLatticeNeeded); this is sized so most drags never do.
+constexpr int32_t kLatticeHalf = 192;
+//! Grid pitch the DP is probed at, LOGICAL px. The window moves in steps no
+//! coarser than this; a lens lattice denser than it is represented by the
+//! nearest phase-correct point in each cell.
+constexpr int32_t kLatticeCell = 3;
+
+int32_t
+round_to_multiple(int32_t v, int32_t q)
+{
+	const int32_t half = q / 2;
+	return v >= 0 ? ((v + half) / q) * q : -(((-v + half) / q) * q);
+}
+} // namespace
+
+bool
+DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
+{
+	const int32_t q = (int32_t)m_wl_lattice_q;
+	const auto t0 = std::chrono::steady_clock::now();
+	std::vector<int32_t> dxs, dys;
+	std::vector<std::pair<int32_t, int32_t>> seen;
+	size_t fixed = 0, probed = 0;
+	bool declined = false;
+
+	for (int32_t gy = cy - kLatticeHalf; gy <= cy + kLatticeHalf && !declined; gy += kLatticeCell) {
+		for (int32_t gx = cx - kLatticeHalf; gx <= cx + kLatticeHalf; gx += kLatticeCell) {
+			probed++;
+			// The snap is displacement-only: origin (0,0), target = the
+			// displacement in DEVICE px. Whatever it returns preserves the
+			// phase the window had at the drag start.
+			int32_t sx = gx * q, sy = gy * q;
+			if (!m_snap_fn(m_snap_userdata, 0, 0, gx * q, gy * q, &sx, &sy)) {
+				declined = true; // no usable viewing distance: nothing to protect
+				break;
+			}
+			if (sx == gx * q && sy == gy * q) {
+				fixed++;
+			}
+			int32_t ax = 0, ay = 0;
+			bool found = false;
+			if (sx % q == 0 && sy % q == 0) {
+				ax = sx;
+				ay = sy;
+				found = true;
+			} else {
+				// The DP's answer is not a position the compositor can place.
+				// Search the reachable lattice around it for one the DP leaves
+				// unchanged — the same rule the runtime's drop-time snap and the
+				// X11 drag use: we never compute a phase, we only choose which
+				// positions to offer.
+				const int32_t bx = round_to_multiple(sx, q), by = round_to_multiple(sy, q);
+				for (int32_t ring = 0; ring <= 2 && !found; ring++) {
+					for (int32_t j = -ring; j <= ring && !found; j++) {
+						for (int32_t i = -ring; i <= ring && !found; i++) {
+							if (std::abs(i) != ring && std::abs(j) != ring) {
+								continue;
+							}
+							const int32_t px = bx + i * q, py = by + j * q;
+							int32_t rx = px, ry = py;
+							if (m_snap_fn(m_snap_userdata, 0, 0, px, py, &rx, &ry) && rx == px &&
+							    ry == py) {
+								ax = px;
+								ay = py;
+								found = true;
+							}
+						}
+					}
+				}
+			}
+			if (!found) {
+				continue; // this cell has no reachable phase-correct point
+			}
+			const std::pair<int32_t, int32_t> key{ax / q, ay / q};
+			bool dup = false;
+			for (auto it = seen.rbegin(); it != seen.rend() && it - seen.rbegin() < 8; ++it) {
+				if (*it == key) {
+					dup = true;
+					break;
+				}
+			}
+			if (!dup) {
+				seen.push_back(key);
+				dxs.push_back(key.first);
+				dys.push_back(key.second);
+			}
+		}
+	}
+	const double ms =
+	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+	if (declined) {
+		DXRW_INFO("drag lattice: the display processor declined (no usable viewing distance) — the "
+		          "compositor drags unconstrained");
+		return false;
+	}
+	if (fixed == probed) {
+		// Every probed position is already phase-correct: the lattice is
+		// trivial (e.g. sim_display at its default period). A table would only
+		// coarsen the drag to the probe grid for no benefit.
+		if (!extend) {
+			DXRW_INFO("drag lattice: the display processor accepts every position (%zu probed in %.1f ms) "
+			          "— nothing to constrain",
+			          probed, ms);
+		}
+		return false;
+	}
+	const bool ok = m_wl_placement.set_drag_lattice(extend, kLatticeCell, cx - kLatticeHalf, cy - kLatticeHalf,
+	                                                cx + kLatticeHalf, cy + kLatticeHalf, dxs, dys,
+	                                                &m_wl_lattice_start_x, &m_wl_lattice_start_y);
+	DXRW_INFO("drag lattice: %s %zu phase-correct reachable displacement(s) around (%+d, %+d) logical — %zu "
+	          "probed in %.1f ms at quantum %d%s",
+	          extend ? "extended with" : "sent", dxs.size(), cx, cy, probed, ms, q,
+	          ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
+	return ok;
+}
+
+void
+DxrLinuxWindow::wl_drag_prepare()
+{
+	m_wl_lattice_active = false;
+	// On by default whenever the geometry extension offers it (version 6+),
+	// since hardware confirmed it (stable 3D while dragging, native drag feel).
+	// DXR_WL_DRAG_LATTICE=0 turns it off; the compositor drag without a table
+	// is exactly the pre-#1609 behaviour.
+	const char *env = getenv("DXR_WL_DRAG_LATTICE");
+	if (env != nullptr && env[0] == '0') {
+		return;
+	}
+	if (!m_wl_placement.has_drag_lattice() || m_snap_fn == nullptr) {
+		return;
+	}
+	if (m_wl_chrome.maximized()) {
+		return; // the compositor unmaximises under the pointer; nothing to snap
+	}
+	// Reachability: the compositor places windows at integer LOGICAL
+	// positions, so only every q-th device pixel exists — a lattice only when
+	// the output scale is an integer.
+	const double scale = wl_surface_scale();
+	const double nearest = (double)(int32_t)(scale + 0.5);
+	if (scale < 1.0 || (scale > nearest ? scale - nearest : nearest - scale) > 0.01) {
+		DXRW_INFO("drag lattice: output scale %.4f is not an integer, so the reachable positions are not a "
+		          "lattice — the compositor drags unconstrained",
+		          scale);
+		return;
+	}
+	m_wl_lattice_q = (uint32_t)nearest;
+	m_wl_lattice_active = wl_send_lattice(false, 0, 0);
+}
+#endif // DXR_APP_HAVE_WL_CHROME
 
 bool
 DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
@@ -2510,6 +2687,10 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 	// server-side-decoration request must precede the initial configure.
 	m_wl_chrome.attach(m_wl_display, m_wl_compositor, m_wl_surface, m_wl_xdg_surface, m_wl_toplevel,
 	                   m_wl_viewporter, desc.title, desc.fullscreen_on_wayland);
+	// Drag lattice (#1609): probed once here so a press never has to find out.
+	m_wl_placement.connect();
+	DXRW_INFO("drag lattice: compositor placement service — %s", m_wl_placement.describe());
+	m_wl_chrome.set_drag_prepare([this] { wl_drag_prepare(); });
 #endif
 
 	// The role is attached and the state requested; commit so the compositor
@@ -2807,6 +2988,64 @@ dxr_mods_from_x11(unsigned int state)
 void
 DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_event, bool *running)
 {
+#ifdef DXR_APP_HAVE_WL_CHROME
+	// DXR_WL_TEST_LATTICE="dx,dy" (test hook, off by default): with nobody at
+	// the mouse, do what a title-bar press does — build and send the drag
+	// lattice — then move the window by (dx, dy) logical through the
+	// compositor. A programmatic move is a MOVE action like a drag, so it
+	// passes through the same constraint, and where it LANDS (read back from
+	// the geometry service) is the test.
+	if (m_backend == DxrWindowBackend::Wayland) {
+		struct TestLattice
+		{
+			int dx = 0, dy = 0;
+			bool armed = false;
+		};
+		static const TestLattice tl = [] {
+			TestLattice c;
+			const char *e = getenv("DXR_WL_TEST_LATTICE");
+			if (e != nullptr && sscanf(e, "%d,%d", &c.dx, &c.dy) == 2) {
+				c.armed = true;
+			}
+			return c;
+		}();
+		// DXR_WL_TEST_LATTICE_AT=N picks the pump it fires on (default 150).
+		// A headless compositor may stop releasing swapchain images after a
+		// frame or two, so a harness running there fires early; the test needs
+		// a mapped window, not rendering.
+		static const long at = [] {
+			const char *e = getenv("DXR_WL_TEST_LATTICE_AT");
+			const long v = e != nullptr ? strtol(e, nullptr, 10) : 150;
+			return v > 0 ? v : 150;
+		}();
+		if (tl.armed && !m_wl_test_lattice_done && ++m_wl_test_lattice_pumps == (uint64_t)at) {
+			m_wl_test_lattice_done = true;
+			// The compositor places a new window asynchronously; until it has,
+			// its frame reads (0,0) and a start recorded then is fiction (and
+			// the placement then overrides any move). Re-send until the start
+			// is real, bounded. Blocking is acceptable in a test hook only.
+			for (int tries = 0; tries < 40; tries++) {
+				wl_drag_prepare();
+				if (!m_wl_lattice_active || m_wl_lattice_start_x != 0 || m_wl_lattice_start_y != 0) {
+					break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+			if (m_wl_lattice_active) {
+				const int32_t tx = m_wl_lattice_start_x + tl.dx, ty = m_wl_lattice_start_y + tl.dy;
+				const bool moved = m_wl_placement.test_move_to(tx, ty);
+				DXRW_INFO("DXR_WL_TEST_LATTICE: start (%d, %d); asked the compositor for (%d, %d) = start %+d,%+d "
+				          "— %s. Read the landed frame from the geometry service.",
+				          m_wl_lattice_start_x, m_wl_lattice_start_y, tx, ty, tl.dx, tl.dy,
+				          moved ? "accepted" : "REFUSED");
+			} else {
+				DXRW_WARN("DXR_WL_TEST_LATTICE: no lattice was sent — nothing to test (is DXR_WL_DRAG_LATTICE=0 set? "
+				          "and check the 'drag lattice' lines above)");
+			}
+		}
+	}
+#endif
+
 	// DXR_TEST_FULLSCREEN_TOGGLE=N (test hook, off by default): press F11 at
 	// pump N and again at 2N, so the toggle is verifiable with nobody at the
 	// keyboard — the same toggle_fullscreen() the key drives.
@@ -3135,6 +3374,17 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		// runtime has no other way to learn it — Wayland gives the WSI no
 		// currentExtent — so republish before the next frame is drawn.
 		publish_wayland_geometry_if_changed();
+#ifdef DXR_APP_HAVE_WL_CHROME
+		// The drag left the table's coverage: send the next piece, centred on
+		// where the compositor says it is. Asynchronous — the compositor keeps
+		// dragging (unsnapped) meanwhile and never waits on us.
+		{
+			int32_t ndx = 0, ndy = 0;
+			if (m_wl_placement.poll_needed(&ndx, &ndy) && m_wl_lattice_active) {
+				wl_send_lattice(true, ndx, ndy);
+			}
+		}
+#endif
 
 		// F11 is a window concern: handled here, still delivered.
 		for (const DxrWindowEvent &e : m_events) {
