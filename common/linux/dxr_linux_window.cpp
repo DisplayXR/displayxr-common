@@ -704,7 +704,7 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	// rect — what the runtime sees — and the top-level grows UP by the bar,
 	// so an app's "WxH+X+Y" names the 3D area exactly, which is the rect the
 	// weave phase depends on.
-	m_x_bar_enabled = desc.x11_header_bar && !m_x_wm_drag;
+	m_x_bar_enabled = desc.x11_header_bar;
 	uint32_t bar_h = 0;
 	if (m_x_bar_enabled) {
 		m_x_bar.configure(dxr_x11_chrome::DesktopScale(m_x_display));
@@ -715,7 +715,7 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		// handle and two buttons.
 		m_x_bar.setResizable(false);
 		m_x_bar.setTitle(desc.title != nullptr ? desc.title : "");
-		bar_h = want_fullscreen ? 0 : m_x_bar.height();
+		bar_h = (want_fullscreen || m_x_wm_drag) ? 0 : m_x_bar.height();
 		DXRW_INFO("X11 header bar: %u px (scale %.2f), %s, title font %s", m_x_bar.height(), m_x_bar.scale(),
 		          argb ? "translucent with rounded corners (ARGB visual)" : "opaque, square (no ARGB visual)",
 		          m_x_bar.fontPath().empty() ? "NONE (set DXR_CSD_FONT)" : m_x_bar.fontPath().c_str());
@@ -1163,7 +1163,7 @@ DxrLinuxWindow::x11_bar_visible() const
 {
 	// Windowed only: a fullscreen app has no title bar anywhere on GNOME, and
 	// the bar must never eat pixels out of a panel-sized weave.
-	return m_x_bar_enabled && m_x_content != 0 && !m_x_fullscreen;
+	return m_x_bar_enabled && m_x_content != 0 && !m_x_fullscreen && !m_x_wm_drag;
 }
 
 int
@@ -2687,6 +2687,10 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 	// server-side-decoration request must precede the initial configure.
 	m_wl_chrome.attach(m_wl_display, m_wl_compositor, m_wl_surface, m_wl_xdg_surface, m_wl_toplevel,
 	                   m_wl_viewporter, desc.title, desc.fullscreen_on_wayland);
+	if (!desc.wayland_title_bar) {
+		m_wl_chrome.set_hidden(true); // before the first configure: never shown
+		DXRW_INFO("Wayland: title bar hidden at start (desc.wayland_title_bar = false)");
+	}
 	// Drag lattice (#1609): probed once here so a press never has to find out.
 	m_wl_placement.connect();
 	DXRW_INFO("drag lattice: compositor placement service — %s", m_wl_placement.describe());
@@ -3272,6 +3276,9 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 					m_x_bar.setFocused(ev.type == FocusIn);
 					if (ev.type == FocusOut) {
 						m_x_keys_down.reset();
+						// A drag whose button-up will land in another window
+						// must not keep the window glued to the pointer.
+						x11_end_drag();
 					}
 					out.type = ev.type == FocusIn ? DxrWindowEvent::Type::FocusGained
 					                              : DxrWindowEvent::Type::FocusLost;
@@ -3967,6 +3974,56 @@ DxrLinuxWindow::set_keep_above(bool above)
 		m_warned_keep_above = true;
 		DXRW_INFO("Wayland: keep-above requested — no protocol for it on Wayland; ignored");
 	}
+}
+
+void
+DxrLinuxWindow::set_decorated(bool decorated)
+{
+	if (m_backend == DxrWindowBackend::X11 && m_x_display != nullptr && m_x_window != 0) {
+		if (m_x_fullscreen || decorated == m_x_wm_drag) {
+			return;
+		}
+		x11_end_drag(); // a WM frame now owns the move (or the client does again)
+		Atom motif = XInternAtom(m_x_display, "_MOTIF_WM_HINTS", False);
+		if (motif != None) {
+			// flags=2 MWM_HINTS_DECORATIONS; decorations 1 = all, 0 = none.
+			unsigned long hints[5] = {2, 0, decorated ? 1UL : 0UL, 0, 0};
+			XChangeProperty(m_x_display, m_x_window, motif, motif, 32, PropModeReplace,
+			                (const unsigned char *)hints, 5);
+		}
+		m_x_wm_drag = decorated;
+		m_x_client_drag = !decorated;
+		x11_layout_content(); // the header bar (if any) hides under a WM frame
+		XFlush(m_x_display);
+		DXRW_INFO("X11: window decoration %s", decorated ? "ON — WM frame, WM-owned (unsnapped) move/resize"
+		                                               : "OFF — borderless, client-owned snapped drag");
+		return;
+	}
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+	if (m_backend == DxrWindowBackend::Wayland && m_wl_surface != nullptr) {
+		if (m_wl_fullscreen || decorated == !m_wl_chrome.hidden()) {
+			return;
+		}
+		m_wl_chrome.set_hidden(!decorated);
+		m_wl_chrome.update(m_wl_config_w, m_wl_config_h, wl_surface_scale());
+		wl_display_flush(m_wl_display);
+		DXRW_INFO("Wayland: title bar %s", decorated ? "shown" : "hidden (undecorated)");
+	}
+#endif
+}
+
+bool
+DxrLinuxWindow::is_decorated() const
+{
+	if (m_backend == DxrWindowBackend::X11) {
+		return m_x_wm_drag;
+	}
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+	if (m_backend == DxrWindowBackend::Wayland) {
+		return !m_wl_chrome.hidden();
+	}
+#endif
+	return false;
 }
 
 void

@@ -287,7 +287,7 @@ DxrWlChrome::on_toplevel_states(struct wl_array *states, bool sized)
 int32_t
 DxrWlChrome::bar_logical() const
 {
-	return (m_mode == Mode::ClientSide && !m_fullscreen) ? m_bar.logicalHeight() : 0;
+	return (m_mode == Mode::ClientSide && !m_fullscreen && !m_hidden) ? m_bar.logicalHeight() : 0;
 }
 
 const char *

@@ -684,6 +684,7 @@ compile-time macros.
 | `toggle_fullscreen()` | F11 — also handled inside the pump |
 | `set_input_region()` / `clear_input_region()` | click-through: XShape `ShapeInput` on X11, `wl_surface.set_input_region` on Wayland; the header bar is always kept clickable |
 | `set_title()`, `set_keep_above()` | |
+| `set_decorated()` / `is_decorated()` | run-time decorations (an app's B key): the WM frame on X11 (WM-owned, unsnapped move while on), the client title bar on Wayland; `desc.wayland_title_bar = false` starts a Wayland window without it |
 | `set_snap_provider()` + `DxrWeaveSnap` | the drag's lattice snap through `xrWeaveSnapWindowRectDXR` |
 
 On native Wayland, fullscreen onto the panel output is requested only once the

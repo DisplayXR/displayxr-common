@@ -226,6 +226,23 @@ public:
 	void
 	set_title(const char *title);
 
+	/*!
+	 * Hide (or bring back) the client-side title bar at run time — an
+	 * undecorated window, like DXR_WL_CSD=0 but switchable. The window
+	 * geometry follows on the next update(); resize edges go with the bar.
+	 */
+	void
+	set_hidden(bool hidden)
+	{
+		m_hidden = hidden;
+		m_bar.invalidate();
+	}
+	bool
+	hidden() const
+	{
+		return m_hidden;
+	}
+
 	//! Human-readable mode for the create log.
 	const char *
 	mode_name() const;
@@ -342,6 +359,9 @@ private:
 	uint32_t m_cursor_shape = 0;
 
 	bool m_close_requested = false;
+
+	//! set_hidden(): the bar is suppressed even where it would be shown.
+	bool m_hidden = false;
 
 	//! Runs before each compositor drag starts (#1609). Empty = none.
 	std::function<void()> m_drag_prepare;

@@ -325,6 +325,11 @@ struct DxrLinuxWindowDesc
 	//! the left button for the scene), 0 = none (header bar only).
 	uint32_t x11_drag_button = 1;
 
+	//! Wayland: start with the client-side title bar HIDDEN (an undecorated
+	//! overlay, e.g. a transparent desktop companion). set_decorated(true)
+	//! brings it back. X11's equivalent is simply x11_header_bar = false.
+	bool wayland_title_bar = true;
+
 	//! Wayland: the button that starts a compositor move (xdg_toplevel.move)
 	//! from anywhere in the content. 0 = none (the default: the title bar
 	//! moves the window, as before); demos use 3 to match their X11 leg.
@@ -468,6 +473,21 @@ public:
 	//! Wayland, which has no protocol for it.
 	void
 	set_keep_above(bool above);
+
+	/*!
+	 * Decorations on/off at run time (an app's "B" key).
+	 * X11: the WINDOW MANAGER's frame (_MOTIF_WM_HINTS). While it is on, the WM
+	 * owns move/resize — the client drag and the header bar are off, and the
+	 * move is NOT phase-snapped (the same trade DXR_X11_WM_DECORATIONS=1 makes).
+	 * Wayland: the client-side title bar shown / hidden (mutter draws no frame).
+	 * Ignored while fullscreen.
+	 */
+	void
+	set_decorated(bool decorated);
+
+	//! X11: a WM frame is on. Wayland: the client-side title bar is shown.
+	bool
+	is_decorated() const;
 
 	//! What the connection actually is, e.g. "X11 (XWayland, The X.Org
 	//! Foundation 12401010)" or "Wayland (native)". Empty before create().

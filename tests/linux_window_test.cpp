@@ -248,6 +248,17 @@ test_x11_window(bool demo_shape)
 	win.set_keep_above(false);
 	(void)pump_for(win, 3);
 
+	// B-key decoration toggle: a WM frame on, then off again.
+	CHECK(!win.is_decorated(), "starts undecorated");
+	win.set_decorated(true);
+	CHECK(win.is_decorated(), "decorated");
+	CHECK(!win.header_bar_visible(), "no header bar under a WM frame");
+	(void)pump_for(win, 3);
+	win.set_decorated(false);
+	CHECK(!win.is_decorated(), "undecorated again");
+	CHECK(win.header_bar_visible() == demo_shape, "header bar back when undecorated");
+	(void)pump_for(win, 3);
+
 	CHECK(win.toggle_fullscreen() && win.is_fullscreen(), "F11 -> fullscreen");
 	(void)pump_for(win, 3);
 	CHECK(win.toggle_fullscreen() && !win.is_fullscreen(), "F11 -> windowed");
@@ -414,6 +425,10 @@ test_wayland_window()
 	win.clear_input_region();
 	win.set_title("retitled");
 	win.set_keep_above(true); // logged no-op
+	win.set_decorated(false);
+	CHECK(!win.is_decorated(), "wayland: title bar hidden");
+	win.set_decorated(true);
+	CHECK(win.is_decorated(), "wayland: title bar shown");
 	CHECK(win.toggle_fullscreen(), "F11 on Wayland");
 	for (int i = 0; i < 5; i++) {
 		win.pump_events({}, &running);
