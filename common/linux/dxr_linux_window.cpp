@@ -3837,12 +3837,46 @@ DxrLinuxWindow::wl_declared_size(uint32_t *w, uint32_t *h) const
 }
 
 void
+DxrLinuxWindow::wl_update_opaque_region()
+{
+#ifdef DXR_APP_HAVE_WAYLAND
+	if (m_wl_surface == nullptr || m_wl_compositor == nullptr) {
+		return;
+	}
+	const int32_t w = m_transparent_bg ? 0 : m_wl_config_w;
+	const int32_t h = m_transparent_bg ? 0 : m_wl_config_h;
+	if (w == m_wl_opaque_w && h == m_wl_opaque_h) {
+		return;
+	}
+	if (w <= 0 || h <= 0) {
+		// Transparent background (or no size yet): no opaque region, so the
+		// compositor blends the surface over the desktop, as it must.
+		wl_surface_set_opaque_region(m_wl_surface, nullptr);
+	} else {
+		// Surface-local LOGICAL coordinates: the viewport destination, i.e.
+		// exactly the configured rect the buffer is mapped onto.
+		struct wl_region *region = wl_compositor_create_region(m_wl_compositor);
+		wl_region_add(region, 0, 0, w, h);
+		wl_surface_set_opaque_region(m_wl_surface, region);
+		wl_region_destroy(region);
+	}
+	if (m_wl_opaque_w < 0) {
+		DXRW_INFO("Wayland: opaque region %s", w > 0 ? "= the whole content surface (opaque window)"
+		                                             : "none (transparent background)");
+	}
+	m_wl_opaque_w = w;
+	m_wl_opaque_h = h;
+#endif
+}
+
+void
 DxrLinuxWindow::wl_apply_buffer_mapping()
 {
 #ifdef DXR_APP_HAVE_WAYLAND
 	if (m_wl_surface == nullptr || m_wl_config_w <= 0 || m_wl_config_h <= 0) {
 		return;
 	}
+	wl_update_opaque_region(); // follows every configured size (runtime#1698)
 	uint32_t bw = 0, bh = 0;
 	wl_declared_size(&bw, &bh);
 	if (bw == 0 || bh == 0) {
@@ -4313,6 +4347,7 @@ DxrLinuxWindow::set_transparent_background(bool transparent)
 #if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
 	if (m_backend == DxrWindowBackend::Wayland && m_wl_surface != nullptr) {
 		m_transparent_bg = transparent;
+		wl_update_opaque_region(); // a see-through surface must not claim to be opaque
 		m_wl_chrome.set_suppressed(transparent);
 		m_wl_chrome.update(m_wl_config_w, m_wl_config_h, wl_surface_scale());
 		wl_display_flush(m_wl_display);
@@ -4322,6 +4357,9 @@ DxrLinuxWindow::set_transparent_background(bool transparent)
 	}
 #endif
 	m_transparent_bg = transparent;
+#ifdef DXR_APP_HAVE_WAYLAND
+	wl_update_opaque_region(); // no-op off Wayland
+#endif
 }
 
 void

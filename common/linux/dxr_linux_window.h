@@ -1093,6 +1093,16 @@ private:
 	//! Pending surface state only — the WSI's next present commits it.
 	void
 	wl_apply_buffer_mapping();
+	/*!
+	 * Declare the content surface OPAQUE (its whole configured rect) unless
+	 * the app is drawing a transparent background (runtime#1698). Without an
+	 * opaque region a surface with an alpha channel is always blended, which
+	 * rules out the compositor's direct scanout of a fullscreen window.
+	 * Pending state, committed by the WSI's next present, like the viewport.
+	 */
+	void
+	wl_update_opaque_region();
+	int32_t m_wl_opaque_w = -1, m_wl_opaque_h = -1; //!< last region sent; 0x0 = none
 
 	// Per-frame scratch, set by the listeners and consumed by pump().
 	bool m_wl_close_requested = false;
