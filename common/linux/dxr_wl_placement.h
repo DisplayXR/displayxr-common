@@ -85,13 +85,33 @@ public:
 	bool
 	test_move_to(int32_t x, int32_t y);
 
+	//! Drop this process's table (the window left the panel mid-drag).
+	void
+	clear_drag_lattice();
+
 	/*!
 	 * Drain pending signals. Returns true, once, when the publisher asked for
-	 * more of the table (the drag left its coverage), with the displacement
-	 * it was at.
+	 * more of the table (the drag is approaching or past its coverage), with
+	 * the displacement to centre the next piece on.
 	 */
 	bool
 	poll_needed(int32_t *dx, int32_t *dy);
+
+	//! One drag's summary from the publisher (extension version 7+).
+	struct DragDone
+	{
+		uint32_t moves = 0;          //!< compositor moves while the table was active
+		uint32_t corrected = 0;      //!< ...moved on to a table entry
+		uint32_t misses = 0;         //!< ...outside the table's coverage (unsnapped)
+		uint32_t max_correction = 0; //!< largest correction, logical px
+		uint32_t tables = 0;         //!< tables the publisher received for this drag
+		bool landed_on_table = false;
+	};
+
+	//! True, once, when a DragLatticeDone for this process arrived (drained
+	//! by poll_needed, which must be called first).
+	bool
+	take_done(DragDone *out);
 
 	//! Human-readable state for the create log.
 	const char *
@@ -106,5 +126,7 @@ public:
 private:
 	void *m_conn = nullptr; //!< DBusConnection, opaque so the header stays clean
 	bool m_lattice = false;
+	bool m_have_done = false;
+	DragDone m_done;
 	const char *m_why = "not attempted";
 };

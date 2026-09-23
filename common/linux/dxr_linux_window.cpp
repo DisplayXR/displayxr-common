@@ -1519,6 +1519,9 @@ DxrLinuxWindow::s_frac_preferred_scale(void *data, struct wp_fractional_scale_v1
 		}
 		self->m_wl_size_from_desc = false;
 	}
+#ifdef DXR_APP_HAVE_WL_CHROME
+	self->wl_lattice_on_scale_change(); // a drag reaching (or leaving) the 3D panel
+#endif
 	// A windowed surface's declared buffer is configure x this scale, so the
 	// mapping (and, in pump(), the runtime's declared geometry) follows it.
 	self->wl_apply_buffer_mapping();
@@ -2361,29 +2364,26 @@ round_to_multiple(int32_t v, int32_t q)
 }
 } // namespace
 
-bool
-DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
+DxrLinuxWindow::LatticeProbe
+DxrLinuxWindow::wl_probe_lattice(SnapWindowOriginFn fn, void *ud, int32_t q, int32_t cx, int32_t cy)
 {
-	const int32_t q = (int32_t)m_wl_lattice_q;
+	LatticeProbe r;
 	const auto t0 = std::chrono::steady_clock::now();
-	std::vector<int32_t> dxs, dys;
 	std::vector<std::pair<int32_t, int32_t>> seen;
-	size_t fixed = 0, probed = 0;
-	bool declined = false;
 
-	for (int32_t gy = cy - kLatticeHalf; gy <= cy + kLatticeHalf && !declined; gy += kLatticeCell) {
+	for (int32_t gy = cy - kLatticeHalf; gy <= cy + kLatticeHalf && !r.declined; gy += kLatticeCell) {
 		for (int32_t gx = cx - kLatticeHalf; gx <= cx + kLatticeHalf; gx += kLatticeCell) {
-			probed++;
+			r.probed++;
 			// The snap is displacement-only: origin (0,0), target = the
 			// displacement in DEVICE px. Whatever it returns preserves the
 			// phase the window had at the drag start.
 			int32_t sx = gx * q, sy = gy * q;
-			if (!m_snap_fn(m_snap_userdata, 0, 0, gx * q, gy * q, &sx, &sy)) {
-				declined = true; // no usable viewing distance: nothing to protect
+			if (!fn(ud, 0, 0, gx * q, gy * q, &sx, &sy)) {
+				r.declined = true; // no usable viewing distance: nothing to protect
 				break;
 			}
 			if (sx == gx * q && sy == gy * q) {
-				fixed++;
+				r.fixed++;
 			}
 			int32_t ax = 0, ay = 0;
 			bool found = false;
@@ -2406,8 +2406,7 @@ DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
 							}
 							const int32_t px = bx + i * q, py = by + j * q;
 							int32_t rx = px, ry = py;
-							if (m_snap_fn(m_snap_userdata, 0, 0, px, py, &rx, &ry) && rx == px &&
-							    ry == py) {
+							if (fn(ud, 0, 0, px, py, &rx, &ry) && rx == px && ry == py) {
 								ax = px;
 								ay = py;
 								found = true;
@@ -2429,44 +2428,186 @@ DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
 			}
 			if (!dup) {
 				seen.push_back(key);
-				dxs.push_back(key.first);
-				dys.push_back(key.second);
+				r.dxs.push_back(key.first);
+				r.dys.push_back(key.second);
 			}
 		}
 	}
-	const double ms =
-	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	return r;
+}
 
-	if (declined) {
+bool
+DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const LatticeProbe &r, bool async)
+{
+	const int32_t q = (int32_t)m_wl_lattice_q;
+	m_wl_drag_stats.probe_ms += r.ms;
+	if (r.ms > m_wl_drag_stats.probe_ms_max) {
+		m_wl_drag_stats.probe_ms_max = r.ms;
+	}
+	if (r.declined) {
 		DXRW_INFO("drag lattice: the display processor declined (no usable viewing distance) — the "
 		          "compositor drags unconstrained");
 		return false;
 	}
-	if (fixed == probed) {
+	if (r.fixed == r.probed) {
 		// Every probed position is already phase-correct: the lattice is
 		// trivial (e.g. sim_display at its default period). A table would only
 		// coarsen the drag to the probe grid for no benefit.
 		if (!extend) {
 			DXRW_INFO("drag lattice: the display processor accepts every position (%zu probed in %.1f ms) "
 			          "— nothing to constrain",
-			          probed, ms);
+			          r.probed, r.ms);
 		}
 		return false;
 	}
 	const bool ok = m_wl_placement.set_drag_lattice(extend, kLatticeCell, cx - kLatticeHalf, cy - kLatticeHalf,
-	                                                cx + kLatticeHalf, cy + kLatticeHalf, dxs, dys,
+	                                                cx + kLatticeHalf, cy + kLatticeHalf, r.dxs, r.dys,
 	                                                &m_wl_lattice_start_x, &m_wl_lattice_start_y);
+	if (ok) {
+		if (extend) {
+			m_wl_drag_stats.extensions++;
+		} else {
+			m_wl_drag_stats.tables++;
+		}
+	}
 	DXRW_INFO("drag lattice: %s %zu phase-correct reachable displacement(s) around (%+d, %+d) logical — %zu "
-	          "probed in %.1f ms at quantum %d%s",
-	          extend ? "extended with" : "sent", dxs.size(), cx, cy, probed, ms, q,
-	          ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
+	          "probed in %.1f ms at quantum %d%s%s",
+	          extend ? "extended with" : "sent", r.dxs.size(), cx, cy, r.probed, r.ms, q,
+	          async ? " (worker thread)" : "", ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
 	return ok;
+}
+
+bool
+DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
+{
+	const LatticeProbe r = wl_probe_lattice(m_snap_fn, m_snap_userdata, (int32_t)m_wl_lattice_q, cx, cy);
+	return wl_submit_lattice(extend, cx, cy, r, false);
+}
+
+void
+DxrLinuxWindow::wl_request_lattice_async(bool extend, int32_t cx, int32_t cy)
+{
+	// DXR_WL_LATTICE_SYNC=1: probe on this thread (the pre-follow-up
+	// behaviour), in case a display processor turns out not to tolerate a
+	// snap query from a second thread.
+	static const bool sync = [] {
+		const char *e = getenv("DXR_WL_LATTICE_SYNC");
+		return e != nullptr && e[0] == '1';
+	}();
+	if (sync) {
+		const bool ok = wl_send_lattice(extend, cx, cy);
+		if (!extend) {
+			m_wl_lattice_active = ok;
+		}
+		return;
+	}
+	if (m_wl_lattice_job_running) {
+		// One at a time; the newest request is the one worth answering.
+		// A queued FRESH table is never downgraded to an extension: it is
+		// what establishes the drag's origin.
+		if (m_wl_lattice_req_pending && !m_wl_lattice_req_extend && extend) {
+			return;
+		}
+		m_wl_lattice_req_pending = true;
+		m_wl_lattice_req_extend = extend;
+		m_wl_lattice_req_cx = cx;
+		m_wl_lattice_req_cy = cy;
+		return;
+	}
+	m_wl_lattice_job_running = true;
+	m_wl_lattice_job_done.store(false);
+	m_wl_lattice_job_extend = extend;
+	m_wl_lattice_job_cx = cx;
+	m_wl_lattice_job_cy = cy;
+	m_wl_drag_stats.async_jobs++;
+	SnapWindowOriginFn fn = m_snap_fn;
+	void *ud = m_snap_userdata;
+	const int32_t q = (int32_t)m_wl_lattice_q;
+	m_wl_lattice_thread = std::thread([this, fn, ud, q, cx, cy] {
+		m_wl_lattice_job_result = wl_probe_lattice(fn, ud, q, cx, cy);
+		m_wl_lattice_job_done.store(true);
+	});
+}
+
+void
+DxrLinuxWindow::wl_poll_lattice_job()
+{
+	if (!m_wl_lattice_job_running || !m_wl_lattice_job_done.load()) {
+		return;
+	}
+	m_wl_lattice_thread.join();
+	m_wl_lattice_job_running = false;
+	const bool extend = m_wl_lattice_job_extend;
+	// The world may have moved on while the worker probed: the drag ended,
+	// or the window left the panel. A late table would only confuse.
+	if (!m_wl_compositor_drag || (extend && !m_wl_lattice_active) || m_wl_lattice_q == 0) {
+		m_wl_lattice_req_pending = false;
+		return;
+	}
+	const bool ok = wl_submit_lattice(extend, m_wl_lattice_job_cx, m_wl_lattice_job_cy, m_wl_lattice_job_result,
+	                                  true);
+	if (!extend) {
+		m_wl_lattice_active = ok;
+	}
+	if (m_wl_lattice_req_pending) {
+		m_wl_lattice_req_pending = false;
+		wl_request_lattice_async(m_wl_lattice_req_extend, m_wl_lattice_req_cx, m_wl_lattice_req_cy);
+	}
+}
+
+void
+DxrLinuxWindow::wl_lattice_on_scale_change()
+{
+	if (!m_wl_compositor_drag || !m_wl_placement.has_drag_lattice() || m_snap_fn == nullptr) {
+		return;
+	}
+	// A drag that had no table never gets a DragLatticeDone to end it, so
+	// bound how long "a drag is running" is believed.
+	if (std::chrono::steady_clock::now() - m_wl_drag_began > std::chrono::seconds(60)) {
+		m_wl_compositor_drag = false;
+		return;
+	}
+	const char *env = getenv("DXR_WL_DRAG_LATTICE");
+	if (env != nullptr && env[0] == '0') {
+		return;
+	}
+	const double scale = wl_surface_scale();
+	const double nearest = (double)(int32_t)(scale + 0.5);
+	const bool integer = scale >= 1.0 && (scale > nearest ? scale - nearest : nearest - scale) <= 0.01;
+	if (integer && !m_wl_lattice_active && !m_wl_lattice_job_running) {
+		/*
+		 * The drag began on a fractionally-scaled output (no reachable
+		 * lattice there) and the window has just reached an integer-scale
+		 * one — the 3D panel. Hardware showed exactly this case stuttering on
+		 * the panel for the rest of the drag. Send a table now: a FRESH one,
+		 * whose origin is where the window is when it lands, which is as good
+		 * a phase reference as any (the weave follows the window; what must
+		 * not change is the phase DURING the drag).
+		 */
+		m_wl_lattice_q = (uint32_t)nearest;
+		m_wl_drag_stats.entered_mid_drag = true;
+		DXRW_INFO("drag lattice: the window reached a scale-%.0f output mid-drag — deriving a table there",
+		          nearest);
+		wl_request_lattice_async(false, 0, 0);
+	} else if (!integer && m_wl_lattice_active) {
+		// Left the panel: its lattice means nothing on this output.
+		m_wl_placement.clear_drag_lattice();
+		m_wl_lattice_active = false;
+		m_wl_drag_stats.clears++;
+		DXRW_INFO("drag lattice: the window left for a scale-%.4f output mid-drag — table dropped", scale);
+	}
 }
 
 void
 DxrLinuxWindow::wl_drag_prepare()
 {
 	m_wl_lattice_active = false;
+	// Every caller starts a compositor move right after this, table or not:
+	// a drag that begins off the panel may still need one when it gets there.
+	m_wl_compositor_drag = true;
+	m_wl_drag_began = std::chrono::steady_clock::now();
+	m_wl_drag_stats = LatticeDragStats{};
 	// On by default whenever the geometry extension offers it (version 6+),
 	// since hardware confirmed it (stable 3D while dragging, native drag feel).
 	// DXR_WL_DRAG_LATTICE=0 turns it off; the compositor drag without a table
@@ -2488,8 +2629,9 @@ DxrLinuxWindow::wl_drag_prepare()
 	const double nearest = (double)(int32_t)(scale + 0.5);
 	if (scale < 1.0 || (scale > nearest ? scale - nearest : nearest - scale) > 0.01) {
 		DXRW_INFO("drag lattice: output scale %.4f is not an integer, so the reachable positions are not a "
-		          "lattice — the compositor drags unconstrained",
+		          "lattice here — unconstrained until the window reaches an integer-scale output",
 		          scale);
+		m_wl_drag_stats.began_off_lattice = true;
 		return;
 	}
 	m_wl_lattice_q = (uint32_t)nearest;
@@ -2870,6 +3012,10 @@ void
 DxrLinuxWindow::destroy_wayland()
 {
 #ifdef DXR_APP_HAVE_WL_CHROME
+	if (m_wl_lattice_thread.joinable()) {
+		m_wl_lattice_thread.join(); // a probe in flight: bounded (~100 ms)
+	}
+	m_wl_lattice_job_running = false;
 	// Before the content surface: the chrome is its subsurface.
 	m_wl_chrome.destroy();
 #endif
@@ -3517,9 +3663,26 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		// where the compositor says it is. Asynchronous — the compositor keeps
 		// dragging (unsnapped) meanwhile and never waits on us.
 		{
+			wl_poll_lattice_job();
 			int32_t ndx = 0, ndy = 0;
 			if (m_wl_placement.poll_needed(&ndx, &ndy) && m_wl_lattice_active) {
-				wl_send_lattice(true, ndx, ndy);
+				wl_request_lattice_async(true, ndx, ndy);
+			}
+			DxrWlPlacement::DragDone d;
+			if (m_wl_placement.take_done(&d)) {
+				// One line per drag that had a table (#1609 follow-up): what
+				// the app spent, and what the compositor saw.
+				const LatticeDragStats &a = m_wl_drag_stats;
+				DXRW_INFO("drag lattice summary: %u table(s) + %u extension(s)%s%s, %.0f ms probing (max %.0f "
+				          "ms, %u on the worker); compositor moves %u, corrected %u (%.0f%%), OFF-table %u "
+				          "(%.0f%%), largest correction %u logical px; drop %s the table",
+				          a.tables, a.extensions, a.entered_mid_drag ? ", first sent on reaching the panel" : "",
+				          a.clears ? ", dropped on leaving it" : "", a.probe_ms, a.probe_ms_max, a.async_jobs,
+				          d.moves, d.corrected, d.moves ? 100.0 * d.corrected / d.moves : 0.0, d.misses,
+				          d.moves ? 100.0 * d.misses / d.moves : 0.0, d.max_correction,
+				          d.landed_on_table ? "ON" : "OFF");
+				m_wl_compositor_drag = false;
+				m_wl_lattice_active = false;
 			}
 		}
 #endif

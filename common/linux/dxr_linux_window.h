@@ -137,11 +137,14 @@
 #include <openxr/XR_DXR_xlib_window_binding.h>
 #include <openxr/XR_DXR_wayland_surface_binding.h>
 
+#include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 //! Which app-owned window backend (and therefore which binding extension).
@@ -935,6 +938,61 @@ private:
 	 */
 	bool
 	wl_send_lattice(bool extend, int32_t cx, int32_t cy);
+
+	//! One probe of the display processor over a table's grid. Pure: no
+	//! window or bus state, so it can run on a worker thread.
+	struct LatticeProbe
+	{
+		std::vector<int32_t> dxs, dys;
+		size_t probed = 0, fixed = 0;
+		bool declined = false;
+		double ms = 0.0;
+	};
+	static LatticeProbe
+	wl_probe_lattice(SnapWindowOriginFn fn, void *ud, int32_t q, int32_t cx, int32_t cy);
+	//! Send a probe result (main thread). Same return as wl_send_lattice.
+	bool
+	wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const LatticeProbe &r, bool async);
+
+	/*!
+	 * Probe on a worker and send when done (#1609 follow-up). Probing a table
+	 * costs ~100 ms against a real display processor; on the render thread
+	 * that is a visible hitch in the middle of a drag, which is exactly when
+	 * an extension or a mid-drag table is needed. One job at a time; a newer
+	 * request replaces a queued one.
+	 */
+	void
+	wl_request_lattice_async(bool extend, int32_t cx, int32_t cy);
+	//! Pump hook: collect a finished job, start a queued one.
+	void
+	wl_poll_lattice_job();
+	//! The surface's preferred scale changed: during a compositor drag, a
+	//! table is sent when the window reaches an integer-scale output (the 3D
+	//! panel) and dropped when it leaves one.
+	void
+	wl_lattice_on_scale_change();
+
+	//! A compositor drag (xdg_toplevel.move) this window started is running.
+	//! Cleared by the publisher's DragLatticeDone, or by the next press.
+	bool m_wl_compositor_drag = false;
+	std::chrono::steady_clock::time_point m_wl_drag_began{};
+	std::thread m_wl_lattice_thread;
+	std::atomic<bool> m_wl_lattice_job_done{false};
+	bool m_wl_lattice_job_running = false;
+	bool m_wl_lattice_job_extend = false;
+	int32_t m_wl_lattice_job_cx = 0, m_wl_lattice_job_cy = 0;
+	LatticeProbe m_wl_lattice_job_result;
+	bool m_wl_lattice_req_pending = false;
+	bool m_wl_lattice_req_extend = false;
+	int32_t m_wl_lattice_req_cx = 0, m_wl_lattice_req_cy = 0;
+	//! Per-drag app-side statistics, for the one-line summary.
+	struct LatticeDragStats
+	{
+		uint32_t tables = 0, extensions = 0, async_jobs = 0, clears = 0;
+		double probe_ms = 0.0, probe_ms_max = 0.0;
+		bool began_off_lattice = false; //!< the press was on a non-integer-scale output
+		bool entered_mid_drag = false;  //!< a table was sent when the window reached the panel
+	} m_wl_drag_stats;
 	/*! @} */
 #endif
 
