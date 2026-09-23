@@ -4357,7 +4357,9 @@ DxrLinuxWindow::set_transparent_background(bool transparent)
 	}
 #endif
 	m_transparent_bg = transparent;
+#ifdef DXR_APP_HAVE_WAYLAND
 	wl_update_opaque_region(); // no-op off Wayland
+#endif
 }
 
 void
