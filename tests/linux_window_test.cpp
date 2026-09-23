@@ -74,6 +74,9 @@ test_parse()
 	b = DxrWindowBackend::Auto;
 	CHECK(DxrLinuxWindow::take_platform_args(&v, &b, &err) && b == DxrWindowBackend::X11, "take --platform x11");
 	CHECK(v.size() == 2 && v[0] == "model.glb" && v[1] == "--vh=0.3", "consumed args removed, others kept in order");
+	v = {"--frame-stats=2", "scene.spz"};
+	CHECK(DxrLinuxWindow::take_platform_args(&v, &b, &err) && v.size() == 1 && v[0] == "scene.spz",
+	      "--frame-stats is consumed");
 	v = {"--platform=bogus"};
 	CHECK(!DxrLinuxWindow::take_platform_args(&v, &b, &err), "take rejects a bad value");
 }

@@ -273,8 +273,14 @@ struct DxrWindowProbe
 //! XrDisplayDesktopPositionDXR + XrDisplayInfoDXR (INV-1.3).
 struct DxrLinuxWindowDesc
 {
-	uint32_t width = 0;  //!< requested window size, pixels
-	uint32_t height = 0; //!< requested window size, pixels
+	/*!
+	 * Requested CONTENT size in DEVICE pixels — the swapchain / current_size()
+	 * space — on BOTH backends, so the same request gives the same buffer on
+	 * X11 and Wayland (an A/B compares like with like). On a scaled Wayland
+	 * output the logical window is width / scale; X11 windows are device px.
+	 */
+	uint32_t width = 0;
+	uint32_t height = 0;
 
 	int32_t panel_left = 0;    //!< 3D panel top-left in virtual-desktop pixels
 	int32_t panel_top = 0;     //!< ...
@@ -401,6 +407,15 @@ public:
 	//! positional path.
 	static bool
 	take_platform_args(std::vector<std::string> *args, DxrWindowBackend *out, std::string *error);
+
+	/*
+	 * Both argument scanners also accept `--frame-stats[=SECONDS]` (and take
+	 * it out of the vector): a periodic frame-time log from every window
+	 * created afterwards — avg / p95 / max frame time, fps, the platform and
+	 * the content buffer size — so a tester can report a comparable number
+	 * without GPU tooling. Also DXR_FRAME_STATS=SECONDS. Default period 5 s.
+	 * Measured pump to pump, i.e. the app's whole frame loop.
+	 */
 
 	/*!
 	 * Run the capability probe: try both connections (and, when asked, the
@@ -687,6 +702,15 @@ private:
 	uint32_t m_mods = 0;
 	//! Last CONTENT size reported through a Resize event.
 	uint32_t m_reported_w = 0, m_reported_h = 0;
+	// --frame-stats (see take_platform_args): period in seconds, 0 = off.
+	double m_stats_period = 0.0;
+	int64_t m_stats_last_ns = 0;
+	int64_t m_stats_window_start_ns = 0;
+	std::vector<float> m_stats_ms;
+	//! Pump-to-pump timing, logged every m_stats_period seconds.
+	void
+	frame_stats_tick();
+
 	//! set_transparent_background() state: the bar is hidden while true.
 	bool m_transparent_bg = false;
 	//! One-shot guard for the set_keep_above() Wayland no-op log.
@@ -960,6 +984,10 @@ private:
 	//! title bar (#1654) — the size of the bound surface, never the frame.
 	int32_t m_wl_config_w = 0;
 	int32_t m_wl_config_h = 0;
+	//! Windowed start: the requested DEVICE-pixel size, not yet converted by
+	//! the surface's real preferred scale (the first preferred_scale converts
+	//! it — unless the compositor has sized the window itself by then).
+	bool m_wl_size_from_desc = false;
 	//! Refresh of the output the surface went fullscreen on (0 = unknown).
 	uint32_t m_wl_refresh_mhz = 0;
 	/*!

@@ -50,6 +50,7 @@
 #include <unistd.h> // getpid() for _NET_WM_PID
 
 #include <chrono> // bounded event-pump budget in the X11 placement handshake
+#include <algorithm> // frame-stats percentile
 #include <cmath>  // outward rounding of the Wayland input region
 #include <cstdio>
 #include <cstdlib>
@@ -125,13 +126,23 @@ namespace {
  * --platform=x11|wayland overrides it either way; the verdict is logged on
  * every auto run.
  *
- * Why native first: measured in the field on an integrated GPU, native
- * Wayland ran at 35% GPU against 60% for the same app through XWayland, and
- * XWayland was reported "occasionally choppy". The reason this used to be
- * false — the mid-drag weave shimmer on Wayland — is fixed by the
- * compositor's drag lattice (runtime #1609/#1686, validated on a 3840x2160
- * panel; dxr_wl_placement is its client here). Set it back to false to make
- * X11 the default again.
+ * WHY native first — CORRECTNESS, not GPU cost. Native Wayland has no
+ * XWayland copy or resample, no global-scale quantisation of window placement
+ * (XWayland runs the whole X screen at one integer scale, so a window cannot
+ * reach every panel pixel), and an exact 1:1 buffer-to-panel mapping through
+ * wp_viewporter + wp_fractional_scale_v1. The mid-drag weave shimmer that
+ * used to argue for X11 is fixed by the compositor's drag lattice (runtime
+ * #1609/#1686; dxr_wl_placement is its client here).
+ *
+ * Do NOT "optimise" this on GPU cost. A field report measured native Wayland
+ * at 35% GPU against 60% through XWayland on an integrated GPU — UNCONFIRMED,
+ * and most likely down to that run's smaller window and missing title bar.
+ * A controlled A/B on an integrated GPU driving a 3840x2160 panel at 200%
+ * (same app, 10 s GPU-busy each) found no backend advantage: Wayland 63.9% /
+ * 63.7% (transparency-capable), X11 60.1% / 53.8% — the app's own rendering
+ * dominates, and even that run was not like-for-like (a 3200x1800 Wayland
+ * buffer against a 1920x1080 X11 one, which the size rule below now fixes).
+ * Use --frame-stats to compare like with like.
  */
 constexpr bool kAutoPrefersReadyWayland = true;
 
@@ -272,12 +283,31 @@ DxrLinuxWindow::probe(bool wayland_details)
 	return p;
 }
 
+//! --frame-stats request, set by the argument scanners; read by create().
+static double s_frame_stats_request = 0.0;
+
+//! `--frame-stats` / `--frame-stats=SECONDS`: true when @p a is that flag.
+static bool
+take_frame_stats_flag(const char *a)
+{
+	if (strcmp(a, "--frame-stats") == 0) {
+		s_frame_stats_request = 5.0;
+		return true;
+	}
+	if (strncmp(a, "--frame-stats=", 14) == 0) {
+		const double v = atof(a + 14);
+		s_frame_stats_request = v > 0.0 ? v : 5.0;
+		return true;
+	}
+	return false;
+}
+
 bool
 DxrLinuxWindow::parse_platform_args(int argc, char **argv, DxrWindowBackend *out, std::string *error)
 {
 	for (int i = 1; i < argc && argv != nullptr; i++) {
 		const char *a = argv[i];
-		if (a == nullptr) {
+		if (a == nullptr || take_frame_stats_flag(a)) {
 			continue;
 		}
 		const char *val = nullptr;
@@ -324,6 +354,9 @@ DxrLinuxWindow::take_platform_args(std::vector<std::string> *args, DxrWindowBack
 	rest.reserve(args->size());
 	for (size_t i = 0; i < args->size(); i++) {
 		const std::string &a = (*args)[i];
+		if (take_frame_stats_flag(a.c_str())) {
+			continue; // consumed
+		}
 		std::string val;
 		std::string flag;
 		if (a.rfind("--platform=", 0) == 0) {
@@ -1469,6 +1502,23 @@ DxrLinuxWindow::s_frac_preferred_scale(void *data, struct wp_fractional_scale_v1
 	DXRW_INFO("Wayland: compositor's preferred surface scale %.4f (wp_fractional_scale_v1)",
 	          (double)scale_120 / 120.0);
 	self->m_wl_pref_scale_120 = scale_120;
+	// Windowed start: keep the requested DEVICE-pixel size (like-for-like
+	// with X11) by re-deriving the logical size from the real scale. Only
+	// until the compositor sizes the window itself (a user resize).
+	if (self->m_wl_size_from_desc && !self->m_wl_fullscreen && !self->m_wl_fs_deferred &&
+	    self->m_desc.width > 0 && self->m_desc.height > 0) {
+		const int32_t lw = (int32_t)((double)self->m_desc.width * 120.0 / (double)scale_120 + 0.5);
+		const int32_t lh = (int32_t)((double)self->m_desc.height * 120.0 / (double)scale_120 + 0.5);
+		if (lw != self->m_wl_config_w || lh != self->m_wl_config_h) {
+			DXRW_INFO("Wayland: windowed size %dx%d -> %dx%d logical, so the buffer is the requested %ux%u "
+			          "device px",
+			          self->m_wl_config_w, self->m_wl_config_h, lw, lh, self->m_desc.width,
+			          self->m_desc.height);
+			self->m_wl_config_w = self->m_wl_windowed_w = lw;
+			self->m_wl_config_h = self->m_wl_windowed_h = lh;
+		}
+		self->m_wl_size_from_desc = false;
+	}
 	// A windowed surface's declared buffer is configure x this scale, so the
 	// mapping (and, in pump(), the runtime's declared geometry) follows it.
 	self->wl_apply_buffer_mapping();
@@ -1520,6 +1570,11 @@ DxrLinuxWindow::s_toplevel_configure(void *data, struct xdg_toplevel *t, int32_t
 		// everything declared to the runtime — is the content alone.
 		self->m_wl_chrome.frame_to_content(&w, &h);
 #endif
+		// A size the compositor chose (a user resize, maximise, tiling) ends
+		// the requested-size start; an echo of our own size does not.
+		if (w != self->m_wl_config_w || h != self->m_wl_config_h || fs || maximized) {
+			self->m_wl_size_from_desc = false;
+		}
 		self->m_wl_config_w = w;
 		self->m_wl_config_h = h;
 		if (!fs && !maximized) {
@@ -2670,8 +2725,30 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		// Not fullscreen (yet): the declared size is configure x scale.
 		m_wl_fullscreen_mode_w = 0;
 		m_wl_fullscreen_mode_h = 0;
-		m_wl_windowed_w = (int32_t)desc.width;
-		m_wl_windowed_h = (int32_t)desc.height;
+		// desc.width/height are DEVICE pixels, as on X11, so the same request
+		// gives the same buffer on both backends. The surface's preferred
+		// scale is only known once it is on an output, so start from the 3D
+		// panel's scale (where the app aims to be) and correct on the first
+		// wp_fractional_scale_v1.preferred_scale (s_frac_preferred_scale).
+		double est = 1.0;
+		for (const auto &out : m_wl_outputs) {
+			if (out.output == m_wl_panel_output && out.have_logical_size && out.logical_w > 0) {
+				est = (double)out.mode_w / (double)out.logical_w;
+			}
+		}
+		if (m_wl_frac_manager == nullptr) {
+			// No preferred scale will ever arrive, so the declared buffer is the
+			// configure size itself (wl_declared_size): logical = device.
+			est = 1.0;
+		}
+		m_wl_config_w = (int32_t)((double)desc.width / est + 0.5);
+		m_wl_config_h = (int32_t)((double)desc.height / est + 0.5);
+		m_wl_size_from_desc = m_wl_frac_manager != nullptr;
+		m_wl_windowed_w = m_wl_config_w;
+		m_wl_windowed_h = m_wl_config_h;
+		DXRW_INFO("Wayland: requested %ux%u device px -> %dx%d logical at an estimated scale %.4f "
+		          "(corrected by the surface's preferred scale once it is on an output)",
+		          desc.width, desc.height, m_wl_config_w, m_wl_config_h, est);
 		// Windowed is supported from extension spec v2: the size below is
 		// declared through XrWaylandSurfaceGeometryDXR, so the runtime sizes
 		// its swapchain to this surface instead of resizing it to the panel.
@@ -2905,6 +2982,13 @@ DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc)
 
 	m_events.clear();
 	m_reported_w = m_reported_h = 0;
+	m_stats_period = s_frame_stats_request;
+	if (const char *e = getenv("DXR_FRAME_STATS")) {
+		const double v = atof(e);
+		m_stats_period = v > 0.0 ? v : (e[0] == '1' ? 5.0 : m_stats_period);
+	}
+	m_stats_last_ns = m_stats_window_start_ns = 0;
+	m_stats_ms.clear();
 
 	if (backend == DxrWindowBackend::X11) {
 		if (!create_x11(desc)) {
@@ -2998,8 +3082,47 @@ dxr_mods_from_x11(unsigned int state)
 }
 
 void
+DxrLinuxWindow::frame_stats_tick()
+{
+	if (m_stats_period <= 0.0) {
+		return;
+	}
+	const int64_t now =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	        .count();
+	if (m_stats_last_ns == 0) {
+		m_stats_last_ns = m_stats_window_start_ns = now;
+		DXRW_INFO("frame stats: ON — every %.1f s (pump-to-pump frame time)", m_stats_period);
+		return;
+	}
+	m_stats_ms.push_back((float)((double)(now - m_stats_last_ns) / 1e6));
+	m_stats_last_ns = now;
+	const double window_s = (double)(now - m_stats_window_start_ns) / 1e9;
+	if (window_s < m_stats_period || m_stats_ms.empty()) {
+		return;
+	}
+	std::vector<float> v = m_stats_ms;
+	std::sort(v.begin(), v.end());
+	double sum = 0.0;
+	for (float x : v) {
+		sum += x;
+	}
+	const double avg = sum / (double)v.size();
+	const float p95 = v[(size_t)((double)(v.size() - 1) * 0.95)];
+	uint32_t cw = 0, ch = 0;
+	current_size(&cw, &ch);
+	DXRW_INFO("frame stats: %zu frames in %.1f s — avg %.2f ms (%.1f fps), p95 %.2f ms, max %.2f ms; %s, "
+	          "content %ux%u, %s",
+	          v.size(), window_s, avg, avg > 0.0 ? 1000.0 / avg : 0.0, p95, v.back(), backend_name(m_backend),
+	          cw, ch, is_fullscreen() ? "fullscreen" : "windowed");
+	m_stats_ms.clear();
+	m_stats_window_start_ns = now;
+}
+
+void
 DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_event, bool *running)
 {
+	frame_stats_tick();
 #ifdef DXR_APP_HAVE_WL_CHROME
 	// DXR_WL_TEST_LATTICE="dx,dy" (test hook, off by default): with nobody at
 	// the mouse, do what a title-bar press does — build and send the drag
@@ -3837,6 +3960,13 @@ DxrLinuxWindow::verify_connection(DxrWindowBackend requested)
 		snprintf(buf, sizeof(buf), "none");
 	}
 	m_connection_desc = buf;
+	{
+		uint32_t cw = 0, ch = 0;
+		current_size(&cw, &ch);
+		char sz[48];
+		snprintf(sz, sizeof(sz), "; content buffer %ux%u device px", cw, ch);
+		m_connection_desc += sz;
+	}
 	if (got != requested) {
 		DXRW_WARN("Window platform: asked for %s but the live connection is %s", backend_name(requested),
 		          m_connection_desc.c_str());

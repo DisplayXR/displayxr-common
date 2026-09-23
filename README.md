@@ -649,9 +649,12 @@ and every demo use it; never copy it into an app.
 2. `auto` **prefers native Wayland when the compositor is Wayland-ready**. The
    compositor must advertise `wp_fractional_scale_v1` + `wp_viewporter`, and
    the window-geometry GNOME Shell extension must own
-   `org.displayxr.WindowGeometry` on the session bus. On an integrated GPU,
-   native Wayland measured 35% GPU against 60% through XWayland, and XWayland
-   was reported occasionally choppy.
+   `org.displayxr.WindowGeometry` on the session bus. The case for
+   native Wayland is correctness, not GPU cost: no XWayland copy or resample,
+   no global-scale quantisation of window placement, and an exact 1:1 buffer
+   mapping. A field report of 35% vs 60% GPU is unconfirmed. A controlled A/B
+   on an integrated GPU showed no backend advantage; the app's own rendering
+   dominates.
 3. Otherwise **X11**: if `XOpenDisplay` succeeds (XWayland counts), it is used.
    This covers Ubuntu 22.04, whose GNOME 42 has no fractional-scale protocol,
    and sessions without the extension.
@@ -686,6 +689,7 @@ compile-time macros.
 | `set_title()`, `set_keep_above()` | |
 | `set_transparent_background()` | call from the transparency toggle (Ctrl+T): hides the header bar while the app draws transparent, on both backends, with the content rect unchanged (`desc.transparent_background` for a transparent start) |
 | `set_decorated()` / `is_decorated()` | run-time decorations (an app's B key): the WM frame on X11 (WM-owned, unsnapped move while on), the client title bar on Wayland; `desc.wayland_title_bar = false` starts a Wayland window without it |
+| `--frame-stats[=SECONDS]` / `DXR_FRAME_STATS` | periodic frame-time log (avg, p95, max, fps, platform, content buffer size), for like-for-like A/Bs without GPU tooling. `desc.width/height` are device pixels on both backends, so the same request gives the same buffer. |
 | `set_snap_provider()` + `DxrWeaveSnap` | the drag's lattice snap through `xrWeaveSnapWindowRectDXR` |
 
 On native Wayland, fullscreen onto the panel output is requested only once the
