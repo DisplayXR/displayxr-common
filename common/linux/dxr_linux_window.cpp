@@ -973,7 +973,8 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		if (m_x_content != 0) {
 			DXRW_INFO("X11: bound window is the content child 0x%lx (%ux%u) under a %u px header bar%s",
 			          m_x_content, desc.width, desc.height, m_x_bar.height(),
-			          want_fullscreen ? " (hidden while fullscreen)" : "");
+			          want_fullscreen ? " (hidden while fullscreen)"
+			                          : (m_transparent_bg ? " (hidden while the background is transparent)" : ""));
 		}
 		if (m_transparent) {
 			DXRW_INFO("X11: 32-bit ARGB visual — transparent-background capable (a compositing WM must be "
