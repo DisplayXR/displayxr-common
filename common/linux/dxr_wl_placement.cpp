@@ -16,6 +16,7 @@
 #define WLP_PATH "/org/displayxr/WindowPlacement"
 #define WLP_IFACE "org.displayxr.WindowPlacement1"
 #define WLP_NEEDED_MATCH "type='signal',interface='" WLP_IFACE "',member='DragLatticeNeeded'"
+#define WLP_DONE_MATCH "type='signal',interface='" WLP_IFACE "',member='DragLatticeDone'"
 //! GetPlacementCapabilities bit: the publisher can constrain a drag.
 #define WLP_CAP_DRAG_LATTICE 1u
 
@@ -46,6 +47,10 @@ DxrWlPlacement::connect()
 	m_conn = conn;
 
 	dbus_bus_add_match(conn, WLP_NEEDED_MATCH, &err);
+	if (dbus_error_is_set(&err)) {
+		dbus_error_free(&err);
+	}
+	dbus_bus_add_match(conn, WLP_DONE_MATCH, &err); // extension v7+; harmless before
 	if (dbus_error_is_set(&err)) {
 		dbus_error_free(&err);
 	}
@@ -171,10 +176,55 @@ DxrWlPlacement::poll_needed(int32_t *dx, int32_t *dy)
 				*dy = (int32_t)y;
 				got = true;
 			}
+		} else if (dbus_message_is_signal(msg, WLP_IFACE, "DragLatticeDone")) {
+			dbus_uint32_t pid = 0, moves = 0, corrected = 0, misses = 0, maxc = 0, tables = 0;
+			dbus_bool_t landed = FALSE;
+			if (dbus_message_get_args(msg, nullptr, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_UINT32, &moves,
+			                          DBUS_TYPE_UINT32, &corrected, DBUS_TYPE_UINT32, &misses,
+			                          DBUS_TYPE_UINT32, &maxc, DBUS_TYPE_UINT32, &tables, DBUS_TYPE_BOOLEAN,
+			                          &landed, DBUS_TYPE_INVALID) &&
+			    (int32_t)pid == (int32_t)getpid()) {
+				m_done.moves = moves;
+				m_done.corrected = corrected;
+				m_done.misses = misses;
+				m_done.max_correction = maxc;
+				m_done.tables = tables;
+				m_done.landed_on_table = landed == TRUE;
+				m_have_done = true;
+			}
 		}
 		dbus_message_unref(msg);
 	}
 	return got;
+}
+
+bool
+DxrWlPlacement::take_done(DragDone *out)
+{
+	if (!m_have_done) {
+		return false;
+	}
+	m_have_done = false;
+	*out = m_done;
+	return true;
+}
+
+void
+DxrWlPlacement::clear_drag_lattice()
+{
+	if (m_conn == nullptr) {
+		return;
+	}
+	DBusMessage *call = dbus_message_new_method_call(WLP_BUS, WLP_PATH, WLP_IFACE, "ClearDragLattice");
+	if (call == nullptr) {
+		return;
+	}
+	dbus_uint32_t pid = 0; // 0 = the caller
+	dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_INVALID);
+	dbus_message_set_no_reply(call, TRUE); // fire and forget: never wait on the shell mid-drag
+	dbus_connection_send((DBusConnection *)m_conn, call, nullptr);
+	dbus_connection_flush((DBusConnection *)m_conn);
+	dbus_message_unref(call);
 }
 
 void
@@ -236,6 +286,18 @@ DxrWlPlacement::test_move_to(int32_t x, int32_t y)
 	(void)x;
 	(void)y;
 	return false;
+}
+
+bool
+DxrWlPlacement::take_done(DragDone *out)
+{
+	(void)out;
+	return false;
+}
+
+void
+DxrWlPlacement::clear_drag_lattice()
+{
 }
 
 void
