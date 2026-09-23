@@ -650,7 +650,20 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		screenTop = desc.y;
 	}
 
-	m_x_display = XOpenDisplay(nullptr);
+	// Bounded retry: an X server with no other clients (Xvfb, a bare kiosk
+	// Xorg) RESETS when its last client disconnects and refuses connections
+	// while it regenerates — which is exactly what the capability probe's
+	// open/close just before this can trigger. A desktop session always has
+	// other clients and connects first time. Measured on CI: without this,
+	// a create right after a close failed intermittently.
+	for (int attempt = 0; attempt < 20 && m_x_display == nullptr; attempt++) {
+		m_x_display = XOpenDisplay(nullptr);
+		if (m_x_display == nullptr) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(25));
+		} else if (attempt > 0) {
+			DXRW_INFO("XOpenDisplay succeeded on attempt %d (the X server was resetting)", attempt + 1);
+		}
+	}
 	if (m_x_display == nullptr) {
 		DXRW_ERROR("XOpenDisplay failed — no X server answers");
 		return false;
