@@ -330,6 +330,14 @@ struct DxrLinuxWindowDesc
 	//! Keep above other windows from the start (X11 _NET_WM_STATE_ABOVE,
 	//! set before the map). Wayland has no such protocol; ignored there.
 	bool keep_above = false;
+
+	//! X11 only, windowed only: where the CONTENT's top-left goes, in
+	//! virtual-desktop px (a header bar sits above it). Default: the panel
+	//! origin (panel_left, panel_top). A panel-sized window ignores it — it
+	//! goes fullscreen on the panel. Wayland clients cannot place themselves.
+	bool has_position = false;
+	int32_t x = 0;
+	int32_t y = 0;
 };
 
 /*!
@@ -374,6 +382,13 @@ public:
 	 */
 	static bool
 	parse_platform_args(int argc, char **argv, DxrWindowBackend *out, std::string *error);
+
+	//! As parse_platform_args(), over an argument vector WITHOUT argv[0], and
+	//! REMOVING what it consumed — so an app's own parser (e.g. dxr::
+	//! ParseLaunchArgs) never sees `--platform x11` and takes "x11" for a
+	//! positional path.
+	static bool
+	take_platform_args(std::vector<std::string> *args, DxrWindowBackend *out, std::string *error);
 
 	/*!
 	 * Run the capability probe: try both connections (and, when asked, the
@@ -496,6 +511,12 @@ public:
 
 	bool
 	is_fullscreen() const;
+
+	//! A client-side header bar is currently shown (X11 x11_header_bar while
+	//! windowed; the Wayland chrome while windowed and client-side). It is
+	//! always kept clickable by set_input_region().
+	bool
+	header_bar_visible() const;
 
 	//! Live window size in BUFFER pixels — the space the runtime's swapchain
 	//! and every rect handed to it live in. X11 reads XGetWindowAttributes;

@@ -67,6 +67,15 @@ test_parse()
 	CHECK(parse({"--platform=wayland", "--platform=x11"}, &b, &err) && b == DxrWindowBackend::X11, "last wins");
 	CHECK(!parse({"--platform=gdi"}, &b, &err) && !err.empty(), "bad value rejected");
 	CHECK(!parse({"--platform"}, &b, &err), "missing value rejected");
+
+	// take_platform_args removes what it consumed, so an app parser never
+	// mistakes "x11" for a positional path.
+	std::vector<std::string> v = {"model.glb", "--platform", "x11", "--vh=0.3"};
+	b = DxrWindowBackend::Auto;
+	CHECK(DxrLinuxWindow::take_platform_args(&v, &b, &err) && b == DxrWindowBackend::X11, "take --platform x11");
+	CHECK(v.size() == 2 && v[0] == "model.glb" && v[1] == "--vh=0.3", "consumed args removed, others kept in order");
+	v = {"--platform=bogus"};
+	CHECK(!DxrLinuxWindow::take_platform_args(&v, &b, &err), "take rejects a bad value");
 }
 
 static void

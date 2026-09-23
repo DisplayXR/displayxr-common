@@ -310,6 +310,52 @@ DxrLinuxWindow::parse_platform_args(int argc, char **argv, DxrWindowBackend *out
 	return true;
 }
 
+bool
+DxrLinuxWindow::take_platform_args(std::vector<std::string> *args, DxrWindowBackend *out, std::string *error)
+{
+	if (args == nullptr) {
+		return true;
+	}
+	std::vector<std::string> rest;
+	rest.reserve(args->size());
+	for (size_t i = 0; i < args->size(); i++) {
+		const std::string &a = (*args)[i];
+		std::string val;
+		std::string flag;
+		if (a.rfind("--platform=", 0) == 0) {
+			flag = "--platform";
+			val = a.substr(11);
+		} else if (a.rfind("--backend=", 0) == 0) {
+			flag = "--backend";
+			val = a.substr(10);
+		} else if (a == "--platform") {
+			if (i + 1 >= args->size()) {
+				if (error != nullptr) {
+					*error = "--platform needs a value: x11, wayland or auto";
+				}
+				return false;
+			}
+			flag = "--platform";
+			val = (*args)[++i];
+		} else {
+			rest.push_back(a);
+			continue;
+		}
+		DxrWindowBackend b = DxrWindowBackend::Auto;
+		if (!parse_backend(val.c_str(), &b)) {
+			if (error != nullptr) {
+				*error = flag + " must be one of x11|wayland|auto (got \"" + val + "\")";
+			}
+			return false;
+		}
+		if (out != nullptr) {
+			*out = b;
+		}
+	}
+	args->swap(rest);
+	return true;
+}
+
 DxrWindowBackend
 DxrLinuxWindow::select(DxrWindowBackend requested, bool runtime_has_xlib, bool runtime_has_wayland, std::string *reason)
 {
@@ -574,8 +620,8 @@ x11_set_undecorated(Display *dpy, ::Window win)
 bool
 DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 {
-	const int32_t screenLeft = desc.panel_left;
-	const int32_t screenTop = desc.panel_top;
+	int32_t screenLeft = desc.panel_left;
+	int32_t screenTop = desc.panel_top;
 
 	// A window asking for exactly the panel's size IS the fullscreen demo
 	// mode, and must be genuinely fullscreen on the panel: exact 1:1, no
@@ -596,6 +642,13 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	const bool client_drag = !want_fullscreen && !m_x_wm_drag;
 	m_x_client_drag = client_drag;
 	m_x_fullscreen = want_fullscreen;
+
+	// An app-chosen windowed position (e.g. centred on the panel). The
+	// fullscreen shape keeps the panel origin: that IS the placement.
+	if (desc.has_position && !want_fullscreen) {
+		screenLeft = desc.x;
+		screenTop = desc.y;
+	}
 
 	m_x_display = XOpenDisplay(nullptr);
 	if (m_x_display == nullptr) {
@@ -3408,6 +3461,20 @@ DxrLinuxWindow::toggle_fullscreen()
 		}
 		wl_display_flush(m_wl_display);
 		return true;
+	}
+#endif
+	return false;
+}
+
+bool
+DxrLinuxWindow::header_bar_visible() const
+{
+	if (m_backend == DxrWindowBackend::X11) {
+		return x11_bar_visible();
+	}
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+	if (m_backend == DxrWindowBackend::Wayland) {
+		return !m_wl_fullscreen && m_wl_chrome.bar_logical() > 0;
 	}
 #endif
 	return false;
