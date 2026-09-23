@@ -30,3 +30,66 @@ jobs:
 
       - name: Test (display3d_selftest)
         run: ctest --test-dir build -C Release --output-on-failure
+
+  # displayxr::linux_window (common/linux/) — desktop Linux only. Builds the
+  # helper and its contract test on the oldest supported release (22.04) and
+  # the current LTS, then drives REAL windows: X11 under Xvfb, and native
+  # Wayland under a nested weston with TWO outputs, where fullscreen onto the
+  # panel output must be requested only after the surface is mapped and must
+  # land on the requested output. The X11-only variant proves the Wayland leg
+  # compiles out cleanly without libwayland.
+  linux-window:
+    name: linux_window (${{ matrix.os }}${{ matrix.wayland == 'off' && ', X11-only' || '' }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            wayland: 'on'
+          - os: ubuntu-24.04
+            wayland: 'on'
+          - os: ubuntu-24.04
+            wayland: 'off'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          pkgs="cmake ninja-build libx11-dev libxrandr-dev libxext-dev xvfb"
+          if [ "${{ matrix.wayland }}" = "on" ]; then
+            pkgs="$pkgs libwayland-dev libwayland-bin libxkbcommon-dev libdbus-1-dev weston"
+          fi
+          sudo apt-get install -y --no-install-recommends $pkgs
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --target displayxr_linux_window_test
+
+      - name: Test (probe + arg parsing, no display)
+        run: ./build/tests/displayxr_linux_window_test
+
+      - name: Test (X11 windows under Xvfb)
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" env DXR_LW_TEST_X11=1 ./build/tests/displayxr_linux_window_test
+
+      - name: Test (Wayland, two outputs, panel fullscreen ordering)
+        if: matrix.wayland == 'on'
+        run: |
+          set -eu
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          Xvfb :73 -screen 0 3840x1080x24 -nolisten tcp &
+          sleep 1
+          # weston's x11 backend: two 1920x1080 outputs side by side (screen0 at
+          # x=0, screen1 at x=1920), pixman renderer (no GPU on the runner).
+          DISPLAY=:73 weston --backend=x11-backend.so --use-pixman --output-count=2 \
+            --width=1920 --height=1080 --socket=wl-ci > "$RUNNER_TEMP/weston.log" 2>&1 &
+          for i in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/wl-ci" ] && break; sleep 0.2; done
+          if [ ! -S "$XDG_RUNTIME_DIR/wl-ci" ]; then cat "$RUNNER_TEMP/weston.log"; exit 1; fi
+          for spec in "1920,0,1920,1080:screen1" "0,0,1920,1080:screen0"; do
+            WAYLAND_DISPLAY=wl-ci DISPLAY= DXR_LW_TEST_WAYLAND=1 DXR_LW_TEST_WAYLAND_PANEL="$spec" \
+              ./build/tests/displayxr_linux_window_test
+          done

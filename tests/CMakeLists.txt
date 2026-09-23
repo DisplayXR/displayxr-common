@@ -48,3 +48,15 @@ set_target_properties(displayxr_csd_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_test(NAME displayxr_csd_test COMMAND displayxr_csd_test)
+
+# displayxr::linux_window contract test (desktop Linux only): the --platform
+# parser and the capability-probe selection everywhere; with
+# DXR_LW_TEST_X11=1 (CI: under xvfb-run) real X11 windows through create ->
+# events -> fullscreen -> destroy.
+if(TARGET displayxr::linux_window)
+    add_executable(displayxr_linux_window_test linux_window_test.cpp)
+    target_link_libraries(displayxr_linux_window_test PRIVATE displayxr::linux_window)
+    set_target_properties(displayxr_linux_window_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_test COMMAND displayxr_linux_window_test)
+endif()

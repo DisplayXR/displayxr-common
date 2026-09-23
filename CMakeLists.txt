@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.17.0
+    VERSION 2.20.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -201,11 +201,13 @@ else()
     FetchContent_Declare(
         displayxr_extensions_headers
         GIT_REPOSITORY https://github.com/DisplayXR/displayxr-extensions.git
-        # displayxr-extensions@main 2026-09-18 (runtime a0832ebf). Carries
-        # XR_DXR_display_info.h SPEC_VERSION 19 — i.e. the
-        # XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MULTIVIEW_DXR enumerator that
-        # common/dxr_view_config.h prefers over its own fallback (runtime #1486).
-        GIT_TAG 2e3e082380a28f51c2dc4e27a8f149881b0aad37
+        # displayxr-extensions@main 2026-09-21. Carries XR_DXR_display_info.h
+        # SPEC_VERSION 21 (so the XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MULTIVIEW_DXR
+        # enumerator common/dxr_view_config.h prefers, runtime #1486) and
+        # XR_DXR_wayland_surface_binding.h SPEC_VERSION 2 (the surface-geometry
+        # struct + transparentBackgroundEnabled that displayxr::linux_window
+        # chains; the previous pin had spec 1).
+        GIT_TAG 4c3fa8e816f0224844e12e59374f01f9d8d50f9a
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
@@ -378,6 +380,17 @@ elseif(APPLE)
         "-framework Foundation"
         "-framework QuartzCore"
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# displayxr::linux_window — THE desktop-Linux app window (X11 or native
+# Wayland in one binary, chosen by capability at startup). Desktop Linux only
+# (CMAKE_SYSTEM_NAME is "Android" on Android). Needs the OpenXR + DisplayXR
+# extension headers resolved above, hence inside this gate. See
+# common/linux/dxr_linux_window.{h,cmake}.
+# ---------------------------------------------------------------------------
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(common/linux/dxr_linux_window.cmake)
 endif()
 
 # Workspace-app manifest helper (displayxr_install_manifest()). Function

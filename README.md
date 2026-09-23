@@ -618,8 +618,8 @@ The window system stays with whoever owns the window:
 
 | window system | glue | alpha at the corners |
 |---|---|---|
-| X11 | the app: `XPutImage` into the top-level | real on a 32-bit ARGB visual under a compositing manager. On an opaque visual, call `setSurfaceHasAlpha(false)`: the bar is then painted opaque with square corners. |
-| native Wayland | runtime `test_apps/common/dxr_linux_window`: a `wl_subsurface` holding a `wl_shm` ARGB8888 buffer, with no opaque region | always real |
+| X11 | `displayxr::linux_window` (`common/linux/dxr_x11_chrome`): `XPutImage` into the top-level | real on a 32-bit ARGB visual under a compositing manager. On an opaque visual, call `setSurfaceHasAlpha(false)`: the bar is then painted opaque with square corners. |
+| native Wayland | `displayxr::linux_window` (`common/linux/dxr_wl_chrome`): a `wl_subsurface` holding a `wl_shm` ARGB8888 buffer, with no opaque region | always real |
 
 **The bar is outside the 3D viewport.** The window or surface bound to the
 runtime must be the content rect only. Then the canvas, the Kooima projection,
@@ -635,6 +635,82 @@ target_link_libraries(your_linux_app PRIVATE displayxr::csd)
 
 The title font comes from `DXR_CSD_FONT`, then fontconfig's bold sans-serif,
 then well-known paths. With no font, the bar is drawn without a title.
+
+## Linux app window (`displayxr::linux_window`, `common/linux/`)
+
+The one desktop-Linux window for DisplayXR apps: **X11 or native Wayland in a
+single binary, chosen by capability at startup**. The runtime's Linux test apps
+and every demo use it; never copy it into an app.
+
+**Selection** (`DxrLinuxWindow::select`):
+
+1. An explicit `--platform=x11|wayland|auto` (`parse_platform_args`; the old
+   `--backend=` spelling is accepted) always wins.
+2. `auto` **prefers native Wayland when the compositor is Wayland-ready**. The
+   compositor must advertise `wp_fractional_scale_v1` + `wp_viewporter`, and
+   the window-geometry GNOME Shell extension must own
+   `org.displayxr.WindowGeometry` on the session bus. The case for
+   native Wayland is correctness, not GPU cost: no XWayland copy or resample,
+   no global-scale quantisation of window placement, and an exact 1:1 buffer
+   mapping. A field report of 35% vs 60% GPU is unconfirmed. A controlled A/B
+   on an integrated GPU showed no backend advantage; the app's own rendering
+   dominates.
+3. Otherwise **X11**: if `XOpenDisplay` succeeds (XWayland counts), it is used.
+   This covers Ubuntu 22.04, whose GNOME 42 has no fractional-scale protocol,
+   and sessions without the extension.
+4. Native Wayland is also the fallback when no X server answers.
+
+The verdict is logged on every `auto` run. The policy is one constant in
+`dxr_linux_window.cpp` (`kAutoPrefersReadyWayland`).
+
+On native Wayland the helper hands the compositor a drag lattice at each press
+(`dxr_wl_placement`, needs `libdbus-1-dev` at build time). The compositor then
+keeps the weave phase still while it drags the window. This needs the
+extension version that serves the lattice.
+
+No environment variable (`WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, …) is read to
+decide: the only questions are "does the connection succeed" and "what does the
+server advertise". After `create()`, the live connection is re-verified and
+logged (`connection_description()`), so what a run got is never inferred from
+compile-time macros.
+
+**API** (see `dxr_linux_window.h`):
+
+| call | what |
+|---|---|
+| `select()` / `probe()` / `parse_platform_args()` | the rule above |
+| `create(backend, DxrLinuxWindowDesc)` | size, title, panel rect (INV-1.3: a panel-sized window goes fullscreen on the panel), `transparent`, `x11_header_bar`, `x11_drag_button` / `wayland_drag_button`, `keep_above` |
+| `session_binding_chain(next)` | the `XR_DXR_xlib_window_binding` or `XR_DXR_wayland_surface_binding` (+ `XrWaylandSurfaceGeometryDXR`) struct to chain into `xrCreateSession`, with `transparentBackgroundEnabled` |
+| `attach_session(instance, session)` | arms the per-frame Wayland geometry feed (`xrSetWaylandSurfaceGeometryDXR`) |
+| `pump_events(on_event, &running)` | keys (X11 keysyms at level 0 on both backends, + modifiers, auto-repeat marked), buttons, motion, scroll, focus, pointer-leave and content resizes, all in content buffer px |
+| `current_size()` | content size in buffer px (the swapchain's space) |
+| `toggle_fullscreen()` | F11 — also handled inside the pump |
+| `set_input_region()` / `clear_input_region()` | click-through: XShape `ShapeInput` on X11, `wl_surface.set_input_region` on Wayland; the header bar is always kept clickable |
+| `set_title()`, `set_keep_above()` | |
+| `set_transparent_background()` | call from the transparency toggle (Ctrl+T): hides the header bar while the app draws transparent, on both backends, with the content rect unchanged (`desc.transparent_background` for a transparent start) |
+| `set_decorated()` / `is_decorated()` | run-time decorations (an app's B key): the WM frame on X11 (WM-owned, unsnapped move while on), the client title bar on Wayland; `desc.wayland_title_bar = false` starts a Wayland window without it |
+| `--frame-stats[=SECONDS]` / `DXR_FRAME_STATS` | periodic frame-time log (avg, p95, max, fps, platform, content buffer size), for like-for-like A/Bs without GPU tooling. `desc.width/height` are device pixels on both backends, so the same request gives the same buffer. |
+| `set_snap_provider()` + `DxrWeaveSnap` | the drag's lattice snap through `xrWeaveSnapWindowRectDXR` |
+
+On native Wayland, fullscreen onto the panel output is requested only once the
+surface is **mapped** (its first `wl_surface.enter`). mutter discards the output
+of a `set_fullscreen` made before the first buffer and uses whatever monitor it
+considers current. The surface's actual output is logged and compared with the
+panel's (`MATCH` / `MISMATCH`).
+
+Capture exclusion needs nothing from the app: the display processor asks the
+window-geometry extension to exclude every window of the process. On X11 the
+helper sets `_NET_WM_PID` so the compositor can attribute the window to it.
+
+```cmake
+target_link_libraries(your_linux_app PRIVATE displayxr::linux_window)
+```
+
+Build dependencies: `libx11-dev` (required), plus the optional
+`libxrandr-dev`, `libxext-dev` (XShape), `libwayland-dev` + `libwayland-bin`
+(the Wayland leg; the protocol XML is vendored), `libxkbcommon-dev`, and
+`libdbus-1-dev` (the Wayland drag lattice). The Wayland-ready probe loads
+libdbus-1 at run time.
 
 ## Integration
 
