@@ -124,9 +124,11 @@ DxrWlPlacement::set_drag_lattice(bool extend,
 	dbus_message_append_args(call, DBUS_TYPE_BOOLEAN, &ext, DBUS_TYPE_INT32, &c, DBUS_TYPE_INT32, &a,
 	                         DBUS_TYPE_INT32, &b, DBUS_TYPE_INT32, &e, DBUS_TYPE_INT32, &f, DBUS_TYPE_ARRAY,
 	                         DBUS_TYPE_INT32, &px, n, DBUS_TYPE_ARRAY, DBUS_TYPE_INT32, &py, n, DBUS_TYPE_INVALID);
-	// Bounded and blocking, on purpose: this runs at the press, BEFORE
-	// xdg_toplevel.move starts the grab, and the grab must not begin before
-	// the compositor holds the table. It never runs during a grab.
+	// Bounded and blocking: it runs on the window thread when a worker's
+	// probe is collected — at the press that is already after
+	// xdg_toplevel.move went out (the grab never waits for the table; the
+	// publisher passes moves through until it lands, and the explicit start
+	// anchors a late table at the press position).
 	DBusMessage *reply = dbus_connection_send_with_reply_and_block((DBusConnection *)m_conn, call, 100, nullptr);
 	dbus_message_unref(call);
 	if (reply == nullptr) {
