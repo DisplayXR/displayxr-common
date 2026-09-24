@@ -75,7 +75,34 @@ public:
 	                 const std::vector<int32_t> &dx,
 	                 const std::vector<int32_t> &dy,
 	                 int32_t *start_x = nullptr,
-	                 int32_t *start_y = nullptr);
+	                 int32_t *start_y = nullptr,
+	                 const int32_t *explicit_start = nullptr);
+
+	/*!
+	 * The publisher takes an EXPLICIT drag start (frame top-left, logical)
+	 * with a table (extension version 8, SetDragLatticeAt). Needed at a
+	 * fractional scale, where a table is only valid for the start it was
+	 * built from (Mutter's rounding), and for a table built mid-drag while
+	 * the window keeps moving.
+	 */
+	bool
+	has_explicit_start() const
+	{
+		return m_explicit_start;
+	}
+
+	//! This process's window as the geometry service publishes it: frame and
+	//! buffer rects (logical), and its monitor's logical rect and scale.
+	struct OwnGeometry
+	{
+		int32_t frame[4] = {0, 0, 0, 0};
+		int32_t buffer[4] = {0, 0, 0, 0};
+		int32_t monitor[4] = {0, 0, 0, 0};
+		double monitor_scale = 0.0;
+	};
+	//! One bounded round trip (GetWindows). False when unavailable.
+	bool
+	get_own_geometry(OwnGeometry *out);
 
 	/*!
 	 * TEST ONLY: move this process's window so its frame is at (@p x, @p y)
@@ -126,6 +153,7 @@ public:
 private:
 	void *m_conn = nullptr; //!< DBusConnection, opaque so the header stays clean
 	bool m_lattice = false;
+	bool m_explicit_start = false;
 	bool m_have_done = false;
 	DragDone m_done;
 	const char *m_why = "not attempted";

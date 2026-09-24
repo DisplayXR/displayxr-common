@@ -1520,7 +1520,7 @@ DxrLinuxWindow::s_frac_preferred_scale(void *data, struct wp_fractional_scale_v1
 		self->m_wl_size_from_desc = false;
 	}
 #ifdef DXR_APP_HAVE_WL_CHROME
-	self->wl_lattice_on_scale_change(); // a drag reaching (or leaving) the 3D panel
+	self->wl_lattice_on_placement_change(); // a drag reaching (or leaving) the 3D panel
 #endif
 	// A windowed surface's declared buffer is configure x this scale, so the
 	// mapping (and, in pump(), the runtime's declared geometry) follows it.
@@ -1808,6 +1808,9 @@ DxrLinuxWindow::s_surface_enter(void *data, struct wl_surface *s, struct wl_outp
 	// Placement changed: re-judge a few pumps from now, once any leave that
 	// belongs to the same move has arrived too.
 	self->m_wl_output_report_in = 10;
+#ifdef DXR_APP_HAVE_WL_CHROME
+	self->wl_lattice_on_placement_change(); // a drag reaching the 3D panel
+#endif
 }
 
 void
@@ -1819,6 +1822,9 @@ DxrLinuxWindow::s_surface_leave(void *data, struct wl_surface *s, struct wl_outp
 		if (*it == o) {
 			self->m_wl_entered.erase(it);
 			self->m_wl_output_report_in = 10;
+#ifdef DXR_APP_HAVE_WL_CHROME
+			self->wl_lattice_on_placement_change(); // a drag leaving the 3D panel
+#endif
 			return;
 		}
 	}
@@ -2356,83 +2362,23 @@ constexpr int32_t kLatticeHalf = 192;
 //! nearest phase-correct point in each cell.
 constexpr int32_t kLatticeCell = 3;
 
-int32_t
-round_to_multiple(int32_t v, int32_t q)
-{
-	const int32_t half = q / 2;
-	return v >= 0 ? ((v + half) / q) * q : -(((-v + half) / q) * q);
-}
 } // namespace
 
 DxrLinuxWindow::LatticeProbe
-DxrLinuxWindow::wl_probe_lattice(SnapWindowOriginFn fn, void *ud, int32_t q, int32_t cx, int32_t cy)
+DxrLinuxWindow::wl_probe_lattice(SnapWindowOriginFn fn, void *ud, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy)
 {
-	LatticeProbe r;
 	const auto t0 = std::chrono::steady_clock::now();
-	std::vector<std::pair<int32_t, int32_t>> seen;
-
-	for (int32_t gy = cy - kLatticeHalf; gy <= cy + kLatticeHalf && !r.declined; gy += kLatticeCell) {
-		for (int32_t gx = cx - kLatticeHalf; gx <= cx + kLatticeHalf; gx += kLatticeCell) {
-			r.probed++;
-			// The snap is displacement-only: origin (0,0), target = the
-			// displacement in DEVICE px. Whatever it returns preserves the
-			// phase the window had at the drag start.
-			int32_t sx = gx * q, sy = gy * q;
-			if (!fn(ud, 0, 0, gx * q, gy * q, &sx, &sy)) {
-				r.declined = true; // no usable viewing distance: nothing to protect
-				break;
-			}
-			if (sx == gx * q && sy == gy * q) {
-				r.fixed++;
-			}
-			int32_t ax = 0, ay = 0;
-			bool found = false;
-			if (sx % q == 0 && sy % q == 0) {
-				ax = sx;
-				ay = sy;
-				found = true;
-			} else {
-				// The DP's answer is not a position the compositor can place.
-				// Search the reachable lattice around it for one the DP leaves
-				// unchanged — the same rule the runtime's drop-time snap and the
-				// X11 drag use: we never compute a phase, we only choose which
-				// positions to offer.
-				const int32_t bx = round_to_multiple(sx, q), by = round_to_multiple(sy, q);
-				for (int32_t ring = 0; ring <= 2 && !found; ring++) {
-					for (int32_t j = -ring; j <= ring && !found; j++) {
-						for (int32_t i = -ring; i <= ring && !found; i++) {
-							if (std::abs(i) != ring && std::abs(j) != ring) {
-								continue;
-							}
-							const int32_t px = bx + i * q, py = by + j * q;
-							int32_t rx = px, ry = py;
-							if (fn(ud, 0, 0, px, py, &rx, &ry) && rx == px && ry == py) {
-								ax = px;
-								ay = py;
-								found = true;
-							}
-						}
-					}
-				}
-			}
-			if (!found) {
-				continue; // this cell has no reachable phase-correct point
-			}
-			const std::pair<int32_t, int32_t> key{ax / q, ay / q};
-			bool dup = false;
-			for (auto it = seen.rbegin(); it != seen.rend() && it - seen.rbegin() < 8; ++it) {
-				if (*it == key) {
-					dup = true;
-					break;
-				}
-			}
-			if (!dup) {
-				seen.push_back(key);
-				r.dxs.push_back(key.first);
-				r.dys.push_back(key.second);
-			}
-		}
-	}
+	// The snap is displacement-only: origin (0,0), target = the DEVICE
+	// displacement the logical move produces. Whatever it returns preserves
+	// the phase the window had at the drag start.
+	auto snap = [fn, ud](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) { return fn(ud, 0, 0, tx, ty, ox, oy); };
+	const dxr_wl_lattice::Probe p = dxr_wl_lattice::probe(snap, map, cx, cy, kLatticeHalf, kLatticeCell);
+	LatticeProbe r;
+	r.dxs = p.dxs;
+	r.dys = p.dys;
+	r.probed = p.probed;
+	r.fixed = p.fixed;
+	r.declined = p.declined;
 	r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	return r;
 }
@@ -2440,7 +2386,6 @@ DxrLinuxWindow::wl_probe_lattice(SnapWindowOriginFn fn, void *ud, int32_t q, int
 bool
 DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const LatticeProbe &r, bool async)
 {
-	const int32_t q = (int32_t)m_wl_lattice_q;
 	m_wl_drag_stats.probe_ms += r.ms;
 	if (r.ms > m_wl_drag_stats.probe_ms_max) {
 		m_wl_drag_stats.probe_ms_max = r.ms;
@@ -2455,15 +2400,18 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 		// trivial (e.g. sim_display at its default period). A table would only
 		// coarsen the drag to the probe grid for no benefit.
 		if (!extend) {
-			DXRW_INFO("drag lattice: the display processor accepts every position (%zu probed in %.1f ms) "
-			          "— nothing to constrain",
-			          r.probed, r.ms);
+			DXRW_INFO("drag lattice: the display processor accepts every position (%zu probed in %.1f ms at "
+			          "scale %.4f) — nothing to constrain",
+			          r.probed, r.ms, m_wl_lattice_map.scale);
 		}
 		return false;
 	}
-	const bool ok = m_wl_placement.set_drag_lattice(extend, kLatticeCell, cx - kLatticeHalf, cy - kLatticeHalf,
-	                                                cx + kLatticeHalf, cy + kLatticeHalf, r.dxs, r.dys,
-	                                                &m_wl_lattice_start_x, &m_wl_lattice_start_y);
+	// The start the table was built for: explicit when the publisher takes
+	// one (v8) — a table at a fractional scale is only valid for its start.
+	const int32_t start[2] = {m_wl_lattice_start_frame_x, m_wl_lattice_start_frame_y};
+	const bool ok = m_wl_placement.set_drag_lattice(
+	    extend, kLatticeCell, cx - kLatticeHalf, cy - kLatticeHalf, cx + kLatticeHalf, cy + kLatticeHalf, r.dxs,
+	    r.dys, &m_wl_lattice_start_x, &m_wl_lattice_start_y, m_wl_lattice_explicit ? start : nullptr);
 	if (ok) {
 		if (extend) {
 			m_wl_drag_stats.extensions++;
@@ -2472,8 +2420,8 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 		}
 	}
 	DXRW_INFO("drag lattice: %s %zu phase-correct reachable displacement(s) around (%+d, %+d) logical — %zu "
-	          "probed in %.1f ms at quantum %d%s%s",
-	          extend ? "extended with" : "sent", r.dxs.size(), cx, cy, r.probed, r.ms, q,
+	          "probed in %.1f ms at scale %.4f%s%s",
+	          extend ? "extended with" : "sent", r.dxs.size(), cx, cy, r.probed, r.ms, m_wl_lattice_map.scale,
 	          async ? " (worker thread)" : "", ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
 	return ok;
 }
@@ -2481,7 +2429,7 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 bool
 DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
 {
-	const LatticeProbe r = wl_probe_lattice(m_snap_fn, m_snap_userdata, (int32_t)m_wl_lattice_q, cx, cy);
+	const LatticeProbe r = wl_probe_lattice(m_snap_fn, m_snap_userdata, m_wl_lattice_map, cx, cy);
 	return wl_submit_lattice(extend, cx, cy, r, false);
 }
 
@@ -2523,9 +2471,9 @@ DxrLinuxWindow::wl_request_lattice_async(bool extend, int32_t cx, int32_t cy)
 	m_wl_drag_stats.async_jobs++;
 	SnapWindowOriginFn fn = m_snap_fn;
 	void *ud = m_snap_userdata;
-	const int32_t q = (int32_t)m_wl_lattice_q;
-	m_wl_lattice_thread = std::thread([this, fn, ud, q, cx, cy] {
-		m_wl_lattice_job_result = wl_probe_lattice(fn, ud, q, cx, cy);
+	const dxr_wl_lattice::Map map = m_wl_lattice_map;
+	m_wl_lattice_thread = std::thread([this, fn, ud, map, cx, cy] {
+		m_wl_lattice_job_result = wl_probe_lattice(fn, ud, map, cx, cy);
 		m_wl_lattice_job_done.store(true);
 	});
 }
@@ -2541,7 +2489,7 @@ DxrLinuxWindow::wl_poll_lattice_job()
 	const bool extend = m_wl_lattice_job_extend;
 	// The world may have moved on while the worker probed: the drag ended,
 	// or the window left the panel. A late table would only confuse.
-	if (!m_wl_compositor_drag || (extend && !m_wl_lattice_active) || m_wl_lattice_q == 0) {
+	if (!m_wl_compositor_drag || (extend && !m_wl_lattice_active) || !m_wl_lattice_map_valid) {
 		m_wl_lattice_req_pending = false;
 		return;
 	}
@@ -2556,8 +2504,79 @@ DxrLinuxWindow::wl_poll_lattice_job()
 	}
 }
 
+bool
+DxrLinuxWindow::wl_window_on_panel() const
+{
+	if (m_wl_panel_output == nullptr) {
+		return true; // no panel identified (one monitor, or a test): anywhere counts
+	}
+	for (auto *o : m_wl_entered) {
+		if (o == m_wl_panel_output) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+DxrLinuxWindow::wl_lattice_prepare_map(bool quiet)
+{
+	m_wl_lattice_map_valid = false;
+	m_wl_lattice_explicit = false;
+	/*
+	 * ANY output scale (runtime#1609). The table is built over LOGICAL
+	 * displacements, each mapped to the device displacement Mutter actually
+	 * produces for it — see dxr_wl_lattice.h. That mapping depends on where
+	 * the drag starts (the rounding), so the start is read from the geometry
+	 * service and handed back with the table (SetDragLatticeAt, v8).
+	 */
+	DxrWlPlacement::OwnGeometry g;
+	if (m_wl_placement.has_explicit_start() && m_wl_placement.get_own_geometry(&g)) {
+		// The window's monitor must be the panel: the rounding is relative to
+		// the monitor the window is drawn on, and the lattice only matters on
+		// the panel.
+		if (m_wl_panel_output != nullptr) {
+			for (const auto &out : m_wl_outputs) {
+				if (out.output == m_wl_panel_output && out.have_logical_size &&
+				    (out.logical_x != g.monitor[0] || out.logical_y != g.monitor[1])) {
+					if (!quiet) {
+						DXRW_INFO("drag lattice: the window is on another monitor than the 3D panel — "
+						          "unconstrained until it reaches the panel");
+					}
+					return false;
+				}
+			}
+		}
+		m_wl_lattice_map.rel0_x = g.buffer[0] - g.monitor[0];
+		m_wl_lattice_map.rel0_y = g.buffer[1] - g.monitor[1];
+		m_wl_lattice_map.scale = g.monitor_scale;
+		m_wl_lattice_start_frame_x = g.frame[0];
+		m_wl_lattice_start_frame_y = g.frame[1];
+		m_wl_lattice_explicit = true;
+		m_wl_lattice_map_valid = true;
+		return true;
+	}
+	// An older publisher (v7 and before) takes no start, so only an INTEGER
+	// scale is safe: there the device displacement of a logical move does not
+	// depend on where the move starts.
+	const double scale = wl_surface_scale();
+	const double nearest = (double)(int32_t)(scale + 0.5);
+	if (scale < 1.0 || (scale > nearest ? scale - nearest : nearest - scale) > 0.01) {
+		if (!quiet) {
+			DXRW_INFO("drag lattice: output scale %.4f is fractional and the window-geometry extension is older "
+			          "than version 8 (no explicit drag start) — unconstrained. Update the extension to "
+			          "phase-snap at any scale.",
+			          scale);
+		}
+		return false;
+	}
+	m_wl_lattice_map = dxr_wl_lattice::Map{0, 0, nearest};
+	m_wl_lattice_map_valid = true;
+	return true;
+}
+
 void
-DxrLinuxWindow::wl_lattice_on_scale_change()
+DxrLinuxWindow::wl_lattice_on_placement_change()
 {
 	if (!m_wl_compositor_drag || !m_wl_placement.has_drag_lattice() || m_snap_fn == nullptr) {
 		return;
@@ -2572,30 +2591,29 @@ DxrLinuxWindow::wl_lattice_on_scale_change()
 	if (env != nullptr && env[0] == '0') {
 		return;
 	}
-	const double scale = wl_surface_scale();
-	const double nearest = (double)(int32_t)(scale + 0.5);
-	const bool integer = scale >= 1.0 && (scale > nearest ? scale - nearest : nearest - scale) <= 0.01;
-	if (integer && !m_wl_lattice_active && !m_wl_lattice_job_running) {
+	const bool on_panel = wl_window_on_panel();
+	if (on_panel && !m_wl_lattice_active && !m_wl_lattice_job_running) {
 		/*
-		 * The drag began on a fractionally-scaled output (no reachable
-		 * lattice there) and the window has just reached an integer-scale
-		 * one — the 3D panel. Hardware showed exactly this case stuttering on
-		 * the panel for the rest of the drag. Send a table now: a FRESH one,
-		 * whose origin is where the window is when it lands, which is as good
-		 * a phase reference as any (the weave follows the window; what must
-		 * not change is the phase DURING the drag).
+		 * The drag began off the panel (or before the window's monitor was
+		 * the panel) and the window has reached it. Hardware showed exactly
+		 * this case stuttering on the panel for the rest of the drag. Build a
+		 * FRESH table there, for the window's position NOW — which is also the
+		 * start handed back with it, so the window moving on while the worker
+		 * probes does not matter.
 		 */
-		m_wl_lattice_q = (uint32_t)nearest;
+		if (!wl_lattice_prepare_map(true)) {
+			return; // e.g. still mostly on the other monitor: retried from the pump
+		}
 		m_wl_drag_stats.entered_mid_drag = true;
-		DXRW_INFO("drag lattice: the window reached a scale-%.0f output mid-drag — deriving a table there",
-		          nearest);
+		DXRW_INFO("drag lattice: the window reached the 3D panel mid-drag (scale %.4f) — deriving a table there",
+		          m_wl_lattice_map.scale);
 		wl_request_lattice_async(false, 0, 0);
-	} else if (!integer && m_wl_lattice_active) {
+	} else if (!on_panel && m_wl_lattice_active) {
 		// Left the panel: its lattice means nothing on this output.
 		m_wl_placement.clear_drag_lattice();
 		m_wl_lattice_active = false;
 		m_wl_drag_stats.clears++;
-		DXRW_INFO("drag lattice: the window left for a scale-%.4f output mid-drag — table dropped", scale);
+		DXRW_INFO("drag lattice: the window left the 3D panel mid-drag — table dropped");
 	}
 }
 
@@ -2622,19 +2640,10 @@ DxrLinuxWindow::wl_drag_prepare()
 	if (m_wl_chrome.maximized()) {
 		return; // the compositor unmaximises under the pointer; nothing to snap
 	}
-	// Reachability: the compositor places windows at integer LOGICAL
-	// positions, so only every q-th device pixel exists — a lattice only when
-	// the output scale is an integer.
-	const double scale = wl_surface_scale();
-	const double nearest = (double)(int32_t)(scale + 0.5);
-	if (scale < 1.0 || (scale > nearest ? scale - nearest : nearest - scale) > 0.01) {
-		DXRW_INFO("drag lattice: output scale %.4f is not an integer, so the reachable positions are not a "
-		          "lattice here — unconstrained until the window reaches an integer-scale output",
-		          scale);
+	if (!wl_window_on_panel() || !wl_lattice_prepare_map(false)) {
 		m_wl_drag_stats.began_off_lattice = true;
-		return;
+		return; // the mid-drag path sends one if the window reaches the panel
 	}
-	m_wl_lattice_q = (uint32_t)nearest;
 	m_wl_lattice_active = wl_send_lattice(false, 0, 0);
 }
 #endif // DXR_APP_HAVE_WL_CHROME
@@ -3664,6 +3673,14 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		// dragging (unsnapped) meanwhile and never waits on us.
 		{
 			wl_poll_lattice_job();
+			// A drag that has not got a table yet: re-check every ~1/3 s
+			// whether the window has reached the panel (its monitor changes
+			// only once most of it is there, which no Wayland event reports).
+			if (m_wl_compositor_drag && !m_wl_lattice_active && !m_wl_lattice_job_running &&
+			    ++m_wl_lattice_retry_in >= 20) {
+				m_wl_lattice_retry_in = 0;
+				wl_lattice_on_placement_change();
+			}
 			int32_t ndx = 0, ndy = 0;
 			if (m_wl_placement.poll_needed(&ndx, &ndy) && m_wl_lattice_active) {
 				wl_request_lattice_async(true, ndx, ndy);

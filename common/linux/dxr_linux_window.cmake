@@ -151,6 +151,7 @@ target_sources(displayxr_linux_window PRIVATE
     "${_dxr_lw_dir}/dxr_wl_chrome.h"
     "${_dxr_lw_dir}/dxr_wl_placement.cpp"
     "${_dxr_lw_dir}/dxr_wl_placement.h"
+    "${_dxr_lw_dir}/dxr_wl_lattice.h"
 )
 
 # libdbus-1 (optional, libdbus-1-dev): the client of the compositor's drag
