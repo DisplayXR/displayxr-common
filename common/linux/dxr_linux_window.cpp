@@ -2416,13 +2416,21 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 		if (extend) {
 			m_wl_drag_stats.extensions++;
 		} else {
+			if (m_wl_drag_stats.tables == 0) {
+				m_wl_drag_stats.press_to_table_ms = std::chrono::duration<double, std::milli>(
+				                                        std::chrono::steady_clock::now() - m_wl_drag_began)
+				                                        .count();
+			}
 			m_wl_drag_stats.tables++;
 		}
 	}
 	DXRW_INFO("drag lattice: %s %zu phase-correct reachable displacement(s) around (%+d, %+d) logical — %zu "
-	          "probed in %.1f ms at scale %.4f%s%s",
+	          "probed in %.1f ms at scale %.4f%s, start %s (%d, %d)%s",
 	          extend ? "extended with" : "sent", r.dxs.size(), cx, cy, r.probed, r.ms, m_wl_lattice_map.scale,
-	          async ? " (worker thread)" : "", ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
+	          async ? " (worker thread)" : "", m_wl_lattice_explicit ? "explicit" : "publisher-recorded",
+	          m_wl_lattice_explicit ? start[0] : m_wl_lattice_start_x,
+	          m_wl_lattice_explicit ? start[1] : m_wl_lattice_start_y,
+	          ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
 	return ok;
 }
 
@@ -2466,6 +2474,7 @@ DxrLinuxWindow::wl_request_lattice_async(bool extend, int32_t cx, int32_t cy)
 	m_wl_lattice_job_running = true;
 	m_wl_lattice_job_done.store(false);
 	m_wl_lattice_job_extend = extend;
+	m_wl_lattice_job_gen = m_wl_drag_gen;
 	m_wl_lattice_job_cx = cx;
 	m_wl_lattice_job_cy = cy;
 	m_wl_drag_stats.async_jobs++;
@@ -2487,6 +2496,15 @@ DxrLinuxWindow::wl_poll_lattice_job()
 	m_wl_lattice_thread.join();
 	m_wl_lattice_job_running = false;
 	const bool extend = m_wl_lattice_job_extend;
+	// A job probed for an earlier drag (a new press came while it ran): its
+	// map and start are not this drag's. Start whatever this drag queued.
+	if (m_wl_lattice_job_gen != m_wl_drag_gen) {
+		if (m_wl_lattice_req_pending) {
+			m_wl_lattice_req_pending = false;
+			wl_request_lattice_async(m_wl_lattice_req_extend, m_wl_lattice_req_cx, m_wl_lattice_req_cy);
+		}
+		return;
+	}
 	// The world may have moved on while the worker probed: the drag ended,
 	// or the window left the panel. A late table would only confuse.
 	if (!m_wl_compositor_drag || (extend && !m_wl_lattice_active) || !m_wl_lattice_map_valid) {
@@ -2618,14 +2636,31 @@ DxrLinuxWindow::wl_lattice_on_placement_change()
 }
 
 void
-DxrLinuxWindow::wl_drag_prepare()
+DxrLinuxWindow::wl_drag_prepare(bool sync)
 {
+	const auto t0 = std::chrono::steady_clock::now();
 	m_wl_lattice_active = false;
 	// Every caller starts a compositor move right after this, table or not:
 	// a drag that begins off the panel may still need one when it gets there.
 	m_wl_compositor_drag = true;
-	m_wl_drag_began = std::chrono::steady_clock::now();
+	m_wl_drag_began = t0;
 	m_wl_drag_stats = LatticeDragStats{};
+	// A new drag: whatever a worker is still probing (or has queued) belongs
+	// to the last one.
+	m_wl_drag_gen++;
+	m_wl_lattice_req_pending = false;
+	// What this hook costs is the press->move latency: the caller's
+	// xdg_toplevel.move follows it directly.
+	struct MoveClock
+	{
+		LatticeDragStats &st;
+		std::chrono::steady_clock::time_point t0;
+		~MoveClock()
+		{
+			st.press_to_move_ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		}
+	} move_clock{m_wl_drag_stats, t0};
 	// On by default whenever the geometry extension offers it (version 6+),
 	// since hardware confirmed it (stable 3D while dragging, native drag feel).
 	// DXR_WL_DRAG_LATTICE=0 turns it off; the compositor drag without a table
@@ -2644,7 +2679,25 @@ DxrLinuxWindow::wl_drag_prepare()
 		m_wl_drag_stats.began_off_lattice = true;
 		return; // the mid-drag path sends one if the window reaches the panel
 	}
-	m_wl_lattice_active = wl_send_lattice(false, 0, 0);
+	if (sync) {
+		m_wl_lattice_active = wl_send_lattice(false, 0, 0);
+		return;
+	}
+	/*
+	 * The first table comes from the worker, like every later piece. The
+	 * start was read above, at the press and before the grab can move the
+	 * window, and goes out with the table (v8), so a table that lands after
+	 * the drag has begun is still built for — and anchored at — the press
+	 * position. Until it lands the publisher corrects nothing: a move with no
+	 * table passes through unconstrained.
+	 */
+	wl_request_lattice_async(false, 0, 0);
+	DXRW_INFO("drag: press — compositor move goes out now (%.2f ms after the press); first table on the "
+	          "worker (scale %.4f, start %s (%d, %d))",
+	          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+	          m_wl_lattice_map.scale,
+	          m_wl_lattice_explicit ? "explicit" : "recorded by the publisher when the table lands",
+	          m_wl_lattice_start_frame_x, m_wl_lattice_start_frame_y);
 }
 #endif // DXR_APP_HAVE_WL_CHROME
 
@@ -3308,14 +3361,55 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 			const long v = e != nullptr ? strtol(e, nullptr, 10) : 150;
 			return v > 0 ? v : 150;
 		}();
-		if (tl.armed && !m_wl_test_lattice_done && ++m_wl_test_lattice_pumps == (uint64_t)at) {
+		// DXR_WL_TEST_LATTICE_PRESS=1: run the PRESS path instead — the table
+		// is built on the worker exactly as for a real press, the window is
+		// moved (unconstrained) before it lands, and the move that follows is
+		// judged against the table's explicit start: the press position.
+		static const bool press = [] {
+			const char *e = getenv("DXR_WL_TEST_LATTICE_PRESS");
+			return e != nullptr && e[0] == '1';
+		}();
+		if (tl.armed && press && !m_wl_test_lattice_done && ++m_wl_test_lattice_pumps == (uint64_t)at) {
+			m_wl_test_lattice_done = true;
+			// Wait (test only) until the compositor has placed the window.
+			DxrWlPlacement::OwnGeometry g;
+			for (int tries = 0; tries < 40; tries++) {
+				if (m_wl_placement.get_own_geometry(&g) && (g.frame[0] != 0 || g.frame[1] != 0)) {
+					break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+			wl_drag_prepare(); // what the press runs, right before xdg_toplevel.move
+			const bool pre = m_wl_placement.test_move_to(g.frame[0] + 5, g.frame[1] + 3);
+			DXRW_INFO("DXR_WL_TEST_LATTICE_PRESS: press at (%d, %d); moved to (%d, %d) before any table — %s",
+			          g.frame[0], g.frame[1], g.frame[0] + 5, g.frame[1] + 3, pre ? "accepted" : "REFUSED");
+			for (int i = 0; i < 4000 && m_wl_lattice_job_running; i++) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				wl_poll_lattice_job();
+			}
+			if (m_wl_lattice_active) {
+				const int32_t tx = m_wl_lattice_start_x + tl.dx, ty = m_wl_lattice_start_y + tl.dy;
+				const bool moved = m_wl_placement.test_move_to(tx, ty);
+				DXRW_INFO("DXR_WL_TEST_LATTICE_PRESS: press->move %.2f ms, press->first table %.1f ms; table start "
+				          "(%d, %d); asked the compositor for (%d, %d) = start %+d,%+d — %s. Read the landed "
+				          "frame from the geometry service.",
+				          m_wl_drag_stats.press_to_move_ms, m_wl_drag_stats.press_to_table_ms,
+				          m_wl_lattice_start_x, m_wl_lattice_start_y, tx, ty, tl.dx, tl.dy,
+				          moved ? "accepted" : "REFUSED");
+			} else {
+				DXRW_WARN("DXR_WL_TEST_LATTICE_PRESS: no table landed (press->move %.2f ms) — see the 'drag "
+				          "lattice' lines above",
+				          m_wl_drag_stats.press_to_move_ms);
+			}
+		}
+		if (tl.armed && !press && !m_wl_test_lattice_done && ++m_wl_test_lattice_pumps == (uint64_t)at) {
 			m_wl_test_lattice_done = true;
 			// The compositor places a new window asynchronously; until it has,
 			// its frame reads (0,0) and a start recorded then is fiction (and
 			// the placement then overrides any move). Re-send until the start
 			// is real, bounded. Blocking is acceptable in a test hook only.
 			for (int tries = 0; tries < 40; tries++) {
-				wl_drag_prepare();
+				wl_drag_prepare(true);
 				if (!m_wl_lattice_active || m_wl_lattice_start_x != 0 || m_wl_lattice_start_y != 0) {
 					break;
 				}
@@ -3690,11 +3784,13 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				// One line per drag that had a table (#1609 follow-up): what
 				// the app spent, and what the compositor saw.
 				const LatticeDragStats &a = m_wl_drag_stats;
-				DXRW_INFO("drag lattice summary: %u table(s) + %u extension(s)%s%s, %.0f ms probing (max %.0f "
-				          "ms, %u on the worker); compositor moves %u, corrected %u (%.0f%%), OFF-table %u "
-				          "(%.0f%%), largest correction %u logical px; drop %s the table",
+				DXRW_INFO("drag lattice summary: %u table(s) + %u extension(s)%s%s, press->move %.2f ms, "
+				          "press->first table %.0f ms, %.0f ms probing (max %.0f ms, %u on the worker); "
+				          "compositor moves %u, corrected %u (%.0f%%), OFF-table %u (%.0f%%), largest "
+				          "correction %u logical px; drop %s the table",
 				          a.tables, a.extensions, a.entered_mid_drag ? ", first sent on reaching the panel" : "",
-				          a.clears ? ", dropped on leaving it" : "", a.probe_ms, a.probe_ms_max, a.async_jobs,
+				          a.clears ? ", dropped on leaving it" : "", a.press_to_move_ms, a.press_to_table_ms,
+				          a.probe_ms, a.probe_ms_max, a.async_jobs,
 				          d.moves, d.corrected, d.moves ? 100.0 * d.corrected / d.moves : 0.0, d.misses,
 				          d.moves ? 100.0 * d.misses / d.moves : 0.0, d.max_correction,
 				          d.landed_on_table ? "ON" : "OFF");

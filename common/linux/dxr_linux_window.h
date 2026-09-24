@@ -934,9 +934,17 @@ private:
 	uint64_t m_wl_test_lattice_pumps = 0;
 	bool m_wl_test_lattice_done = false;
 
-	//! Chrome hook: derive + send the table, just before the grab starts.
+	/*!
+	 * Chrome hook, run on the press just before xdg_toplevel.move: read the
+	 * drag start and hand the table to the worker (runtime#1609 follow-up).
+	 * Never probes on this thread — a probe is ~16k snap queries, seconds for
+	 * an IPC client, and a move sent after it carries a stale serial that
+	 * mutter ignores. The compositor drags unconstrained until the table
+	 * lands; its explicit start (v8) keeps a late table correctly anchored.
+	 * @p sync probes on this thread instead (DXR_WL_TEST_LATTICE only).
+	 */
 	void
-	wl_drag_prepare();
+	wl_drag_prepare(bool sync = false);
 	/*!
 	 * Probe the display processor over a grid of displacements centred on
 	 * (@p cx, @p cy) LOGICAL px and send the phase-correct, reachable ones.
@@ -996,6 +1004,9 @@ private:
 	std::thread m_wl_lattice_thread;
 	std::atomic<bool> m_wl_lattice_job_done{false};
 	bool m_wl_lattice_job_running = false;
+	//! Bumped per press; a job probed for an earlier drag is discarded.
+	uint32_t m_wl_drag_gen = 0;
+	uint32_t m_wl_lattice_job_gen = 0;
 	bool m_wl_lattice_job_extend = false;
 	int32_t m_wl_lattice_job_cx = 0, m_wl_lattice_job_cy = 0;
 	LatticeProbe m_wl_lattice_job_result;
@@ -1009,6 +1020,8 @@ private:
 		double probe_ms = 0.0, probe_ms_max = 0.0;
 		bool began_off_lattice = false; //!< the press was on a non-integer-scale output
 		bool entered_mid_drag = false;  //!< a table was sent when the window reached the panel
+		double press_to_move_ms = -1.0;  //!< press to the move request (the prepare hook's cost)
+		double press_to_table_ms = -1.0; //!< press to the first table the compositor accepted
 	} m_wl_drag_stats;
 	/*! @} */
 #endif
