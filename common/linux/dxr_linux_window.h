@@ -142,6 +142,7 @@
 #include <bitset>
 #include <chrono>
 #include <cstddef>
+#include <climits>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -673,6 +674,69 @@ public:
 	void
 	set_snap_provider(SnapWindowOriginFn fn, void *userdata);
 
+	/*!
+	 * One grid point's answer from a SnapWindowGridFn: the snapped origin
+	 * MINUS the proposed one, in the same pixels as the targets. (0, 0) = the
+	 * target is accepted as is. Both fields kSnapGridNoAnswer = no answer for
+	 * this point (e.g. the transport cannot carry the displacement); the
+	 * helper then asks that point singly.
+	 */
+	struct SnapGridPoint
+	{
+		int32_t dx;
+		int32_t dy;
+	};
+	static constexpr int32_t kSnapGridNoAnswer = INT32_MIN;
+
+	/*!
+	 * OPTIONAL bulk snap provider (runtime#1723): the per-point snap evaluated
+	 * over a whole regular grid of targets in one call. Same frame, origin and
+	 * semantics as SnapWindowOriginFn, point by point — only faster when each
+	 * call is a round trip (an IPC client: one call per grid instead of one
+	 * per point). An app backs it with xrWeaveSnapWindowGridDXR
+	 * (XR_DXR_weave spec 11; see DxrWeaveSnap::grid_callback).
+	 *
+	 * The helper owns the grid's shape: it asks for exactly the targets its
+	 * Wayland drag-lattice probe needs (dxr_wl_lattice::plan_grids), so the
+	 * provider never has to guess it.
+	 *
+	 * Point (i, j), i < @p count_x, j < @p count_y, proposes the origin
+	 * (first_x + i * step_x, first_y + j * step_y) and is snapped from
+	 * (origin_x, origin_y); its answer goes to
+	 * @p out_points[j * count_x + i] (row-major). Steps are >= 1; each count
+	 * is <= 1024.
+	 *
+	 * @param out_declined set true when the display processor produced no
+	 *        snap at all (the per-point provider's `false`: no snap support,
+	 *        no usable viewing distance yet). The answers are then ignored.
+	 * @return false when the grid cannot be evaluated (no entry point, the
+	 *         call failed). The helper then uses the per-point provider.
+	 *
+	 * May be called from a worker thread, like the per-point provider.
+	 */
+	typedef bool (*SnapWindowGridFn)(void *userdata,
+	                                 int32_t origin_x,
+	                                 int32_t origin_y,
+	                                 int32_t first_x,
+	                                 int32_t first_y,
+	                                 int32_t step_x,
+	                                 int32_t step_y,
+	                                 uint32_t count_x,
+	                                 uint32_t count_y,
+	                                 SnapGridPoint *out_points,
+	                                 bool *out_declined);
+
+	/*!
+	 * Install (or clear, with @p fn nullptr) the bulk snap provider. Independent
+	 * of set_snap_provider(): with both installed the Wayland drag lattice is
+	 * built from grid calls and the per-point provider answers everything
+	 * else (the X11 drag, the rare point a grid did not answer, and the
+	 * whole table when a grid call fails or reports a decline). With only
+	 * this one installed, single points are asked as 1 x 1 grids.
+	 */
+	void
+	set_snap_grid_provider(SnapWindowGridFn fn, void *userdata);
+
 	//! Name of the binding extension this backend needs enabled at
 	//! xrCreateInstance, or nullptr when no window exists.
 	const char *
@@ -773,6 +837,22 @@ private:
 	// --- Snap provider (#1588) ---------------------------------------------
 	SnapWindowOriginFn m_snap_fn = nullptr;
 	void *m_snap_userdata = nullptr;
+	SnapWindowGridFn m_snap_grid_fn = nullptr;
+	void *m_snap_grid_userdata = nullptr;
+	//! Either provider is installed.
+	bool
+	has_snap_provider() const
+	{
+		return m_snap_fn != nullptr || m_snap_grid_fn != nullptr;
+	}
+	//! One point through the per-point provider, else a 1 x 1 grid.
+	bool
+	snap_one(int32_t origin_x,
+	         int32_t origin_y,
+	         int32_t target_x,
+	         int32_t target_y,
+	         int32_t *out_x,
+	         int32_t *out_y) const;
 	//! One-shot: the first move of the first drag says whether anything snaps.
 	bool m_snap_reported = false;
 
@@ -962,9 +1042,30 @@ private:
 		size_t probed = 0, fixed = 0;
 		bool declined = false;
 		double ms = 0.0;
+		bool grid_used = false;              //!< answered from grid calls
+		uint32_t grid_calls = 0;             //!< grid provider calls made
+		uint64_t grid_points = 0;            //!< points they returned
+		uint32_t grid_misses = 0;            //!< queries asked singly
+		const char *grid_fallback = nullptr; //!< why it went per point, if it did
 	};
+	//! The providers a probe runs against (copied: the worker must not read
+	//! the members while the main thread may reinstall them).
+	struct SnapProviders
+	{
+		SnapWindowOriginFn fn = nullptr;
+		void *ud = nullptr;
+		SnapWindowGridFn grid_fn = nullptr;
+		void *grid_ud = nullptr;
+	};
+	SnapProviders
+	snap_providers() const
+	{
+		return SnapProviders{m_snap_fn, m_snap_userdata, m_snap_grid_fn, m_snap_grid_userdata};
+	}
+	//! Through the grid provider when installed (a few calls per table), else
+	//! per point; the table is the same either way (dxr_wl_lattice.h).
 	static LatticeProbe
-	wl_probe_lattice(SnapWindowOriginFn fn, void *ud, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy);
+	wl_probe_lattice(const SnapProviders &sp, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy);
 	//! Read the drag start and monitor scale for a table. False when the
 	//! window is not on the panel, or the scale is fractional and the
 	//! publisher cannot take an explicit start.

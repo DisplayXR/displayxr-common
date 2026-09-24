@@ -67,7 +67,10 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target displayxr_linux_window_test
+        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_lattice_test
+
+      - name: Test (drag lattice table + grid snap path, no display)
+        run: ./build/tests/displayxr_linux_window_lattice_test
 
       - name: Test (probe + arg parsing, no display)
         run: ./build/tests/displayxr_linux_window_test

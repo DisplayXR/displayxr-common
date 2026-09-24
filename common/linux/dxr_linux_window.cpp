@@ -1049,9 +1049,9 @@ DxrLinuxWindow::snap_origin(int origin_x, int origin_y, int target_x, int target
 	int32_t sx = (int32_t)target_x;
 	int32_t sy = (int32_t)target_y;
 	bool snapped = false;
-	if (m_snap_fn != nullptr) {
-		snapped = m_snap_fn(m_snap_userdata, (int32_t)origin_x, (int32_t)origin_y, (int32_t)target_x,
-		                    (int32_t)target_y, &sx, &sy);
+	if (has_snap_provider()) {
+		snapped = snap_one((int32_t)origin_x, (int32_t)origin_y, (int32_t)target_x, (int32_t)target_y, &sx,
+		                   &sy);
 	}
 	if (!snapped) {
 		sx = (int32_t)target_x;
@@ -1060,8 +1060,9 @@ DxrLinuxWindow::snap_origin(int origin_x, int origin_y, int target_x, int target
 	if (!m_snap_reported) {
 		m_snap_reported = true;
                 DXRW_INFO("drag: snap provider %s — %s",
-                          m_snap_fn != nullptr ? "installed"
-                                               : "ABSENT (identity)",
+                          m_snap_fn != nullptr        ? "installed"
+                          : m_snap_grid_fn != nullptr ? "installed (grid only)"
+                                                      : "ABSENT (identity)",
                           snapped ? "the display processor is OFFERING snapped "
                                     "origins — whether the window "
                                     "actually lands on them is checked per "
@@ -2365,20 +2366,57 @@ constexpr int32_t kLatticeCell = 3;
 } // namespace
 
 DxrLinuxWindow::LatticeProbe
-DxrLinuxWindow::wl_probe_lattice(SnapWindowOriginFn fn, void *ud, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy)
+DxrLinuxWindow::wl_probe_lattice(const SnapProviders &sp, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy)
 {
 	const auto t0 = std::chrono::steady_clock::now();
 	// The snap is displacement-only: origin (0,0), target = the DEVICE
 	// displacement the logical move produces. Whatever it returns preserves
 	// the phase the window had at the drag start.
-	auto snap = [fn, ud](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) { return fn(ud, 0, 0, tx, ty, ox, oy); };
-	const dxr_wl_lattice::Probe p = dxr_wl_lattice::probe(snap, map, cx, cy, kLatticeHalf, kLatticeCell);
+	dxr_wl_lattice::PointSnapFn point;
+	if (sp.fn != nullptr) {
+		point = [&sp](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) {
+			return sp.fn(sp.ud, 0, 0, tx, ty, ox, oy);
+		};
+	}
+	dxr_wl_lattice::Probe p;
+	if (sp.grid_fn != nullptr) {
+		// The bulk path (runtime#1723): the helper names the grids its probe
+		// needs (dxr_wl_lattice::plan_grids) — one call at an integer scale,
+		// one per residue class at a fractional one — and runs the same probe
+		// over their answers, so the table is the per-point table.
+		std::vector<SnapGridPoint> tmp;
+		auto grid = [&sp, &tmp](const dxr_wl_lattice::GridSpec &g, dxr_wl_lattice::GridPoint *out,
+		                        bool *declined) {
+			const size_t n = (size_t)g.count_x * g.count_y;
+			tmp.assign(n, SnapGridPoint{0, 0});
+			*declined = false;
+			if (!sp.grid_fn(sp.grid_ud, 0, 0, g.first_x, g.first_y, g.step_x, g.step_y, g.count_x, g.count_y,
+			                tmp.data(), declined)) {
+				return false;
+			}
+			for (size_t k = 0; k < n; k++) {
+				out[k].dx = tmp[k].dx == kSnapGridNoAnswer ? dxr_wl_lattice::kGridNoAnswer : tmp[k].dx;
+				out[k].dy = tmp[k].dy == kSnapGridNoAnswer ? dxr_wl_lattice::kGridNoAnswer : tmp[k].dy;
+			}
+			return true;
+		};
+		p = dxr_wl_lattice::probe_via_grid(grid, point, map, cx, cy, kLatticeHalf, kLatticeCell);
+	} else if (point) {
+		p = dxr_wl_lattice::probe(point, map, cx, cy, kLatticeHalf, kLatticeCell);
+	} else {
+		p.declined = true; // no provider: callers check first; nothing to ask
+	}
 	LatticeProbe r;
 	r.dxs = p.dxs;
 	r.dys = p.dys;
 	r.probed = p.probed;
 	r.fixed = p.fixed;
 	r.declined = p.declined;
+	r.grid_used = p.grid_used;
+	r.grid_calls = p.grid_calls;
+	r.grid_points = p.grid_points;
+	r.grid_misses = p.grid_misses;
+	r.grid_fallback = p.grid_fallback;
 	r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	return r;
 }
@@ -2389,6 +2427,10 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 	m_wl_drag_stats.probe_ms += r.ms;
 	if (r.ms > m_wl_drag_stats.probe_ms_max) {
 		m_wl_drag_stats.probe_ms_max = r.ms;
+	}
+	if (r.grid_fallback != nullptr) {
+		DXRW_INFO("drag lattice: grid snap not used for this table (%s after %u call(s)) — probed per point",
+		          r.grid_fallback, r.grid_calls);
 	}
 	if (r.declined) {
 		DXRW_INFO("drag lattice: the display processor declined (no usable viewing distance) — the "
@@ -2424,10 +2466,15 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 			m_wl_drag_stats.tables++;
 		}
 	}
+	char grid_note[96] = "";
+	if (r.grid_used) {
+		snprintf(grid_note, sizeof(grid_note), " from %u grid snap call(s), %llu points, %u single",
+		         r.grid_calls, (unsigned long long)r.grid_points, r.grid_misses);
+	}
 	DXRW_INFO("drag lattice: %s %zu phase-correct reachable displacement(s) around (%+d, %+d) logical — %zu "
-	          "probed in %.1f ms at scale %.4f%s, start %s (%d, %d)%s",
+	          "probed in %.1f ms at scale %.4f%s%s, start %s (%d, %d)%s",
 	          extend ? "extended with" : "sent", r.dxs.size(), cx, cy, r.probed, r.ms, m_wl_lattice_map.scale,
-	          async ? " (worker thread)" : "", m_wl_lattice_explicit ? "explicit" : "publisher-recorded",
+	          async ? " (worker thread)" : "", grid_note, m_wl_lattice_explicit ? "explicit" : "publisher-recorded",
 	          m_wl_lattice_explicit ? start[0] : m_wl_lattice_start_x,
 	          m_wl_lattice_explicit ? start[1] : m_wl_lattice_start_y,
 	          ok ? "" : " — REFUSED by the compositor, dragging unconstrained");
@@ -2437,7 +2484,7 @@ DxrLinuxWindow::wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const Lat
 bool
 DxrLinuxWindow::wl_send_lattice(bool extend, int32_t cx, int32_t cy)
 {
-	const LatticeProbe r = wl_probe_lattice(m_snap_fn, m_snap_userdata, m_wl_lattice_map, cx, cy);
+	const LatticeProbe r = wl_probe_lattice(snap_providers(), m_wl_lattice_map, cx, cy);
 	return wl_submit_lattice(extend, cx, cy, r, false);
 }
 
@@ -2478,11 +2525,10 @@ DxrLinuxWindow::wl_request_lattice_async(bool extend, int32_t cx, int32_t cy)
 	m_wl_lattice_job_cx = cx;
 	m_wl_lattice_job_cy = cy;
 	m_wl_drag_stats.async_jobs++;
-	SnapWindowOriginFn fn = m_snap_fn;
-	void *ud = m_snap_userdata;
+	const SnapProviders sp = snap_providers();
 	const dxr_wl_lattice::Map map = m_wl_lattice_map;
-	m_wl_lattice_thread = std::thread([this, fn, ud, map, cx, cy] {
-		m_wl_lattice_job_result = wl_probe_lattice(fn, ud, map, cx, cy);
+	m_wl_lattice_thread = std::thread([this, sp, map, cx, cy] {
+		m_wl_lattice_job_result = wl_probe_lattice(sp, map, cx, cy);
 		m_wl_lattice_job_done.store(true);
 	});
 }
@@ -2596,7 +2642,7 @@ DxrLinuxWindow::wl_lattice_prepare_map(bool quiet)
 void
 DxrLinuxWindow::wl_lattice_on_placement_change()
 {
-	if (!m_wl_compositor_drag || !m_wl_placement.has_drag_lattice() || m_snap_fn == nullptr) {
+	if (!m_wl_compositor_drag || !m_wl_placement.has_drag_lattice() || !has_snap_provider()) {
 		return;
 	}
 	// A drag that had no table never gets a DragLatticeDone to end it, so
@@ -2669,7 +2715,7 @@ DxrLinuxWindow::wl_drag_prepare(bool sync)
 	if (env != nullptr && env[0] == '0') {
 		return;
 	}
-	if (!m_wl_placement.has_drag_lattice() || m_snap_fn == nullptr) {
+	if (!m_wl_placement.has_drag_lattice() || !has_snap_provider()) {
 		return;
 	}
 	if (m_wl_chrome.maximized()) {
@@ -4211,6 +4257,34 @@ DxrLinuxWindow::set_snap_provider(SnapWindowOriginFn fn, void *userdata)
 {
 	m_snap_fn = fn;
 	m_snap_userdata = userdata;
+}
+
+void
+DxrLinuxWindow::set_snap_grid_provider(SnapWindowGridFn fn, void *userdata)
+{
+	m_snap_grid_fn = fn;
+	m_snap_grid_userdata = userdata;
+}
+
+bool
+DxrLinuxWindow::snap_one(
+    int32_t origin_x, int32_t origin_y, int32_t target_x, int32_t target_y, int32_t *out_x, int32_t *out_y) const
+{
+	if (m_snap_fn != nullptr) {
+		return m_snap_fn(m_snap_userdata, origin_x, origin_y, target_x, target_y, out_x, out_y);
+	}
+	if (m_snap_grid_fn == nullptr) {
+		return false;
+	}
+	SnapGridPoint p{0, 0};
+	bool declined = false;
+	if (!m_snap_grid_fn(m_snap_grid_userdata, origin_x, origin_y, target_x, target_y, 1, 1, 1, 1, &p, &declined) ||
+	    declined || p.dx == kSnapGridNoAnswer || p.dy == kSnapGridNoAnswer) {
+		return false;
+	}
+	*out_x = target_x + p.dx;
+	*out_y = target_y + p.dy;
+	return true;
 }
 
 const char *

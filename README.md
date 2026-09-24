@@ -668,6 +668,13 @@ On native Wayland the helper hands the compositor a drag lattice at each press
 keeps the weave phase still while it drags the window. This needs the
 extension version that serves the lattice.
 
+Building that table asks the display processor about ~16k positions. With only
+`set_snap_provider()` installed that is one call each, a service round trip
+each for an IPC client. `set_snap_grid_provider()` lets the helper ask for them
+as regular grids that it plans itself (`dxr_wl_lattice::plan_grids`): one call
+at 100 % and 200 %, one per rounding residue at a fractional scale (150 %: 4).
+The table is the same either way (`tests/linux_window_lattice_test.cpp`).
+
 No environment variable (`WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, …) is read to
 decide: the only questions are "does the connection succeed" and "what does the
 server advertise". After `create()`, the live connection is re-verified and
@@ -691,6 +698,7 @@ compile-time macros.
 | `set_decorated()` / `is_decorated()` | run-time decorations (an app's B key): the WM frame on X11 (WM-owned, unsnapped move while on), the client title bar on Wayland; `desc.wayland_title_bar = false` starts a Wayland window without it |
 | `--frame-stats[=SECONDS]` / `DXR_FRAME_STATS` | periodic frame-time log (avg, p95, max, fps, platform, content buffer size), for like-for-like A/Bs without GPU tooling. `desc.width/height` are device pixels on both backends, so the same request gives the same buffer. |
 | `set_snap_provider()` + `DxrWeaveSnap` | the drag's lattice snap through `xrWeaveSnapWindowRectDXR` |
+| `set_snap_grid_provider()` + `DxrWeaveSnap::grid_callback` | optional: the Wayland drag lattice's probe as a few `xrWeaveSnapWindowGridDXR` calls (`XR_DXR_weave` spec 11) instead of one call per point; install it next to the per-point provider |
 
 On native Wayland, fullscreen onto the panel output is requested only once the
 surface is **mapped** (its first `wl_surface.enter`). mutter discards the output
