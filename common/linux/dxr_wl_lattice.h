@@ -38,9 +38,12 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -82,6 +85,15 @@ struct Probe
 	std::vector<int32_t> dxs, dys; //!< phase-correct LOGICAL displacements
 	size_t probed = 0, fixed = 0;
 	bool declined = false;
+
+	//! @name Bulk path (probe_via_grid) — all zero for the per-point probe.
+	//! @{
+	bool grid_used = false;     //!< the table was answered from grid calls
+	uint32_t grid_calls = 0;    //!< grid provider calls made for the table
+	uint64_t grid_points = 0;   //!< points those calls returned
+	uint32_t grid_misses = 0;   //!< snap queries the fetched grids did not cover (asked singly)
+	const char *grid_fallback = nullptr; //!< why the per-point probe ran instead, if it did
+	//! @}
 };
 
 /*!
@@ -169,6 +181,402 @@ probe(const Snap &snap, const Map &m, int32_t cx, int32_t cy, int32_t half, int3
 			}
 		}
 	}
+	return r;
+}
+
+/*
+ *
+ * Bulk path: the same probe, answered from a few grid snaps (runtime#1723).
+ *
+ */
+
+/*!
+ * One grid point's answer: the snapped displacement MINUS its target, device
+ * px. Both fields @ref kGridNoAnswer = no answer for this point (a displacement
+ * the transport cannot carry); the probe then asks that point singly.
+ */
+struct GridPoint
+{
+	int32_t dx = 0, dy = 0;
+};
+constexpr int32_t kGridNoAnswer = INT32_MIN;
+
+/*!
+ * A regular grid of DEVICE displacement targets (origin (0, 0)): point (i, j)
+ * targets (first_x + i * step_x, first_y + j * step_y); answers are row-major,
+ * point (i, j) at j * count_x + i.
+ */
+struct GridSpec
+{
+	int32_t first_x = 0, first_y = 0;
+	int32_t step_x = 1, step_y = 1;
+	uint32_t count_x = 0, count_y = 0;
+};
+
+/*!
+ * A grid snap: fill count_x * count_y answers and @p declined (the display
+ * processor produced no snap at all — the per-point snap's `false`). Returns
+ * false when the grid cannot be evaluated (no entry point, a failed call);
+ * the answers are then ignored.
+ */
+using GridSnapFn = std::function<bool(const GridSpec &, GridPoint *, bool *declined)>;
+//! The per-point snap probe() takes (see there). May be empty.
+using PointSnapFn = std::function<bool(int32_t tx, int32_t ty, int32_t *ox, int32_t *oy)>;
+
+//! Largest count along one axis of one grid call (= the runtime's
+//! XR_WEAVE_SNAP_GRID_MAX_AXIS_DXR; 1024 x 1024 is also its point cap).
+constexpr uint32_t kGridMaxAxis = 1024;
+/*!
+ * Logical px beyond the probe grid, either side, that the fetched grids cover
+ * at a non-unit scale. There the probe's reachable-lattice search asks about
+ * logical points up to 2 px around the DP's answer mapped back to logical, and
+ * the answer is itself a few device px off its target (a correct snap stays
+ * within ~2); 6 covers a 3 px snap at any scale >= 1 with room to spare. A
+ * query outside is still answered — singly — so this sets speed, not results.
+ */
+constexpr int32_t kGridPad = 6;
+/*!
+ * Relative cost of one grid call, in grid points: an IPC round trip (~0.15 ms)
+ * against the runtime's per-point evaluation (~0.1-0.2 us). Only used to choose
+ * between two covers of the same targets.
+ */
+constexpr uint64_t kGridCallCost = 1024;
+
+//! An arithmetic progression of device displacements along one axis.
+struct AxisRun
+{
+	int32_t first = 0, step = 1;
+	uint32_t count = 0;
+};
+
+/*!
+ * The DEVICE displacements, along one axis, of every logical displacement the
+ * probe centred on @p c can query from start @p rel0: sorted, unique, split in
+ * two segments — targets whose monitor-relative position is negative, and the
+ * rest. (Mutter rounds halves AWAY from zero, so the rounding pattern mirrors
+ * at the monitor edge and a period found on one side does not hold across it.
+ * A window straddles the edge only while partly off the monitor.)
+ *
+ * At scale 1 exactly the targets are the probe grid alone (step @p cell): the
+ * DP's answer is always reachable exactly (logical == device), so the search
+ * around it never runs. Anywhere else they are every logical px of the grid's
+ * span plus @ref kGridPad either side — the search queries logical neighbours
+ * of the answer, which are off the grid.
+ */
+inline std::vector<std::vector<int32_t>>
+axis_targets(int32_t rel0, double scale, int32_t c, int32_t half, int32_t cell)
+{
+	std::vector<int32_t> seg[2];
+	const int32_t base = logical_to_px(rel0, scale);
+	const int32_t step = scale == 1.0 ? cell : 1;
+	const int32_t pad = scale == 1.0 ? 0 : kGridPad;
+	for (int32_t l = c - half - pad; l <= c + half + pad; l += step) {
+		seg[rel0 + l >= 0 ? 1 : 0].push_back(logical_to_px(rel0 + l, scale) - base);
+	}
+	std::vector<std::vector<int32_t>> out;
+	for (auto &v : seg) {
+		if (v.empty()) {
+			continue;
+		}
+		std::sort(v.begin(), v.end());
+		v.erase(std::unique(v.begin(), v.end()), v.end());
+		out.push_back(std::move(v));
+	}
+	return out;
+}
+
+//! Append runs of step @p step covering first + k * step, k < count, each <= kGridMaxAxis long.
+inline void
+append_runs(std::vector<AxisRun> *runs, int32_t first, int32_t step, uint32_t count)
+{
+	for (uint32_t done = 0; done < count; done += kGridMaxAxis) {
+		AxisRun r;
+		r.first = first + (int32_t)done * step;
+		r.step = step;
+		r.count = std::min(kGridMaxAxis, count - done);
+		runs->push_back(r);
+	}
+}
+
+/*!
+ * Exact cover of one segment (sorted, unique) by index residue. The mapping is
+ * `round(x * scale)`, so at a rational scale p/q a logical span of q is a
+ * device span of exactly p and the targets repeat their gaps with period q:
+ * 1.5 -> gaps 2,1,2,1 (two runs of step 3), 1.25 -> 1,1,1,2 (four of step 5),
+ * 5/3 -> 2,1,2 (three of step 5); one run at an integer scale. Every run point
+ * is a target. A period is accepted only when it holds over the WHOLE segment
+ * (float rounding at a non-dyadic scale can break one); none within 8 =
+ * false.
+ */
+inline bool
+cover_segment_periodic(const std::vector<int32_t> &v, std::vector<AxisRun> *runs)
+{
+	const size_t n = v.size();
+	if (n == 1) {
+		append_runs(runs, v[0], 1, 1);
+		return true;
+	}
+	for (size_t q = 1; q <= 8 && q < n; q++) {
+		bool ok = true;
+		for (size_t i = 0; i + q + 1 < n && ok; i++) {
+			ok = (v[i + 1] - v[i]) == (v[i + q + 1] - v[i + q]);
+		}
+		if (!ok) {
+			continue;
+		}
+		const int32_t step = v[q] - v[0];
+		for (size_t r = 0; r < q; r++) {
+			append_runs(runs, v[r], step, (uint32_t)((n - r + q - 1) / q));
+		}
+		return true;
+	}
+	return false;
+}
+
+/*!
+ * Cover one axis's targets (axis_targets()) with arithmetic progressions.
+ * @p periodic: the exact per-segment residue cover (empty when a segment has
+ * no period). Otherwise every device px from the first target to the last —
+ * a superset, so it covers any target list.
+ */
+inline std::vector<AxisRun>
+cover_axis(const std::vector<std::vector<int32_t>> &segs, bool periodic)
+{
+	std::vector<AxisRun> runs;
+	if (segs.empty()) {
+		return runs;
+	}
+	if (periodic) {
+		// Across the edge first: it holds whenever nothing rounds a half
+		// (every integer scale), and is then half as many runs.
+		if (segs.size() > 1) {
+			std::vector<int32_t> all;
+			for (const auto &v : segs) {
+				all.insert(all.end(), v.begin(), v.end());
+			}
+			std::sort(all.begin(), all.end());
+			all.erase(std::unique(all.begin(), all.end()), all.end());
+			if (cover_segment_periodic(all, &runs)) {
+				return runs;
+			}
+			runs.clear();
+		}
+		for (const auto &v : segs) {
+			if (!cover_segment_periodic(v, &runs)) {
+				return {};
+			}
+		}
+		return runs;
+	}
+	int32_t lo = INT32_MAX, hi = INT32_MIN;
+	for (const auto &v : segs) {
+		lo = std::min(lo, v.front());
+		hi = std::max(hi, v.back());
+	}
+	append_runs(&runs, lo, 1, (uint32_t)(hi - lo + 1));
+	return runs;
+}
+
+//! Points a cover evaluates.
+inline uint64_t
+cover_points(const std::vector<AxisRun> &runs)
+{
+	uint64_t n = 0;
+	for (const auto &r : runs) {
+		n += r.count;
+	}
+	return n;
+}
+
+/*!
+ * The grid calls that answer every query probe() makes from @p m around
+ * (@p cx, @p cy): the product of one axis cover per axis. The targets are
+ * SEPARABLE — a logical (lx, ly) goes to (fx(lx), fy(ly)) — so a product of
+ * two 1-D covers covers them.
+ *
+ * The targets are NOT a regular grid at a fractional scale (1.5: device gaps
+ * 2,1,2,1…), so one call cannot name exactly them. Per axis, two covers are
+ * weighed, counting @ref kGridCallCost points per call:
+ *  - exact: one run per residue class of the rounding's period (and per side
+ *    of the monitor edge when the targets straddle it) — cover_axis();
+ *  - dense: every device px of the span, one call (a superset).
+ *
+ * Measured by tests/linux_window_lattice_test.cpp on the helper's real shape
+ * (129 x 129, ±192 logical, 157,609 points to answer at a non-unit scale):
+ * 100 % and 200 % -> ONE call; 150 % -> 4; 166.67 % -> 9; 125 % and 175 % ->
+ * 16 (more, at most 64, while the window straddles the monitor's edge).
+ */
+inline std::vector<GridSpec>
+plan_grids(const Map &m, int32_t cx, int32_t cy, int32_t half, int32_t cell)
+{
+	const auto tx = axis_targets(m.rel0_x, m.scale, cx, half, cell);
+	const auto ty = axis_targets(m.rel0_y, m.scale, cy, half, cell);
+	const std::vector<AxisRun> xs[2] = {cover_axis(tx, true), cover_axis(tx, false)};
+	const std::vector<AxisRun> ys[2] = {cover_axis(ty, true), cover_axis(ty, false)};
+	int best_x = -1, best_y = -1;
+	uint64_t best = UINT64_MAX;
+	for (int a = 0; a < 2; a++) {
+		for (int b = 0; b < 2; b++) {
+			if (xs[a].empty() || ys[b].empty()) {
+				continue;
+			}
+			const uint64_t calls = (uint64_t)xs[a].size() * ys[b].size();
+			const uint64_t cost = cover_points(xs[a]) * cover_points(ys[b]) + kGridCallCost * calls;
+			if (cost < best) {
+				best = cost;
+				best_x = a;
+				best_y = b;
+			}
+		}
+	}
+	std::vector<GridSpec> out;
+	if (best_x < 0) {
+		return out;
+	}
+	for (const auto &ry : ys[best_y]) {
+		for (const auto &rx : xs[best_x]) {
+			GridSpec g;
+			g.first_x = rx.first;
+			g.first_y = ry.first;
+			g.step_x = rx.step;
+			g.step_y = ry.step;
+			g.count_x = rx.count;
+			g.count_y = ry.count;
+			out.push_back(g);
+		}
+	}
+	return out;
+}
+
+/*!
+ * probe(), with the display processor asked through a few GRID calls instead
+ * of one call per point: plan_grids() names them, their answers are memoised,
+ * and probe() runs unchanged against the memo. The table is therefore the
+ * per-point probe's table by construction — the same function over the same
+ * answers — as long as the grid snap answers each point exactly as the
+ * per-point snap would (the runtime's grid entry point is that loop, next to
+ * the DP).
+ *
+ * A query the memo lacks (outside the planned cover, or a point answered with
+ * @ref kGridNoAnswer) goes to @p point, or, without one, to a 1 x 1 grid.
+ *
+ * Falls back to the per-point probe (and says why in Probe::grid_fallback)
+ * when a grid call fails, or reports the DP declined — the per-point probe
+ * then declines on its first query unless the DP has come up since, which is
+ * the same table or a better one. Without @p point there is nothing to fall
+ * back to: a failed grid is then an unanswered probe (declined).
+ */
+inline Probe
+probe_via_grid(const GridSnapFn &grid,
+               const PointSnapFn &point,
+               const Map &m,
+               int32_t cx,
+               int32_t cy,
+               int32_t half,
+               int32_t cell)
+{
+	auto fallback = [&](const char *why, uint32_t calls, uint64_t points) {
+		Probe r;
+		if (point) {
+			r = probe(point, m, cx, cy, half, cell);
+		} else {
+			r.declined = true;
+		}
+		r.grid_calls = calls;
+		r.grid_points = points;
+		r.grid_fallback = why;
+		return r;
+	};
+
+	const std::vector<GridSpec> plan = plan_grids(m, cx, cy, half, cell);
+	if (plan.empty()) {
+		return fallback("no grid covers the probe", 0, 0);
+	}
+
+	// Memo over the union of the covered values, per axis.
+	std::vector<int32_t> mx, my;
+	for (const auto &g : plan) {
+		for (uint32_t i = 0; i < g.count_x; i++) {
+			mx.push_back(g.first_x + (int32_t)i * g.step_x);
+		}
+		for (uint32_t j = 0; j < g.count_y; j++) {
+			my.push_back(g.first_y + (int32_t)j * g.step_y);
+		}
+	}
+	for (auto *v : {&mx, &my}) {
+		std::sort(v->begin(), v->end());
+		v->erase(std::unique(v->begin(), v->end()), v->end());
+	}
+	auto index_of = [](const std::vector<int32_t> &v, int32_t x) -> int64_t {
+		const auto it = std::lower_bound(v.begin(), v.end(), x);
+		return (it != v.end() && *it == x) ? (int64_t)(it - v.begin()) : -1;
+	};
+	std::vector<GridPoint> memo(mx.size() * my.size());
+	std::vector<uint8_t> have(memo.size(), 0);
+
+	uint32_t calls = 0;
+	uint64_t points = 0;
+	std::vector<GridPoint> buf;
+	for (const auto &g : plan) {
+		buf.assign((size_t)g.count_x * g.count_y, GridPoint{});
+		bool declined = false;
+		calls++;
+		if (!grid(g, buf.data(), &declined)) {
+			return fallback("the grid snap failed", calls, points);
+		}
+		if (declined) {
+			return fallback("the grid snap reported the display processor declined", calls, points);
+		}
+		points += buf.size();
+		for (uint32_t j = 0; j < g.count_y; j++) {
+			const size_t row = (size_t)index_of(my, g.first_y + (int32_t)j * g.step_y) * mx.size();
+			for (uint32_t i = 0; i < g.count_x; i++) {
+				const GridPoint &p = buf[(size_t)j * g.count_x + i];
+				if (p.dx == kGridNoAnswer || p.dy == kGridNoAnswer) {
+					continue;
+				}
+				const size_t k = row + (size_t)index_of(mx, g.first_x + (int32_t)i * g.step_x);
+				memo[k] = p;
+				have[k] = 1;
+			}
+		}
+	}
+
+	uint32_t misses = 0;
+	auto snap = [&](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) {
+		const int64_t i = index_of(mx, tx), j = index_of(my, ty);
+		if (i >= 0 && j >= 0) {
+			const size_t k = (size_t)j * mx.size() + (size_t)i;
+			if (have[k]) {
+				*ox = tx + memo[k].dx;
+				*oy = ty + memo[k].dy;
+				return true;
+			}
+		}
+		misses++;
+		if (point) {
+			return point(tx, ty, ox, oy);
+		}
+		GridSpec one;
+		one.first_x = tx;
+		one.first_y = ty;
+		one.count_x = one.count_y = 1;
+		GridPoint p;
+		bool declined = false;
+		calls++;
+		if (!grid(one, &p, &declined) || declined || p.dx == kGridNoAnswer || p.dy == kGridNoAnswer) {
+			return false;
+		}
+		points++;
+		*ox = tx + p.dx;
+		*oy = ty + p.dy;
+		return true;
+	};
+	Probe r = probe(snap, m, cx, cy, half, cell);
+	r.grid_used = true;
+	r.grid_calls = calls;
+	r.grid_points = points;
+	r.grid_misses = misses;
 	return r;
 }
 

@@ -12,6 +12,12 @@
  *    replaced (reimplemented below from the pre-follow-up helper).
  * 3. At fractional scales every table entry is reachable and phase-correct
  *    under a synthetic slanted-lens snap, and entries cover the grid.
+ * 4. The bulk path (probe_via_grid, runtime#1723) builds the SAME table as the
+ *    per-point probe, at 100 %, 150 % and 200 % (and 125 %, 166.67 %, 175 %),
+ *    in the helper's real shape: ONE grid call at an integer scale, one per
+ *    residue class at a fractional one, no point asked singly. Its fallbacks —
+ *    a failing grid, a declining one, unanswerable points, no per-point
+ *    provider — give the same table too.
  */
 #include "dxr_wl_lattice.h"
 
@@ -183,6 +189,184 @@ main()
 				int32_t ox = 0, oy = 0;
 				synthetic_snap(tx, ty, &ox, &oy);
 				CHECK(ox == tx && oy == ty);
+			}
+		}
+	}
+
+	// 4. The bulk path.
+	{
+		// The helper's real probe shape (dxr_linux_window.cpp kLatticeHalf /
+		// kLatticeCell).
+		const int32_t half = 192, cell = 3;
+
+		struct Counts
+		{
+			uint64_t point = 0, grid = 0, grid_points = 0;
+		};
+		// A grid snap that is literally the per-point snap in a loop — what
+		// the runtime's xrWeaveSnapWindowGridDXR is (u_snap_grid_eval).
+		auto make_grid = [](Counts *c, const L::PointSnapFn &one) {
+			return [c, one](const L::GridSpec &g, L::GridPoint *out, bool *declined) {
+				c->grid++;
+				c->grid_points += (uint64_t)g.count_x * g.count_y;
+				CHECK(g.step_x >= 1 && g.step_y >= 1);
+				CHECK(g.count_x >= 1 && g.count_x <= L::kGridMaxAxis);
+				CHECK(g.count_y >= 1 && g.count_y <= L::kGridMaxAxis);
+				*declined = false;
+				for (uint32_t j = 0; j < g.count_y; j++) {
+					for (uint32_t i = 0; i < g.count_x; i++) {
+						const int32_t tx = g.first_x + (int32_t)i * g.step_x;
+						const int32_t ty = g.first_y + (int32_t)j * g.step_y;
+						int32_t ox = tx, oy = ty;
+						if (!one(tx, ty, &ox, &oy)) {
+							*declined = true;
+							return true;
+						}
+						out[(size_t)j * g.count_x + i] = L::GridPoint{ox - tx, oy - ty};
+					}
+				}
+				return true;
+			};
+		};
+		auto same = [](const L::Probe &a, const L::Probe &b) {
+			return a.dxs == b.dxs && a.dys == b.dys && a.probed == b.probed && a.fixed == b.fixed &&
+			       a.declined == b.declined;
+		};
+
+		struct Case
+		{
+			double scale;
+			uint32_t calls; // expected grid calls with every target on the monitor
+		};
+		for (const Case sc : {Case{1.0, 1}, Case{1.5, 4}, Case{2.0, 1}, Case{1.25, 16}, Case{5.0 / 3.0, 9},
+		                      Case{1.75, 16}}) {
+			for (int32_t rel0 = 0; rel0 < 3; rel0++) {
+				// The first map keeps every target on the monitor (the call
+				// counts below); the second straddles its top-left edge,
+				// where the rounding mirrors.
+				const L::Map maps[2] = {{rel0 + 311, 2 * rel0 + 257, sc.scale},
+				                        {rel0 - 7, 2 * rel0 + 3, sc.scale}};
+				for (int mi = 0; mi < 2; mi++) {
+					const L::Map m = maps[mi];
+					for (auto c : {std::pair<int32_t, int32_t>{0, 0}, {250, -40}}) {
+						Counts n;
+						L::PointSnapFn point = [&n](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) {
+							n.point++;
+							return synthetic_snap(tx, ty, ox, oy);
+						};
+						const L::Probe a = L::probe(snap, m, c.first, c.second, half, cell);
+						const L::Probe b =
+						    L::probe_via_grid(make_grid(&n, snap), point, m, c.first, c.second, half, cell);
+						CHECK(same(a, b));
+						CHECK(b.grid_used && b.grid_fallback == nullptr);
+						CHECK(b.grid_misses == 0 && n.point == 0);
+						CHECK(b.grid_calls == n.grid && b.grid_points == n.grid_points);
+						if (mi == 0 || sc.scale == 1.0 || sc.scale == 2.0) {
+							CHECK(n.grid == sc.calls);
+						}
+						CHECK(n.grid <= 64); // straddling the monitor edge at 175 %: 8 x 8 residue runs
+						if (sc.scale == 1.0) {
+							// Exactly the 129 x 129 probe grid.
+							CHECK(n.grid_points == 129u * 129u);
+						}
+						std::printf("  bulk probe: scale %.4f rel0 (%d, %d) centre (%+d, %+d): %zu entries, "
+						            "%u grid call(s), %llu points, %u single — identical to per point\n",
+						            sc.scale, m.rel0_x, m.rel0_y, c.first, c.second, b.dxs.size(), b.grid_calls,
+						            (unsigned long long)b.grid_points, b.grid_misses);
+					}
+				}
+			}
+		}
+
+		// A snap reaching further than the planned cover (±8 px): the
+		// queries outside it are asked singly and the table is unchanged.
+		auto far_snap = [](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) {
+			*oy = ty;
+			const int32_t r = ((tx + 3 * ty) % 17 + 17) % 17; // phase-correct when 0
+			*ox = r <= 8 ? tx - r : tx + (17 - r);
+			return true;
+		};
+		for (double s : {1.0, 1.5, 2.0}) {
+			const L::Map m{7, 3, s};
+			Counts n;
+			const L::PointSnapFn point = far_snap;
+			const L::Probe a = L::probe(far_snap, m, 0, 0, half, cell);
+			const L::Probe b = L::probe_via_grid(make_grid(&n, far_snap), point, m, 0, 0, half, cell);
+			CHECK(same(a, b));
+			CHECK(b.grid_used);
+		}
+
+		for (double s : {1.0, 1.5, 2.0}) {
+			const L::Map m{5, 9, s};
+			const L::Probe a = L::probe(snap, m, 0, 0, half, cell);
+
+			// Grid call fails -> the per-point probe.
+			{
+				auto grid = [](const L::GridSpec &, L::GridPoint *, bool *) { return false; };
+				const L::Probe b = L::probe_via_grid(grid, snap, m, 0, 0, half, cell);
+				CHECK(same(a, b) && !b.grid_used && b.grid_fallback != nullptr);
+			}
+			// Grid reports the DP declined, but the DP answers by the time
+			// the per-point probe runs -> the per-point table.
+			{
+				auto grid = [](const L::GridSpec &, L::GridPoint *, bool *d) {
+					*d = true;
+					return true;
+				};
+				const L::Probe b = L::probe_via_grid(grid, snap, m, 0, 0, half, cell);
+				CHECK(same(a, b) && !b.grid_used && b.grid_fallback != nullptr);
+			}
+			// DP declines on both paths -> declined on both.
+			{
+				auto no = [](int32_t, int32_t, int32_t *, int32_t *) { return false; };
+				Counts n;
+				const L::Probe d1 = L::probe(no, m, 0, 0, half, cell);
+				const L::Probe d2 = L::probe_via_grid(make_grid(&n, no), no, m, 0, 0, half, cell);
+				CHECK(d1.declined && d2.declined && same(d1, d2));
+			}
+			// Some points unanswerable (the runtime's NO_DELTA) -> asked singly.
+			{
+				Counts n;
+				auto inner = make_grid(&n, snap);
+				auto grid = [inner](const L::GridSpec &g, L::GridPoint *out, bool *d) {
+					if (!inner(g, out, d)) {
+						return false;
+					}
+					for (size_t k = 0; k < (size_t)g.count_x * g.count_y; k += 7) {
+						out[k] = L::GridPoint{L::kGridNoAnswer, L::kGridNoAnswer};
+					}
+					return true;
+				};
+				const L::Probe b = L::probe_via_grid(grid, snap, m, 0, 0, half, cell);
+				CHECK(same(a, b) && b.grid_used && b.grid_misses > 0);
+			}
+			// Grid provider only (no per-point one): misses become 1 x 1 grids.
+			{
+				Counts n;
+				auto inner = make_grid(&n, snap);
+				auto grid = [inner](const L::GridSpec &g, L::GridPoint *out, bool *d) {
+					if (!inner(g, out, d)) {
+						return false;
+					}
+					if (g.count_x * g.count_y > 1) {
+						out[0] = L::GridPoint{L::kGridNoAnswer, L::kGridNoAnswer};
+					}
+					return true;
+				};
+				const L::Probe b = L::probe_via_grid(grid, L::PointSnapFn{}, m, 0, 0, half, cell);
+				CHECK(same(a, b) && b.grid_used);
+			}
+		}
+
+		// Every plan stays inside the runtime's per-call bounds, up to 300 %.
+		for (double s = 1.0; s <= 3.0; s += 0.05) {
+			const L::Map m{123, 45, s};
+			const auto plan = L::plan_grids(m, 0, 0, half, cell);
+			CHECK(!plan.empty());
+			for (const auto &g : plan) {
+				CHECK(g.step_x >= 1 && g.step_y >= 1);
+				CHECK(g.count_x >= 1 && g.count_x <= L::kGridMaxAxis);
+				CHECK(g.count_y >= 1 && g.count_y <= L::kGridMaxAxis);
 			}
 		}
 	}
