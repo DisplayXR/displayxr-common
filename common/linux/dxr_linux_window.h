@@ -130,6 +130,7 @@
 #ifdef DXR_APP_HAVE_WL_CHROME
 #include "dxr_wl_chrome.h"    // title bar for the native-Wayland leg (#1654)
 #include "dxr_wl_placement.h" // drag lattice: a phase-snapped compositor drag (#1609)
+#include "dxr_wl_lattice.h"   // ...its table build, at any output scale
 #endif
 #endif
 
@@ -917,8 +918,14 @@ private:
 	 * @{
 	 */
 	DxrWlPlacement m_wl_placement;
-	//! Output scale of the drag in progress (the reachable step, device px).
-	uint32_t m_wl_lattice_q = 0;
+	//! Where the drag's table is built from: the start's position relative to
+	//! the monitor and the monitor's scale (any scale — dxr_wl_lattice.h).
+	dxr_wl_lattice::Map m_wl_lattice_map;
+	bool m_wl_lattice_map_valid = false;
+	//! The start handed to the publisher with the table (frame, logical), when
+	//! it takes one (v8); without, the publisher records its own.
+	bool m_wl_lattice_explicit = false;
+	int32_t m_wl_lattice_start_frame_x = 0, m_wl_lattice_start_frame_y = 0;
 	//! Built for the drag in progress; answers DragLatticeNeeded while it runs.
 	bool m_wl_lattice_active = false;
 	//! The drag origin the compositor recorded (frame top-left, logical).
@@ -949,7 +956,17 @@ private:
 		double ms = 0.0;
 	};
 	static LatticeProbe
-	wl_probe_lattice(SnapWindowOriginFn fn, void *ud, int32_t q, int32_t cx, int32_t cy);
+	wl_probe_lattice(SnapWindowOriginFn fn, void *ud, const dxr_wl_lattice::Map &map, int32_t cx, int32_t cy);
+	//! Read the drag start and monitor scale for a table. False when the
+	//! window is not on the panel, or the scale is fractional and the
+	//! publisher cannot take an explicit start.
+	bool
+	wl_lattice_prepare_map(bool quiet);
+	//! The window's surface is on the 3D panel's output (or no panel known).
+	bool
+	wl_window_on_panel() const;
+	//! Pumps until the mid-drag table check is retried.
+	uint32_t m_wl_lattice_retry_in = 0;
 	//! Send a probe result (main thread). Same return as wl_send_lattice.
 	bool
 	wl_submit_lattice(bool extend, int32_t cx, int32_t cy, const LatticeProbe &r, bool async);
@@ -970,7 +987,7 @@ private:
 	//! table is sent when the window reaches an integer-scale output (the 3D
 	//! panel) and dropped when it leaves one.
 	void
-	wl_lattice_on_scale_change();
+	wl_lattice_on_placement_change();
 
 	//! A compositor drag (xdg_toplevel.move) this window started is running.
 	//! Cleared by the publisher's DragLatticeDone, or by the next press.

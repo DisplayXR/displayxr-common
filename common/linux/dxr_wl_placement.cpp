@@ -7,6 +7,10 @@
 
 #include "dxr_wl_placement.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #ifdef DXR_APP_HAVE_DBUS
 #include <dbus/dbus.h>
 #include <unistd.h> // getpid, to pick our own DragLatticeNeeded out of the stream
@@ -19,6 +23,8 @@
 #define WLP_DONE_MATCH "type='signal',interface='" WLP_IFACE "',member='DragLatticeDone'"
 //! GetPlacementCapabilities bit: the publisher can constrain a drag.
 #define WLP_CAP_DRAG_LATTICE 1u
+//! GetPlacementCapabilities bit: SetDragLatticeAt (an explicit start; v8).
+#define WLP_CAP_EXPLICIT_START 2u
 
 DxrWlPlacement::~DxrWlPlacement()
 {
@@ -74,6 +80,7 @@ DxrWlPlacement::connect()
 	dbus_message_get_args(reply, nullptr, DBUS_TYPE_UINT32, &caps, DBUS_TYPE_INVALID);
 	dbus_message_unref(reply);
 	m_lattice = (caps & WLP_CAP_DRAG_LATTICE) != 0;
+	m_explicit_start = (caps & WLP_CAP_EXPLICIT_START) != 0;
 	m_why = m_lattice ? "ready — the compositor can constrain a drag to the interlace lattice"
 	                  : "the compositor has no Meta.ExternalConstraint, so a drag cannot be constrained — the "
 	                    "title bar drags unsnapped";
@@ -90,12 +97,15 @@ DxrWlPlacement::set_drag_lattice(bool extend,
                                  const std::vector<int32_t> &dx,
                                  const std::vector<int32_t> &dy,
                                  int32_t *start_x,
-                                 int32_t *start_y)
+                                 int32_t *start_y,
+                                 const int32_t *explicit_start)
 {
 	if (!m_lattice || m_conn == nullptr || dx.size() != dy.size()) {
 		return false;
 	}
-	DBusMessage *call = dbus_message_new_method_call(WLP_BUS, WLP_PATH, WLP_IFACE, "SetDragLattice");
+	const bool at = explicit_start != nullptr && m_explicit_start;
+	DBusMessage *call =
+	    dbus_message_new_method_call(WLP_BUS, WLP_PATH, WLP_IFACE, at ? "SetDragLatticeAt" : "SetDragLattice");
 	if (call == nullptr) {
 		return false;
 	}
@@ -104,10 +114,16 @@ DxrWlPlacement::set_drag_lattice(bool extend,
 	dbus_int32_t c = cell, a = min_dx, b = min_dy, e = max_dx, f = max_dy;
 	const dbus_int32_t *px = dx.data(), *py = dy.data();
 	const int n = (int)dx.size();
-	dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_BOOLEAN, &ext, DBUS_TYPE_INT32, &c,
-	                         DBUS_TYPE_INT32, &a, DBUS_TYPE_INT32, &b, DBUS_TYPE_INT32, &e, DBUS_TYPE_INT32, &f,
-	                         DBUS_TYPE_ARRAY, DBUS_TYPE_INT32, &px, n, DBUS_TYPE_ARRAY, DBUS_TYPE_INT32, &py, n,
-	                         DBUS_TYPE_INVALID);
+	if (at) {
+		dbus_int32_t s0 = explicit_start[0], s1 = explicit_start[1];
+		dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_INT32, &s0, DBUS_TYPE_INT32, &s1,
+		                         DBUS_TYPE_INVALID);
+	} else {
+		dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_INVALID);
+	}
+	dbus_message_append_args(call, DBUS_TYPE_BOOLEAN, &ext, DBUS_TYPE_INT32, &c, DBUS_TYPE_INT32, &a,
+	                         DBUS_TYPE_INT32, &b, DBUS_TYPE_INT32, &e, DBUS_TYPE_INT32, &f, DBUS_TYPE_ARRAY,
+	                         DBUS_TYPE_INT32, &px, n, DBUS_TYPE_ARRAY, DBUS_TYPE_INT32, &py, n, DBUS_TYPE_INVALID);
 	// Bounded and blocking, on purpose: this runs at the press, BEFORE
 	// xdg_toplevel.move starts the grab, and the grab must not begin before
 	// the compositor holds the table. It never runs during a grab.
@@ -198,6 +214,99 @@ DxrWlPlacement::poll_needed(int32_t *dx, int32_t *dy)
 	return got;
 }
 
+namespace {
+//! The integers of a JSON array `"key":[a,b,c,d]` inside [from, to).
+bool
+json_int4(const char *from, const char *to, const char *key, int32_t out[4])
+{
+	const char *p = strstr(from, key);
+	if (p == nullptr || p >= to) {
+		return false;
+	}
+	p = strchr(p, '[');
+	if (p == nullptr || p >= to) {
+		return false;
+	}
+	p++;
+	for (int i = 0; i < 4; i++) {
+		char *end = nullptr;
+		const long v = strtol(p, &end, 10);
+		if (end == p) {
+			return false;
+		}
+		out[i] = (int32_t)v;
+		p = end;
+		while (*p == ',' || *p == ' ') {
+			p++;
+		}
+	}
+	return true;
+}
+
+//! A number `"key":v` inside [from, to).
+bool
+json_num(const char *from, const char *to, const char *key, double *out)
+{
+	const char *p = strstr(from, key);
+	if (p == nullptr || p >= to) {
+		return false;
+	}
+	p += strlen(key);
+	char *end = nullptr;
+	const double v = strtod(p, &end);
+	if (end == p) {
+		return false;
+	}
+	*out = v;
+	return true;
+}
+} // namespace
+
+bool
+DxrWlPlacement::get_own_geometry(OwnGeometry *out)
+{
+	if (m_conn == nullptr || out == nullptr) {
+		return false;
+	}
+	DBusMessage *call = dbus_message_new_method_call(WLP_BUS, "/org/displayxr/WindowGeometry",
+	                                                 "org.displayxr.WindowGeometry1", "GetWindows");
+	if (call == nullptr) {
+		return false;
+	}
+	DBusMessage *reply = dbus_connection_send_with_reply_and_block((DBusConnection *)m_conn, call, 100, nullptr);
+	dbus_message_unref(call);
+	if (reply == nullptr) {
+		return false;
+	}
+	const char *json = nullptr;
+	bool ok = false;
+	if (dbus_message_get_args(reply, nullptr, DBUS_TYPE_STRING, &json, DBUS_TYPE_INVALID) && json != nullptr) {
+		// The publisher's own JSON.stringify output: one object per window,
+		// each starting at its "pid". Ours is the first with our PID.
+		char needle[32];
+		snprintf(needle, sizeof(needle), "\"pid\":%d,", (int)getpid());
+		const char *obj = strstr(json, needle);
+		if (obj != nullptr) {
+			const char *next = strstr(obj + 1, "\"pid\":");
+			const char *end = next != nullptr ? next : json + strlen(json);
+			const char *mon = strstr(obj, "\"monitor\":{");
+			// The monitor object's keys, in its own order: x, y, w, h, scale.
+			double mx = 0.0, my = 0.0, mw = 0.0, mh = 0.0;
+			ok = json_int4(obj, end, "\"frame\":", out->frame) && json_int4(obj, end, "\"buffer\":", out->buffer) &&
+			     mon != nullptr && mon < end && json_num(mon, end, "\"x\":", &mx) &&
+			     json_num(mon, end, "\"y\":", &my) && json_num(mon, end, "\"w\":", &mw) &&
+			     json_num(mon, end, "\"h\":", &mh) && json_num(mon, end, "\"scale\":", &out->monitor_scale) &&
+			     out->monitor_scale > 0.0;
+			out->monitor[0] = (int32_t)mx;
+			out->monitor[1] = (int32_t)my;
+			out->monitor[2] = (int32_t)mw;
+			out->monitor[3] = (int32_t)mh;
+		}
+	}
+	dbus_message_unref(reply);
+	return ok;
+}
+
 bool
 DxrWlPlacement::take_done(DragDone *out)
 {
@@ -257,8 +366,10 @@ DxrWlPlacement::set_drag_lattice(bool extend,
                                  const std::vector<int32_t> &dx,
                                  const std::vector<int32_t> &dy,
                                  int32_t *start_x,
-                                 int32_t *start_y)
+                                 int32_t *start_y,
+                                 const int32_t *explicit_start)
 {
+	(void)explicit_start;
 	(void)start_x;
 	(void)start_y;
 	(void)extend;
@@ -290,6 +401,13 @@ DxrWlPlacement::test_move_to(int32_t x, int32_t y)
 
 bool
 DxrWlPlacement::take_done(DragDone *out)
+{
+	(void)out;
+	return false;
+}
+
+bool
+DxrWlPlacement::get_own_geometry(OwnGeometry *out)
 {
 	(void)out;
 	return false;

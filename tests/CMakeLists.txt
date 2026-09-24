@@ -60,3 +60,14 @@ if(TARGET displayxr::linux_window)
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_test COMMAND displayxr_linux_window_test)
 endif()
+
+# The Wayland drag lattice's table build at any output scale (pure; runs on
+# every Linux leg, no display needed).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(displayxr_linux_window_lattice_test linux_window_lattice_test.cpp)
+    target_include_directories(displayxr_linux_window_lattice_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux")
+    set_target_properties(displayxr_linux_window_lattice_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_lattice_test COMMAND displayxr_linux_window_lattice_test)
+endif()
