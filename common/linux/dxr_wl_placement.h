@@ -105,12 +105,32 @@ public:
 	get_own_geometry(OwnGeometry *out);
 
 	/*!
-	 * TEST ONLY: move this process's window so its frame is at (@p x, @p y)
-	 * logical — a MOVE action, so it passes through the same constraint a
-	 * drag does. Lets the lattice be verified with no human at the mouse.
+	 * Move this process's window so its FRAME top-left is at (@p x, @p y),
+	 * logical stage px (WindowPlacement1.MoveWindow, extension version 3+).
+	 * One bounded round trip. False when the publisher refused (an
+	 * interactive grab is running on the window, it is fullscreen, or it
+	 * does not allow moves) or is absent. Used for request_initial_rect().
 	 */
 	bool
-	test_move_to(int32_t x, int32_t y);
+	move_window(int32_t x, int32_t y);
+
+	/*!
+	 * TEST ONLY: move_window() — a MOVE action, so it passes through the same
+	 * constraint a drag does. Lets the lattice be verified with no human at
+	 * the mouse.
+	 */
+	bool
+	test_move_to(int32_t x, int32_t y)
+	{
+		return move_window(x, y);
+	}
+
+	//! A session-bus connection exists (whatever the publisher supports).
+	bool
+	connected() const
+	{
+		return m_conn != nullptr;
+	}
 
 	//! Drop this process's table (the window left the panel mid-drag).
 	void

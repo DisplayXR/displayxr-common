@@ -153,6 +153,47 @@ pump_for(DxrLinuxWindow &win, int pumps)
 	return got;
 }
 
+/*!
+ * request_initial_rect() on X11: the content lands at exactly the rect, and a
+ * rect the size of the panel stays WINDOWED (never the panel fullscreen).
+ */
+static void
+test_x11_initial_rect(bool header_bar)
+{
+	DxrLinuxWindowDesc desc;
+	desc.width = 320; // replaced by the rect
+	desc.height = 200;
+	desc.panel_left = 0;
+	desc.panel_top = 0;
+	desc.panel_width = 800;
+	desc.panel_height = 500;
+	desc.title = "linux_window_test (initial rect)";
+	desc.x11_header_bar = header_bar;
+	desc.transparent = header_bar;
+
+	DxrLinuxWindow win;
+	win.request_initial_rect(113, 157, 800, 500); // odd origin, panel-sized
+	CHECK(win.create(DxrWindowBackend::X11, desc), "create X11 window (initial rect)");
+	if (win.backend() != DxrWindowBackend::X11) {
+		return;
+	}
+	CHECK(!win.is_fullscreen(), "a panel-sized initial rect stays windowed");
+	uint32_t w = 0, h = 0;
+	CHECK(win.current_size(&w, &h) && w == 800 && h == 500, "content size is the rect's");
+	bool running = true;
+	for (int i = 0; i < 5; i++) {
+		win.pump_events({}, &running);
+	}
+	Display *dpy = win.x11_display();
+	::Window child = 0;
+	int rx = 0, ry = 0;
+	XTranslateCoordinates(dpy, win.x11_bound_window(), DefaultRootWindow(dpy), 0, 0, &rx, &ry, &child);
+	std::printf("initial rect (bar %s): content at (%d, %d) %ux%u, wanted (113, 157) 800x500\n",
+	            header_bar ? "on" : "off", rx, ry, w, h);
+	CHECK(rx == 113 && ry == 157, "content origin is the rect's origin (a header bar sits above it)");
+	win.destroy();
+}
+
 static void
 test_x11_window(bool demo_shape)
 {
@@ -369,6 +410,55 @@ struct FakeWsi
 };
 
 /*!
+ * request_initial_rect() on Wayland: the surface is WINDOWED at the rect's
+ * size (converted at the target output's scale — 1 on the CI compositor), and
+ * with no window-geometry service (weston) the placement degrades to the
+ * compositor's choice without failing anything.
+ */
+static void
+test_wayland_initial_rect(int panel_x, int panel_y)
+{
+	DxrLinuxWindowDesc desc;
+	desc.width = 1920; // panel-sized desc: the rect must still win, windowed
+	desc.height = 1080;
+	desc.panel_left = 0;
+	desc.panel_top = 0;
+	desc.panel_width = 1920;
+	desc.panel_height = 1080;
+	desc.title = "linux_window_test (wayland initial rect)";
+	desc.fullscreen_on_wayland = true;
+
+	DxrLinuxWindow win;
+	win.request_initial_rect(panel_x + 300, panel_y + 200, 720, 400); // on the "panel" output
+	CHECK(win.create(DxrWindowBackend::Wayland, desc), "create Wayland window (initial rect)");
+	if (win.backend() != DxrWindowBackend::Wayland) {
+		return;
+	}
+	uint32_t w = 0, h = 0;
+	CHECK(win.current_size(&w, &h) && w > 0 && h > 0, "wayland: a declared size (initial rect)");
+	const auto *bind =
+	    static_cast<const XrWaylandSurfaceBindingCreateInfoDXR *>(win.session_binding_chain(nullptr));
+	FakeWsi wsi;
+	CHECK(bind != nullptr && wsi.init(bind->wlDisplay, w, h), "fake WSI (initial rect)");
+	bool running = true;
+	for (int i = 0; i < 120 && running; i++) {
+		wsi.present(bind->wlSurface);
+		win.pump_events({}, &running);
+		usleep(10 * 1000);
+	}
+	CHECK(!win.is_fullscreen(), "wayland: an initial rect is never the panel fullscreen");
+	// Once on the target output the buffer is the rect's size in device px
+	// (+/-1: an odd size at a fractional scale has no exact logical size).
+	w = h = 0;
+	win.current_size(&w, &h);
+	std::printf("wayland initial rect: declared %ux%u, wanted 720x400\n", w, h);
+	CHECK(w + 1 >= 720 && w <= 721 && h + 1 >= 400 && h <= 401, "wayland: declared size is the rect's size");
+	CHECK(running, "no close request (initial rect)");
+	wsi.destroy();
+	win.destroy();
+}
+
+/*!
  * DXR_LW_TEST_WAYLAND_PANEL="x,y,w,h:name": with a multi-output compositor,
  * fullscreen onto the output at that device-pixel rect must be requested only
  * once the surface is mapped, and must land on the output named `name`.
@@ -497,6 +587,8 @@ main()
 		if (p.x11_connects) {
 			test_x11_window(false);
 			test_x11_window(true);
+			test_x11_initial_rect(false);
+			test_x11_initial_rect(true);
 		}
 	} else {
 		std::printf("X11 window checks skipped (set DXR_LW_TEST_X11=1 under xvfb-run to run them)\n");
@@ -510,6 +602,12 @@ main()
 			test_wayland_window();
 			if (const char *panel = std::getenv("DXR_LW_TEST_WAYLAND_PANEL")) {
 				test_wayland_panel_fullscreen(panel);
+			}
+			if (const char *panel = std::getenv("DXR_LW_TEST_WAYLAND_PANEL")) {
+				int px = 0, py = 0;
+				if (std::sscanf(panel, "%d,%d", &px, &py) == 2) {
+					test_wayland_initial_rect(px, py); // the multi-output compositor only
+				}
 			}
 		}
 	}

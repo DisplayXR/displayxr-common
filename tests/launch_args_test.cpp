@@ -289,9 +289,33 @@ test_force_in_process()
 }
 #endif
 
+static void
+test_clamp_rect_into_panel()
+{
+    // Panel 3840x2160 at (1920, 0).
+    int32_t x = 100, y = 50;
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, false) && x == 100 && y == 50,
+          "unconfirmed panel: rect untouched");
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 0, 0, 0, 0, true) && x == 100,
+          "unresolved (empty) panel rect: rect untouched");
+    x = 2400; y = 300;
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 2400 && y == 300,
+          "already inside: untouched");
+    x = 100; y = -40;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 1920 && y == 0,
+          "off the left/top: nudged to the panel edge, size kept");
+    x = 5600; y = 2000;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 4960 && y == 1560,
+          "off the right/bottom: nudged back inside");
+    x = 3000; y = 10;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 5000, 600, 1920, 0, 3840, 2160, true) && x == 1920 && y == 10,
+          "wider than the panel: pinned to its left edge");
+}
+
 int
 main()
 {
+    test_clamp_rect_into_panel();
     test_cli_positional();
     test_protocol_happy_path();
     test_protocol_security();
