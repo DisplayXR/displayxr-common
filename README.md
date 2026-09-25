@@ -377,8 +377,18 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
   DLL's dynamic CRT snapshots the environment at process start and its `getenv` wins, so a launch
   that inherited IPC routing re-launches itself once with a scrubbed block (`DXR_UNDOCK_REEXEC=1`
   guards the loop).
+- `dxr::ClampRectIntoPanel()` is the `--rect` placement policy every viewer applies: nudge the
+  rect INSIDE a runtime-confirmed panel (`XrDisplayDesktopInfoDXR::isPanelConfirmed`), keep its
+  size, never snap it to the panel; an unconfirmed panel leaves the rect exactly where the caller
+  measured it. On Linux the rect then goes to `DxrLinuxWindow::request_initial_rect()`.
 - `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
-  progress for the viewer's toast; a cache hit never touches the network.
+  progress for the viewer's toast; a cache hit never touches the network. Windows: WinHTTP,
+  cache in `%LOCALAPPDATA%\DisplayXR\<app>\cache`. Desktop Linux: libcurl loaded with `dlopen`
+  (`libcurl.so.4`, else `libcurl-gnutls.so.4`) — not linked, because the t64 transition renamed
+  its package and the viewers' `.deb`s allow no such dependency (they Recommend `curl`) — cache in
+  `$XDG_CACHE_HOME/displayxr/<app>`. Same policy hook (`dxr::LaunchPolicyAllowsUrl` re-checks
+  the final URL), cap and timeouts on both; `tests/url_fetch_test.cpp` runs the Linux one against
+  a loopback server in CI.
 - `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch
   (the installers run elevated, so an HKCU write there lands in the wrong hive);
   `FindSiblingViewer()` + `LaunchViewerWithUrl()` forward a URL whose `type=` belongs to another
@@ -687,6 +697,7 @@ compile-time macros.
 |---|---|
 | `select()` / `probe()` / `parse_platform_args()` | the rule above |
 | `create(backend, DxrLinuxWindowDesc)` | size, title, panel rect (INV-1.3: a panel-sized window goes fullscreen on the panel), `transparent`, `x11_header_bar`, `x11_drag_button` / `wayland_drag_button`, `keep_above` |
+| `request_initial_rect(x, y, w, h)` | call before `create()`: an app's `--rect`. The CONTENT opens at exactly that desktop device-px rect, windowed at any size. X11: created there and re-moved after the map (X root coordinates). Wayland: sized at the target output's scale, then placed through the window-geometry extension's `MoveWindow` once the first frame is presented (the runtime's device convention, `u_wayland_geom.h`); without the extension the compositor's placement stands. One `initial rect:` log line per outcome |
 | `session_binding_chain(next)` | the `XR_DXR_xlib_window_binding` or `XR_DXR_wayland_surface_binding` (+ `XrWaylandSurfaceGeometryDXR`) struct to chain into `xrCreateSession`, with `transparentBackgroundEnabled` |
 | `attach_session(instance, session)` | arms the per-frame Wayland geometry feed (`xrSetWaylandSurfaceGeometryDXR`) |
 | `pump_events(on_event, &running)` | keys (X11 keysyms at level 0 on both backends, + modifiers, auto-repeat marked), buttons, motion, scroll, focus, pointer-leave and content resizes, all in content buffer px |

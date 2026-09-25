@@ -289,9 +289,64 @@ test_force_in_process()
 }
 #endif
 
+static void
+test_final_url_policy()
+{
+    CHECK(dxr::LaunchPolicyAllowsUrl("https://cdn.example.com/a.glb?x=1&y=2", true), "https ok (protocol)");
+    CHECK(dxr::LaunchPolicyAllowsUrl("http://127.0.0.1:8080/a.glb", true), "loopback http ok (protocol)");
+    CHECK(!dxr::LaunchPolicyAllowsUrl("http://evil.example.com/a.glb", true), "remote http refused (protocol)");
+    CHECK(!dxr::LaunchPolicyAllowsUrl("file:///etc/passwd", true), "file: refused (protocol)");
+    CHECK(!dxr::LaunchPolicyAllowsUrl("http://evil.example.com/a.glb", false), "CLI: remote http refused too");
+    CHECK(dxr::LaunchPolicyAllowsUrl("https://cdn.example.com/a.glb", false), "CLI: https ok");
+    CHECK(!dxr::LaunchPolicyAllowsUrl("/local/path.glb", false), "a local path is not a URL");
+    CHECK(dxr::PercentEncodeComponent("a b/c?d=e&f") == "a%20b%2Fc%3Fd%3De%26f", "percent-encode");
+}
+
+static void
+test_sha1()
+{
+    // FIPS 180-4 vectors, plus lengths straddling the 55/56/64-byte padding edges.
+    CHECK(dxr::Sha1Hex("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709", "sha1 empty");
+    CHECK(dxr::Sha1Hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d", "sha1 abc");
+    CHECK(dxr::Sha1Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+              "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+          "sha1 448-bit");
+    CHECK(dxr::Sha1Hex(std::string(64, 'a')) == "0098ba824b5c16427bd7a1122a5a442a25ec644d", "sha1 64 x a");
+    CHECK(dxr::Sha1Hex(std::string(1000000, 'a')) == "34aa973cd4c4daa4f61eeb2bdbad27316534016f",
+          "sha1 million a");
+    CHECK(dxr::Sha1Hex(std::string(55, 'a')) == "c1c8bbdc22796e28c0e15163d20899b65621d65a", "sha1 55 x a");
+    CHECK(dxr::Sha1Hex(std::string(56, 'a')) == "c2db330f6083854c99d4b5bfb6e8f29f201be699", "sha1 56 x a");
+}
+
+static void
+test_clamp_rect_into_panel()
+{
+    // Panel 3840x2160 at (1920, 0).
+    int32_t x = 100, y = 50;
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, false) && x == 100 && y == 50,
+          "unconfirmed panel: rect untouched");
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 0, 0, 0, 0, true) && x == 100,
+          "unresolved (empty) panel rect: rect untouched");
+    x = 2400; y = 300;
+    CHECK(!dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 2400 && y == 300,
+          "already inside: untouched");
+    x = 100; y = -40;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 1920 && y == 0,
+          "off the left/top: nudged to the panel edge, size kept");
+    x = 5600; y = 2000;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 800, 600, 1920, 0, 3840, 2160, true) && x == 4960 && y == 1560,
+          "off the right/bottom: nudged back inside");
+    x = 3000; y = 10;
+    CHECK(dxr::ClampRectIntoPanel(x, y, 5000, 600, 1920, 0, 3840, 2160, true) && x == 1920 && y == 10,
+          "wider than the panel: pinned to its left edge");
+}
+
 int
 main()
 {
+    test_clamp_rect_into_panel();
+    test_sha1();
+    test_final_url_policy();
     test_cli_positional();
     test_protocol_happy_path();
     test_protocol_security();

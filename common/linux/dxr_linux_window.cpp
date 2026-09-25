@@ -668,8 +668,10 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	const char *no_fs = getenv("DXR_X11_NO_FULLSCREEN");
 	const bool fs_opt_out = no_fs != nullptr && no_fs[0] != '\0' && strcmp(no_fs, "0") != 0;
 	const bool panel_known = desc.panel_width > 0 && desc.panel_height > 0;
-	const bool want_fullscreen =
-	    panel_known && !fs_opt_out && desc.width == desc.panel_width && desc.height == desc.panel_height;
+	// A request_initial_rect() window is an exact windowed placement at any
+	// size, the panel's included.
+	const bool want_fullscreen = panel_known && !fs_opt_out && !m_rect.active && desc.width == desc.panel_width &&
+	                             desc.height == desc.panel_height;
 
 	// #1588: a WINDOWED toplevel is undecorated + client-dragged as well, so
 	// every move can be routed through the weave's lattice snap. Opt out for
@@ -685,6 +687,24 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	if (desc.has_position && !want_fullscreen) {
 		screenLeft = desc.x;
 		screenTop = desc.y;
+	}
+	// request_initial_rect() under a known placement quantum (XWayland at a
+	// global scale q: only multiples of q survive the round trip, see
+	// u_x11_scale.h): ask for the nearest reachable origin rather than have
+	// the compositor round it somewhere of its own choosing.
+	if (m_rect.active) {
+		const char *qenv = getenv("DXR_X11_PLACEMENT_QUANTUM");
+		const long q = qenv != nullptr ? strtol(qenv, nullptr, 10) : 0;
+		if (q > 1 && q <= 16) {
+			const int32_t qx = u_x11_reachable_round(0, screenLeft, (uint32_t)q);
+			const int32_t qy = u_x11_reachable_round(0, screenTop, (uint32_t)q);
+			if (qx != screenLeft || qy != screenTop) {
+				DXRW_INFO("initial rect: DXR_X11_PLACEMENT_QUANTUM=%ld — origin (%d, %d) -> reachable (%d, %d)", q,
+				          screenLeft, screenTop, qx, qy);
+			}
+			screenLeft = qx;
+			screenTop = qy;
+		}
 	}
 
 	// Bounded retry: an X server with no other clients (Xvfb, a bare kiosk
@@ -1016,6 +1036,59 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	}
 	x11_layout_content();
 
+	// request_initial_rect(): verify the landing. The post-map move above is
+	// what mutter honours; if the window is still elsewhere once it settled,
+	// ask once more, then report where the content really is — and feed the
+	// placement probe, which is what names a quantised X screen.
+	if (m_rect.active && !want_fullscreen) {
+		int rx = 0;
+		int ry = 0;
+		x11_root_origin(m_x_display, x11_bound_window(), &rx, &ry);
+		if (rx != screenLeft || ry != screenTop) {
+			// Correct the top-level by the content's error (the bar offset
+			// inside it is constant).
+			XMoveWindow(m_x_display, m_x_window, top_x + (screenLeft - rx), top_y + (screenTop - ry));
+			XFlush(m_x_display);
+			Display *dpy = m_x_display;
+			::Window bound = x11_bound_window();
+			const int want_x = screenLeft;
+			const int want_y = screenTop;
+			x11_pump_for(m_x_display, 250, [dpy, bound, want_x, want_y]() {
+				int ox = 0;
+				int oy = 0;
+				x11_root_origin(dpy, bound, &ox, &oy);
+				return ox == want_x && oy == want_y;
+			});
+			x11_root_origin(m_x_display, x11_bound_window(), &rx, &ry);
+		}
+		u_x11_placement_probe_note(&m_x_probe, screenLeft, screenTop, rx, ry);
+		XWindowAttributes ca = {};
+		XGetWindowAttributes(m_x_display, x11_bound_window(), &ca);
+		const int dx = rx - m_rect.x;
+		const int dy = ry - m_rect.y;
+		if (dx == 0 && dy == 0 && (uint32_t)ca.width == m_rect.w && (uint32_t)ca.height == m_rect.h) {
+			DXRW_INFO("initial rect: LANDED — X11 content at (%d, %d) %dx%d, exactly the requested rect", rx, ry,
+			          ca.width, ca.height);
+		} else {
+			DXRW_WARN("initial rect: X11 content at (%d, %d) %dx%d, requested (%d, %d) %ux%u — off by (%+d, %+d)%s",
+			          rx, ry, ca.width, ca.height, m_rect.x, m_rect.y, m_rect.w, m_rect.h, dx, dy,
+			          (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1)
+			              ? " (a 1 px miss is the XWayland placement quantum at a scaled desktop)"
+			              : " (the window manager placed it elsewhere)");
+		}
+		m_x_drag_at_x = rx;
+		m_x_drag_at_y = ry;
+		// Phase: once a snap provider answers (after the session exists), put
+		// the landed origin through it — only where the content overlaps the
+		// 3D panel; anywhere else the requested rect stands exactly.
+		const bool on_panel = panel_known && rx < desc.panel_left + (int32_t)desc.panel_width &&
+		                      rx + (int32_t)m_rect.w > desc.panel_left &&
+		                      ry < desc.panel_top + (int32_t)desc.panel_height &&
+		                      ry + (int32_t)m_rect.h > desc.panel_top;
+		m_x_rect_snap_owed = on_panel && client_drag;
+		m_x_rect_snap_pumps = 0;
+	}
+
 	// DXR_X11_TEST_DRAG=dx,dy,steps — TEST HOOK, off by default. Only meaningful
 	// where a drag is possible at all (windowed + client-owned).
 	if (client_drag) {
@@ -1143,6 +1216,63 @@ void DxrLinuxWindow::x11_check_landing() {
               m_x_probe.inferred_quantum, m_x_probe.inferred_quantum,
               m_x_probe.inferred_quantum);
   }
+}
+
+void
+DxrLinuxWindow::x11_rect_snap_tick()
+{
+	if (!m_x_rect_snap_owed || m_x_display == nullptr || m_x_window == 0) {
+		return;
+	}
+	// A drag, fullscreen or the WM's own decorations took the window over
+	// first: the user placed it, nothing is owed any more.
+	if (m_x_dragging || m_x_fullscreen || !m_x_client_drag) {
+		m_x_rect_snap_owed = false;
+		return;
+	}
+	m_x_rect_snap_pumps++;
+	// The provider is installed after the session exists and may decline
+	// until the display processor has a viewing distance, so ask every ~1/4 s
+	// for up to ~10 s at 60 Hz, then leave the requested rect as it is.
+	const uint64_t kEvery = 15;
+	const uint64_t kGiveUp = 600;
+	if (m_x_rect_snap_pumps > kGiveUp) {
+		m_x_rect_snap_owed = false;
+		DXRW_INFO("initial rect: no phase snap answered within %llu pumps — the window stays at the requested "
+		          "rect",
+		          (unsigned long long)kGiveUp);
+		return;
+	}
+	if (!has_snap_provider() || m_x_rect_snap_pumps % kEvery != 0) {
+		return;
+	}
+	int cx = 0;
+	int cy = 0;
+	x11_root_origin(m_x_display, x11_bound_window(), &cx, &cy);
+	int32_t sx = cx;
+	int32_t sy = cy;
+	if (!snap_one(cx, cy, cx, cy, &sx, &sy)) {
+		return; // declined for now; ask again later
+	}
+	m_x_rect_snap_owed = false;
+	if (sx == cx && sy == cy) {
+		DXRW_INFO("initial rect: content origin (%d, %d) is already on the phase lattice", cx, cy);
+		return;
+	}
+	int tx = 0;
+	int ty = 0;
+	x11_root_origin(m_x_display, m_x_window, &tx, &ty);
+	XMoveWindow(m_x_display, m_x_window, sx - (cx - tx), sy - (cy - ty));
+	XFlush(m_x_display);
+	m_x_drag_at_x = sx;
+	m_x_drag_at_y = sy;
+	// Read back on the next move's landing check, like a drag step.
+	m_x_probe_pending = true;
+	m_x_probe_want_x = sx;
+	m_x_probe_want_y = sy;
+	DXRW_INFO("initial rect: phase snap moved the content (%d, %d) -> (%d, %d) (the display processor's lattice; "
+	          "the 3D is phased correctly from the first woven frame)",
+	          cx, cy, sx, sy);
 }
 
 void
@@ -2747,6 +2877,236 @@ DxrLinuxWindow::wl_drag_prepare(bool sync)
 }
 #endif // DXR_APP_HAVE_WL_CHROME
 
+/*
+ *
+ * request_initial_rect() on Wayland.
+ *
+ */
+
+namespace {
+//! The logical offset k from a monitor origin whose device image under the
+//! runtime's rounding (u_wl_logical_to_px) is nearest @p device_offset.
+int32_t
+wl_logical_offset_for(int32_t device_offset, double scale)
+{
+	const int32_t k0 = (int32_t)lround((double)device_offset / scale);
+	int32_t best = k0;
+	int32_t best_err = INT32_MAX;
+	for (int32_t k = k0 - 1; k <= k0 + 1; k++) {
+		const int32_t err = std::abs(u_wl_logical_to_px(k, scale) - device_offset);
+		if (err < best_err) {
+			best_err = err;
+			best = k;
+		}
+	}
+	return best;
+}
+} // namespace
+
+const DxrLinuxWindow::WlOutput *
+DxrLinuxWindow::wl_rect_target_output() const
+{
+	const WlOutput *best = nullptr;
+	int64_t best_area = 0;
+	for (const auto &out : m_wl_outputs) {
+		if (!out.have_logical_size || out.logical_w <= 0 || out.mode_w <= 0) {
+			continue;
+		}
+		struct u_wl_monitor mon = {};
+		mon.logical_x = out.logical_x;
+		mon.logical_y = out.logical_y;
+		mon.logical_w = out.logical_w;
+		mon.logical_h = out.logical_h;
+		mon.mode_w = out.mode_w;
+		mon.mode_h = out.mode_h;
+		struct u_wl_rect_px r = {};
+		if (!u_wl_monitor_rect_px(&mon, &r)) {
+			continue;
+		}
+		const int64_t ix0 = std::max<int64_t>(r.x, m_rect.x);
+		const int64_t iy0 = std::max<int64_t>(r.y, m_rect.y);
+		const int64_t ix1 = std::min<int64_t>((int64_t)r.x + r.w, (int64_t)m_rect.x + m_rect.w);
+		const int64_t iy1 = std::min<int64_t>((int64_t)r.y + r.h, (int64_t)m_rect.y + m_rect.h);
+		const int64_t area = (ix1 > ix0 && iy1 > iy0) ? (ix1 - ix0) * (iy1 - iy0) : 0;
+		if (area > best_area) {
+			best_area = area;
+			best = &out;
+		}
+	}
+	return best;
+}
+
+void
+DxrLinuxWindow::wl_rect_prepare(const WlOutput *out, double scale)
+{
+	m_wl_rect_state = WlRectState::Idle;
+	m_wl_rect_moves = 0;
+	m_wl_rect_pumps = 0;
+	m_wl_rect_total = 0;
+	if (out == nullptr || !(scale > 0.0)) {
+		DXRW_WARN("initial rect: (%d, %d) %ux%u device px is on no output this compositor reports (%zu seen) — "
+		          "the compositor's placement stands; the size is applied at scale 1",
+		          m_rect.x, m_rect.y, m_rect.w, m_rect.h, m_wl_outputs.size());
+		return;
+	}
+	// Invert the runtime's convention (u_wayland_geom.h): the monitor's device
+	// origin is its logical origin x its own scale, and a window's device
+	// offset inside it is its logical offset x the same scale.
+	const int32_t mon_px_x = u_wl_logical_to_px(out->logical_x, scale);
+	const int32_t mon_px_y = u_wl_logical_to_px(out->logical_y, scale);
+	m_wl_rect_logical_x = out->logical_x + wl_logical_offset_for(m_rect.x - mon_px_x, scale);
+	m_wl_rect_logical_y = out->logical_y + wl_logical_offset_for(m_rect.y - mon_px_y, scale);
+#ifdef DXR_APP_HAVE_WL_CHROME
+	if (!m_wl_placement.connected()) {
+		DXRW_WARN("initial rect: no session bus, so no window-geometry service to place the window — the "
+		          "compositor's placement stands (content size %dx%d logical still applies)",
+		          m_wl_config_w, m_wl_config_h);
+		return;
+	}
+	m_wl_rect_state = WlRectState::WaitMap;
+	DXRW_INFO("initial rect: target output %s (scale %.4f, device origin %d,%d) — content to LOGICAL (%d, %d) "
+	          "%dx%d; placed through the window-geometry extension once the first frame is presented",
+	          wl_output_label(out->output).c_str(), scale, mon_px_x, mon_px_y, m_wl_rect_logical_x,
+	          m_wl_rect_logical_y, m_wl_config_w, m_wl_config_h);
+#else
+	DXRW_WARN("initial rect: this build has no window-geometry client (built without displayxr::csd / libdbus) — "
+	          "a Wayland client cannot place itself, so the compositor's placement stands; the size applies");
+#endif
+}
+
+void
+DxrLinuxWindow::wl_rect_tick()
+{
+#ifdef DXR_APP_HAVE_WL_CHROME
+	if (m_wl_rect_state == WlRectState::Idle) {
+		return;
+	}
+	m_wl_rect_total++;
+	m_wl_rect_pumps++;
+
+	// ~10 s at 60 Hz for the whole thing, whatever happens.
+	if (m_wl_rect_total > 600) {
+		DXRW_WARN("initial rect: gave up after %llu pumps (%s) — the compositor's placement stands",
+		          (unsigned long long)m_wl_rect_total,
+		          m_wl_rect_state == WlRectState::WaitMap ? "the surface never mapped"
+		                                                  : "no geometry for this window from the service");
+		m_wl_rect_state = WlRectState::Idle;
+		return;
+	}
+	if (m_wl_rect_state == WlRectState::WaitMap) {
+		// Mapped = the first wl_surface.enter = the WSI presented a buffer.
+		// mutter drops a placement made before that, as it drops the output
+		// of an early set_fullscreen.
+		if (!m_wl_entered.empty()) {
+			m_wl_rect_state = WlRectState::Move;
+			m_wl_rect_pumps = 0;
+		}
+		return;
+	}
+	// The user (or F11) got there first: their placement wins.
+	if (m_wl_fullscreen || m_wl_fs_deferred || m_wl_compositor_drag) {
+		DXRW_INFO("initial rect: superseded (%s) — not placing", m_wl_compositor_drag ? "a drag" : "fullscreen");
+		m_wl_rect_state = WlRectState::Idle;
+		return;
+	}
+	// Paced: a GetWindows round trip every few pumps, never every frame
+	// (every other pump while verifying, so a landing is seen promptly).
+	if ((m_wl_rect_pumps % (m_wl_rect_state == WlRectState::Verify ? 2 : 5)) != 1) {
+		return;
+	}
+	DxrWlPlacement::OwnGeometry g;
+	if (!m_wl_placement.get_own_geometry(&g)) {
+		return; // not listed yet (just mapped), or the service is absent — bounded above
+	}
+	// The runtime anchors to "buffer" (the bound content surface; the title
+	// bar is a subsurface above it), so that is what must land on the target.
+	const int32_t ddx = m_wl_rect_logical_x - g.buffer[0];
+	const int32_t ddy = m_wl_rect_logical_y - g.buffer[1];
+	const bool arrived = ddx == 0 && ddy == 0;
+	// On the 3D panel the runtime's drop-time phase snap treats our move like
+	// any finished one and may nudge the window onto the interlace lattice
+	// (at most 3 logical px) before this poll sees the exact target. That is
+	// the intended end state, not a miss: accept it rather than fight it.
+	const bool moved_since = g.buffer[0] != m_wl_rect_before_x || g.buffer[1] != m_wl_rect_before_y;
+	const bool snapped_near = m_wl_rect_state == WlRectState::Verify && moved_since && std::abs(ddx) <= 3 &&
+	                          std::abs(ddy) <= 3;
+
+	bool finish = arrived || snapped_near;
+	if (!finish && m_wl_rect_state == WlRectState::Verify && m_wl_rect_pumps > 60) {
+		if (m_wl_rect_moves < 2) {
+			m_wl_rect_state = WlRectState::Move; // one more try
+			m_wl_rect_pumps = 0;
+			return;
+		}
+		finish = true;
+	}
+	if (!finish && m_wl_rect_state == WlRectState::Move && m_wl_rect_moves >= 2) {
+		finish = true;
+	}
+	if (finish) {
+		// Report in the requester's space: the monitor the window is on now,
+		// through the runtime's own conversion.
+		const double sc = g.monitor_scale > 0.0 ? g.monitor_scale : 1.0;
+		const int32_t px =
+		    u_wl_logical_to_px(g.monitor[0], sc) + u_wl_logical_to_px(g.buffer[0] - g.monitor[0], sc);
+		const int32_t py =
+		    u_wl_logical_to_px(g.monitor[1], sc) + u_wl_logical_to_px(g.buffer[1] - g.monitor[1], sc);
+		const int32_t pw = u_wl_logical_to_px(g.buffer[2], sc);
+		const int32_t ph = u_wl_logical_to_px(g.buffer[3], sc);
+		const int32_t ex = px - m_rect.x;
+		const int32_t ey = py - m_rect.y;
+		const bool within = ex >= -1 && ex <= 1 && ey >= -1 && ey <= 1;
+		if (arrived && within) {
+			DXRW_INFO("initial rect: LANDED — Wayland content at (%d, %d) %dx%d device px (logical (%d, %d) "
+			          "%dx%d at scale %.4f), requested (%d, %d) %ux%u, off by (%+d, %+d); %u move(s)",
+			          px, py, pw, ph, g.buffer[0], g.buffer[1], g.buffer[2], g.buffer[3], sc, m_rect.x,
+			          m_rect.y, m_rect.w, m_rect.h, ex, ey, m_wl_rect_moves);
+		} else if (arrived) {
+			// At the logical target, but it converts to another device rect:
+			// the rect crossed monitors of different scales (each has its
+			// own device grid, u_wayland_geom.h), so the window ended up on a
+			// monitor other than the one the rect was converted on.
+			DXRW_WARN("initial rect: at the logical target (%d, %d), which is (%d, %d) %dx%d device px on its "
+			          "monitor (scale %.4f), requested (%d, %d) %ux%u — the rect spans monitors of different "
+			          "scales, so no single device position matches it",
+			          g.buffer[0], g.buffer[1], px, py, pw, ph, sc, m_rect.x, m_rect.y, m_rect.w, m_rect.h);
+		} else if (snapped_near) {
+			DXRW_INFO("initial rect: LANDED and phase-snapped — Wayland content at (%d, %d) %dx%d device px "
+			          "(logical (%d, %d)), requested (%d, %d) %ux%u; the runtime's drop-time snap moved it "
+			          "(%+d, %+d) logical onto the interlace lattice",
+			          px, py, pw, ph, g.buffer[0], g.buffer[1], m_rect.x, m_rect.y, m_rect.w, m_rect.h, -ddx,
+			          -ddy);
+		} else {
+			DXRW_WARN("initial rect: Wayland content at (%d, %d) %dx%d device px (logical (%d, %d)), requested "
+			          "(%d, %d) %ux%u — off by (%+d, %+d) after %u move(s)%s",
+			          px, py, pw, ph, g.buffer[0], g.buffer[1], m_rect.x, m_rect.y, m_rect.w, m_rect.h, ex, ey,
+			          m_wl_rect_moves,
+			          arrived ? "" : " (the compositor constrained the move — e.g. a work-area edge)");
+		}
+		m_wl_rect_state = WlRectState::Idle;
+		return;
+	}
+	if (m_wl_rect_state == WlRectState::Verify) {
+		return; // still settling
+	}
+	// Move the FRAME by the content's error: a client-side title bar keeps
+	// its offset above the content.
+	m_wl_rect_before_x = g.buffer[0];
+	m_wl_rect_before_y = g.buffer[1];
+	const bool ok = m_wl_placement.move_window(g.frame[0] + ddx, g.frame[1] + ddy);
+	m_wl_rect_moves++;
+	if (ok) {
+		m_wl_rect_state = WlRectState::Verify;
+		m_wl_rect_pumps = 0;
+	} else if (m_wl_rect_moves >= 2) {
+		DXRW_WARN("initial rect: the window-geometry service refused MoveWindow twice (an older extension "
+		          "without WindowPlacement1, a grab in progress, or a window that may not move) — the "
+		          "compositor's placement stands");
+		m_wl_rect_state = WlRectState::Idle;
+	}
+#endif
+}
+
 bool
 DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 {
@@ -2944,6 +3304,10 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		m_wl_panel_mode_w = m_wl_fullscreen_mode_w;
 		m_wl_panel_mode_h = m_wl_fullscreen_mode_h;
 	}
+	// request_initial_rect(): the output the rect lands on and its scale, set
+	// in the windowed branch below and armed once the placement client is up.
+	const WlOutput *rect_out = nullptr;
+	double rect_scale = 0.0;
 	if (desc.fullscreen_on_wayland && m_wl_panel_output != nullptr) {
 		// DEFERRED (see m_wl_fs_deferred): mutter would drop the output of a
 		// pre-map request and fullscreen on whatever monitor is "current".
@@ -2986,6 +3350,15 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 				est = (double)out.mode_w / (double)out.logical_w;
 			}
 		}
+		// request_initial_rect(): the window is going to the output the rect
+		// covers most, so size it at THAT output's scale, and hold the size
+		// (m_wl_size_from_desc off) — the first preferred_scale comes from
+		// wherever the compositor maps the window before it is moved, which
+		// may be another output at another scale.
+		rect_out = m_rect.active ? wl_rect_target_output() : nullptr;
+		if (rect_out != nullptr) {
+			est = (double)rect_out->mode_w / (double)rect_out->logical_w;
+		}
 		if (m_wl_frac_manager == nullptr) {
 			// No preferred scale will ever arrive, so the declared buffer is the
 			// configure size itself (wl_declared_size): logical = device.
@@ -2993,7 +3366,8 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		}
 		m_wl_config_w = (int32_t)((double)desc.width / est + 0.5);
 		m_wl_config_h = (int32_t)((double)desc.height / est + 0.5);
-		m_wl_size_from_desc = m_wl_frac_manager != nullptr;
+		m_wl_size_from_desc = m_wl_frac_manager != nullptr && rect_out == nullptr;
+		rect_scale = est;
 		m_wl_windowed_w = m_wl_config_w;
 		m_wl_windowed_h = m_wl_config_h;
 		DXRW_INFO("Wayland: requested %ux%u device px -> %dx%d logical at an estimated scale %.4f "
@@ -3030,6 +3404,9 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 	DXRW_INFO("drag lattice: compositor placement service — %s", m_wl_placement.describe());
 	m_wl_chrome.set_drag_prepare([this] { wl_drag_prepare(); });
 #endif
+	if (m_rect.active) {
+		wl_rect_prepare(rect_out, rect_scale); // after connect(): it needs the bus
+	}
 
 	// The role is attached and the state requested; commit so the compositor
 	// sends the initial configure. NOTE: this is the ONLY commit this helper
@@ -3228,9 +3605,40 @@ DxrLinuxWindow::~DxrLinuxWindow()
 	destroy();
 }
 
-bool
-DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc)
+void
+DxrLinuxWindow::request_initial_rect(int32_t x, int32_t y, uint32_t w, uint32_t h)
 {
+	if (m_backend != DxrWindowBackend::Auto) {
+		DXRW_WARN("initial rect: request_initial_rect(%d, %d, %ux%u) after create() — ignored; call it first",
+		          x, y, w, h);
+		return;
+	}
+	if (w == 0 || h == 0) {
+		DXRW_WARN("initial rect: empty rect %ux%u ignored", w, h);
+		return;
+	}
+	m_rect.active = true;
+	m_rect.x = x;
+	m_rect.y = y;
+	m_rect.w = w;
+	m_rect.h = h;
+	DXRW_INFO("initial rect: requested content (%d, %d) %ux%u desktop device px", x, y, w, h);
+}
+
+bool
+DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc_in)
+{
+	// request_initial_rect(): the rect IS the size and the content origin, and
+	// the window is windowed whatever the size (see the header).
+	DxrLinuxWindowDesc desc = desc_in;
+	if (m_rect.active) {
+		desc.width = m_rect.w;
+		desc.height = m_rect.h;
+		desc.has_position = true;
+		desc.x = m_rect.x;
+		desc.y = m_rect.y;
+		desc.fullscreen_on_wayland = false;
+	}
 	m_desc = desc;
 	m_backend = backend;
 
@@ -3725,6 +4133,7 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		}
 
 		x11_drive_test_drag();
+		x11_rect_snap_tick();
 		x11_paint_bar();
 		note_content_size();
 	}
@@ -3798,6 +4207,8 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				wl_request_panel_fullscreen("no wl_surface.enter after 240 pumps — requesting unmapped");
 			}
 		}
+		// request_initial_rect(): place once mapped (present first, then place).
+		wl_rect_tick();
 		if (m_wl_output_report_in > 0 && --m_wl_output_report_in == 0) {
 			m_wl_output_report_in = -1;
 			wl_report_fullscreen_output();
@@ -4609,4 +5020,9 @@ DxrLinuxWindow::destroy()
 	m_backend = DxrWindowBackend::Auto;
 	m_events.clear();
 	m_connection_desc.clear();
+	m_rect = InitialRect{};
+	m_x_rect_snap_owed = false;
+#ifdef DXR_APP_HAVE_WAYLAND
+	m_wl_rect_state = WlRectState::Idle;
+#endif
 }

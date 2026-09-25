@@ -434,6 +434,49 @@ public:
 	static const char *
 	backend_name(DxrWindowBackend b);
 
+	/*!
+	 * Open with the CONTENT at an exact desktop rect: an app's `--rect`
+	 * (displayxr-common launch_args.h), e.g. the browser's undock() opening a
+	 * viewer over the page element it came from. Call BEFORE create().
+	 *
+	 * @p x, @p y, @p w, @p h are desktop DEVICE pixels, the space the Windows
+	 * arm's `--rect` uses and the runtime's panel rect is reported in:
+	 *   - X11: X root coordinates (what a browser on X11 measures).
+	 *   - Wayland: the runtime's logical -> device convention
+	 *     (u_wayland_geom.h): monitor logical origin x that monitor's scale,
+	 *     plus the monitor-relative logical offset x the same scale — the
+	 *     space the window-geometry feed reports a window in.
+	 *
+	 * It REPLACES desc.width/height/has_position/x/y and always gives a
+	 * WINDOWED window: a rect is an exact placement, never the panel-sized
+	 * fullscreen shape, even when w x h equals the panel (the Windows arm
+	 * creates a plain window of exactly that rect as well). As on Windows,
+	 * the rect names the content: a header bar, when shown, sits above it.
+	 *
+	 * How it lands:
+	 *   - X11: created at the rect and moved again after the map (mutter
+	 *     ignores a pre-map position); the landing is read back and logged,
+	 *     and fed to the placement-quantum probe. DXR_X11_PLACEMENT_QUANTUM=q
+	 *     (q > 1) rounds the origin to the reachable lattice first. When the
+	 *     content overlaps the 3D panel, the origin is put through the snap
+	 *     provider once it answers (after the session exists), so the weave
+	 *     phase is correct from the start — the same snap a drag uses.
+	 *   - Wayland: a client cannot place itself. The surface is sized from
+	 *     @p w, @p h at the TARGET output's scale (the output the rect covers
+	 *     most); once the surface is mapped (a frame presented — mutter drops
+	 *     placement made before the first buffer, as with set_fullscreen) the
+	 *     window-geometry extension's MoveWindow moves it so the content lands
+	 *     at the rect, and the landing is read back through GetWindows and
+	 *     retried once. On the 3D panel the runtime's drop-time phase snap
+	 *     then treats it like any finished move. Without the extension (or
+	 *     in a build without libdbus / the chrome) it is logged once and the
+	 *     compositor's placement stands; the size still applies.
+	 *
+	 * Every outcome logs one "initial rect:" line.
+	 */
+	void
+	request_initial_rect(int32_t x, int32_t y, uint32_t w, uint32_t h);
+
 	//! Bring the window up. On Wayland this includes the full xdg-shell
 	//! handshake: role, fullscreen request, commit, and the first
 	//! xdg_surface.configure ACKED — the session may be created straight after.
@@ -787,6 +830,21 @@ private:
 	//! Log (and remember) what the live connection turned out to be.
 	void
 	verify_connection(DxrWindowBackend requested);
+
+	// --- Initial rect (request_initial_rect) --------------------------------
+	struct InitialRect
+	{
+		bool active = false;
+		int32_t x = 0, y = 0; //!< content top-left, desktop device px
+		uint32_t w = 0, h = 0; //!< content size, device px
+	};
+	InitialRect m_rect;
+	//! X11: the landed origin still owes one pass through the snap provider.
+	bool m_x_rect_snap_owed = false;
+	uint64_t m_x_rect_snap_pumps = 0;
+	//! One X11 pump step of that snap (no-op once done).
+	void
+	x11_rect_snap_tick();
 	//! Queue a Resize event when the content size changed since the last one.
 	void
 	note_content_size();
@@ -1125,7 +1183,44 @@ private:
 		double press_to_table_ms = -1.0; //!< press to the first table the compositor accepted
 	} m_wl_drag_stats;
 	/*! @} */
-#endif
+#endif // DXR_APP_HAVE_WL_CHROME
+
+	/*!
+	 * @name Initial rect on Wayland (request_initial_rect)
+	 *
+	 * A small state machine run from pump(): wait for the map, read our own
+	 * geometry, MoveWindow, read back. Bounded: two moves, a few seconds.
+	 * @{
+	 */
+	enum class WlRectState
+	{
+		Idle,      //!< nothing requested, or finished
+		WaitMap,   //!< waiting for the first wl_surface.enter (a presented frame)
+		Move,      //!< read geometry + ask the compositor to move
+		Verify,    //!< read back until the content reaches the target
+	};
+	WlRectState m_wl_rect_state = WlRectState::Idle;
+	//! The content target, LOGICAL stage px (converted at create).
+	int32_t m_wl_rect_logical_x = 0, m_wl_rect_logical_y = 0;
+	uint32_t m_wl_rect_moves = 0;   //!< MoveWindow calls made
+	//! Content position (logical) just before the last move, to tell our move
+	//! having landed from the window not having moved yet.
+	int32_t m_wl_rect_before_x = INT32_MIN, m_wl_rect_before_y = INT32_MIN;
+	uint64_t m_wl_rect_pumps = 0;   //!< pumps in the current state
+	uint64_t m_wl_rect_total = 0;   //!< pumps since the placement started
+	//! The output the rect covers most (device px, u_wayland_geom.h), or
+	//! null when it covers none / no output has a logical size.
+	const WlOutput *
+	wl_rect_target_output() const;
+	//! Convert the rect's origin to a LOGICAL target on @p out and arm the
+	//! state machine (or log why it cannot run).
+	void
+	wl_rect_prepare(const WlOutput *out, double scale);
+	//! One pump step of the placement (the MoveWindow client needs the
+	//! chrome build's libdbus; without it this logs once and stops).
+	void
+	wl_rect_tick();
+	/*! @} */
 
 	//! Logical -> device scale of the surface, for the chrome's raster.
 	double

@@ -22,6 +22,16 @@ set_target_properties(displayxr_launch_args_test PROPERTIES
 
 add_test(NAME displayxr_launch_args_test COMMAND displayxr_launch_args_test)
 
+# The desktop-Linux fetcher (url_fetch.cpp, libcurl via dlopen). Live checks
+# only with DXR_URL_FETCH_TEST_PORT set (CI starts url_fetch_server.py).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(displayxr_url_fetch_test url_fetch_test.cpp)
+    target_link_libraries(displayxr_url_fetch_test PRIVATE displayxr::common)
+    set_target_properties(displayxr_url_fetch_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_url_fetch_test COMMAND displayxr_url_fetch_test)
+endif()
+
 # dxr_view_config.h contract test (runtime #1486). Links displayxr::rules (the
 # header-only, platform-neutral target the non-Windows legs consume) plus the
 # header-only OpenXR / DisplayXR-extension include targets — NOT the loader:

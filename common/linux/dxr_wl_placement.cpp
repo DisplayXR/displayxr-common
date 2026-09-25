@@ -149,7 +149,7 @@ DxrWlPlacement::set_drag_lattice(bool extend,
 }
 
 bool
-DxrWlPlacement::test_move_to(int32_t x, int32_t y)
+DxrWlPlacement::move_window(int32_t x, int32_t y)
 {
 	if (m_conn == nullptr) {
 		return false;
@@ -394,7 +394,7 @@ DxrWlPlacement::poll_needed(int32_t *dx, int32_t *dy)
 }
 
 bool
-DxrWlPlacement::test_move_to(int32_t x, int32_t y)
+DxrWlPlacement::move_window(int32_t x, int32_t y)
 {
 	(void)x;
 	(void)y;

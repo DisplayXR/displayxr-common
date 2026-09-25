@@ -670,6 +670,81 @@ ParseLaunchArgs(const std::vector<std::string>& args)
     return a;
 }
 
+//! Percent-encode everything but RFC 3986 unreserved characters, so a value
+//! round-trips through a `displayxr-view:` query string unchanged.
+inline std::string
+PercentEncodeComponent(std::string_view s)
+{
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+/*!
+ * Re-apply the launch policy to the URL a redirect chain ACTUALLY landed on
+ * (UrlFetchOptions::urlAllowed). Re-runs the real parser rather than a second
+ * "https or loopback" rule, so there is one copy of the policy and a redirect
+ * cannot walk a launch out of it. @p fromProtocol re-checks through the
+ * protocol form, which carries the stricter web-page rules; a viewer that
+ * wants the strict rule for every launch passes true.
+ */
+inline bool
+LaunchPolicyAllowsUrl(const std::string& url, bool fromProtocol)
+{
+    if (fromProtocol) {
+        const LaunchArgs a =
+            ParseLaunchArgs({"displayxr-view://open?src=" + PercentEncodeComponent(url) + "&v=1"});
+        return a.ok() && a.srcKind == LaunchSrcKind::Url;
+    }
+    const LaunchArgs a = ParseLaunchArgs({std::string("--src=") + url});
+    return a.ok() && a.srcKind == LaunchSrcKind::Url;
+}
+
+/*!
+ * `--rect` placement policy: nudge the rect INSIDE the 3D panel's desktop rect
+ * — never snap it TO the panel. The size is never changed; only the origin
+ * moves, and only far enough to bring the window fully onto the panel (a rect
+ * wider or taller than the panel is pinned to its left / top edge). The
+ * viewers' Windows arms have applied exactly this since display_info v18
+ * (`ClampRectIntoPanel`); the Linux arms share it from here.
+ *
+ * Does NOTHING unless the runtime confirmed the panel
+ * (`XrDisplayDesktopInfoDXR::isPanelConfirmed`): an unconfirmed rect is only
+ * the primary monitor (sim_display, or a platform whose panel-origin plumbing
+ * is open), and pulling a window onto the wrong monitor is worse than leaving
+ * it where the caller measured it. An empty panel rect is "unresolved" and is
+ * likewise left alone.
+ *
+ * @return true when the origin moved.
+ */
+inline bool
+ClampRectIntoPanel(int32_t& x, int32_t& y, int32_t w, int32_t h, int32_t panelX, int32_t panelY, int32_t panelW,
+                   int32_t panelH, bool panelConfirmed)
+{
+    if (!panelConfirmed || panelW <= 0 || panelH <= 0) return false;
+    const int32_t right = panelX + panelW;
+    const int32_t bottom = panelY + panelH;
+    int32_t nx = x, ny = y;
+    if (nx + w > right) nx = right - w;
+    if (ny + h > bottom) ny = bottom - h;
+    if (nx < panelX) nx = panelX;
+    if (ny < panelY) ny = panelY;
+    const bool moved = nx != x || ny != y;
+    x = nx;
+    y = ny;
+    return moved;
+}
+
 } // namespace dxr
 
 #if defined(_WIN32)
