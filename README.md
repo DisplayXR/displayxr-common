@@ -382,7 +382,13 @@ model_viewer.exe "displayxr-view://open?src=https%3A%2F%2Fhost%2Fx.glb&type=mode
   size, never snap it to the panel; an unconfirmed panel leaves the rect exactly where the caller
   measured it. On Linux the rect then goes to `DxrLinuxWindow::request_initial_rect()`.
 - `dxr::FetchUrlToCache()` downloads on a worker thread into a SHA-1-named cache file and reports
-  progress for the viewer's toast; a cache hit never touches the network.
+  progress for the viewer's toast; a cache hit never touches the network. Windows: WinHTTP,
+  cache in `%LOCALAPPDATA%\DisplayXR\<app>\cache`. Desktop Linux: libcurl loaded with `dlopen`
+  (`libcurl.so.4`, else `libcurl-gnutls.so.4`) — not linked, because the t64 transition renamed
+  its package and the viewers' `.deb`s allow no such dependency (they Recommend `curl`) — cache in
+  `$XDG_CACHE_HOME/displayxr/<app>`. Same policy hook (`dxr::LaunchPolicyAllowsUrl` re-checks
+  the final URL), cap and timeouts on both; `tests/url_fetch_test.cpp` runs the Linux one against
+  a loopback server in CI.
 - `dxr::EnsureViewProtocolRegistered()` writes `HKCU\Software\Classes\displayxr-view` on launch
   (the installers run elevated, so an HKCU write there lands in the wrong hive);
   `FindSiblingViewer()` + `LaunchViewerWithUrl()` forward a URL whose `type=` belongs to another

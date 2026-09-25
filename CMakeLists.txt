@@ -269,7 +269,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/vk_clickthrough_region.h # header-only coverage->SetWindowRgn punch-through (#833, Win32)
     common/win_window_drag.h  # header-only RMB window-drag for borderless overlays (Win32)
     common/launch_args.h      # header-only viewer launch contract: CLI flags + displayxr-view: URL
-    common/url_fetch.cpp      # asset download to a per-user cache (WinHTTP on Windows; pure helpers everywhere)
+    common/url_fetch.cpp      # asset download to a per-user cache (WinHTTP on Windows, dlopen'd libcurl on Linux; pure helpers everywhere)
     common/url_fetch.h
     common/view_protocol.h    # header-only displayxr-view: registration / sibling forward / single instance (Win32)
     common/zone_default.cpp # zones-by-default: one full-window XrDisplayZoneDXR
@@ -390,6 +390,8 @@ endif()
 # common/linux/dxr_linux_window.{h,cmake}.
 # ---------------------------------------------------------------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # url_fetch.cpp dlopens libcurl (no link-time dependency; see url_fetch.h).
+    target_link_libraries(displayxr_common_lib PUBLIC ${CMAKE_DL_LIBS})
     include(common/linux/dxr_linux_window.cmake)
 endif()
 

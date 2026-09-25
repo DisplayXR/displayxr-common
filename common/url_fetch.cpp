@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  url_fetch.h implementation: pure helpers + the WinHTTP fetcher.
+ * @brief  url_fetch.h implementation: pure helpers, the WinHTTP fetcher and
+ *         the desktop-Linux libcurl (dlopen) fetcher.
  */
 
 #include "url_fetch.h"
@@ -29,6 +30,48 @@ Allowed(const std::string& ext, const std::vector<std::string>& allowed)
 }
 
 } // namespace
+
+std::string
+Sha1Hex(std::string_view data)
+{
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+    auto block = [&](const uint8_t* p) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 |
+                   (uint32_t)p[4 * i + 3];
+        for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+            else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+            const uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    };
+    const uint64_t bitLen = (uint64_t)data.size() * 8u;
+    size_t off = 0;
+    for (; off + 64 <= data.size(); off += 64) block(reinterpret_cast<const uint8_t*>(data.data()) + off);
+    uint8_t tail[128] = {};
+    const size_t rem = (data.size() - off) & 63; // < 64 by the loop above; the mask says so to the compiler
+    for (size_t i = 0; i < rem; ++i) tail[i] = static_cast<uint8_t>(data[off + i]);
+    tail[rem] = 0x80;
+    const size_t tailLen = rem + 1 + 8 <= 64 ? 64 : 128;
+    for (int i = 0; i < 8; ++i) tail[tailLen - 1 - i] = static_cast<uint8_t>(bitLen >> (8 * i));
+    block(tail);
+    if (tailLen == 128) block(tail + 64);
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.reserve(40);
+    for (uint32_t v : h)
+        for (int i = 7; i >= 0; --i) out.push_back(kHex[(v >> (4 * i)) & 0xf]);
+    return out;
+}
 
 std::string
 UrlPathExtension(std::string_view url)
@@ -148,9 +191,10 @@ Narrow(std::wstring_view w)
     return s;
 }
 
-//! Hex SHA-1 of `data` via CNG. Empty string on failure.
+//! Hex SHA-1 of `data` via CNG. Empty string on failure. (Same digest as the
+//! portable dxr::Sha1Hex; kept on CNG so the Windows path is unchanged.)
 std::wstring
-Sha1Hex(std::string_view data)
+Sha1HexCng(std::string_view data)
 {
     BCRYPT_ALG_HANDLE alg = nullptr;
     if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0)))
@@ -244,7 +288,7 @@ FetchUrlToCache(const std::string& url, const UrlFetchOptions& opts)
         }
     }
 
-    const std::wstring key = Sha1Hex(url);
+    const std::wstring key = Sha1HexCng(url);
     if (key.empty()) {
         r.error = "hashing failed";
         return r;
@@ -439,3 +483,366 @@ FetchUrlToCache(const std::string& url, const UrlFetchOptions& opts)
 } // namespace dxr
 
 #endif // _WIN32
+
+#if defined(__linux__) && !defined(__ANDROID__)
+
+/*
+ * Desktop Linux: libcurl through dlopen. Only the ABI-stable easy interface is
+ * used, and its constants are spelled here (values from curl.h, unchanged
+ * since they were introduced) so the build needs no libcurl headers either.
+ */
+
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <mutex>
+
+namespace dxr {
+
+namespace {
+
+// ---- the slice of curl.h this uses -----------------------------------------
+using CURL = void;
+using CURLcode = int;
+enum : int {
+    kCurleOk = 0,
+    kCurleWriteError = 23,
+    kCurleOperationTimedout = 28,
+    kCurleTooManyRedirects = 47,
+    kCurleUnknownOption = 48,
+    kCurleFilesizeExceeded = 63,
+};
+enum : long {
+    kOptWriteData = 10001,
+    kOptUrl = 10002,
+    kOptUserAgent = 10018,
+    kOptWriteFunction = 20011,
+    kOptLowSpeedLimit = 19,
+    kOptLowSpeedTime = 20,
+    kOptNoProgress = 43,
+    kOptFollowLocation = 52,
+    kOptMaxRedirs = 68,
+    kOptNoSignal = 99,
+    kOptConnectTimeoutMs = 156,
+    kOptProtocols = 181,
+    kOptRedirProtocols = 182,
+    kOptProtocolsStr = 10318,      // 7.85+
+    kOptRedirProtocolsStr = 10319, // 7.85+
+    kOptMaxFileSizeLarge = 30117,
+};
+enum : long {
+    kInfoEffectiveUrl = 0x100001,
+    kInfoContentType = 0x100012,
+    kInfoResponseCode = 0x200002,
+    kInfoContentLengthDownloadT = 0x60000F,
+};
+constexpr long kCurlGlobalDefault = 3;
+constexpr long kProtoHttp = 1, kProtoHttps = 2;
+
+struct CurlApi {
+    CURLcode (*global_init)(long) = nullptr;
+    CURL* (*easy_init)() = nullptr;
+    CURLcode (*easy_setopt)(CURL*, long, ...) = nullptr;
+    CURLcode (*easy_perform)(CURL*) = nullptr;
+    CURLcode (*easy_getinfo)(CURL*, long, ...) = nullptr;
+    void (*easy_cleanup)(CURL*) = nullptr;
+    const char* (*easy_strerror)(CURLcode) = nullptr;
+    const char* soname = nullptr;
+    bool ok = false;
+};
+
+//! Loaded once per process; never unloaded (curl keeps global state).
+const CurlApi&
+Curl()
+{
+    static CurlApi api;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        static const char* kNames[] = {"libcurl.so.4", "libcurl-gnutls.so.4"};
+        void* h = nullptr;
+        for (const char* n : kNames) {
+            h = dlopen(n, RTLD_NOW | RTLD_LOCAL);
+            if (h != nullptr) {
+                api.soname = n;
+                break;
+            }
+        }
+        if (h == nullptr) return;
+        api.global_init = reinterpret_cast<CURLcode (*)(long)>(dlsym(h, "curl_global_init"));
+        api.easy_init = reinterpret_cast<CURL* (*)()>(dlsym(h, "curl_easy_init"));
+        api.easy_setopt = reinterpret_cast<CURLcode (*)(CURL*, long, ...)>(dlsym(h, "curl_easy_setopt"));
+        api.easy_perform = reinterpret_cast<CURLcode (*)(CURL*)>(dlsym(h, "curl_easy_perform"));
+        api.easy_getinfo = reinterpret_cast<CURLcode (*)(CURL*, long, ...)>(dlsym(h, "curl_easy_getinfo"));
+        api.easy_cleanup = reinterpret_cast<void (*)(CURL*)>(dlsym(h, "curl_easy_cleanup"));
+        api.easy_strerror = reinterpret_cast<const char* (*)(CURLcode)>(dlsym(h, "curl_easy_strerror"));
+        api.ok = api.global_init && api.easy_init && api.easy_setopt && api.easy_perform && api.easy_getinfo &&
+                 api.easy_cleanup && api.easy_strerror;
+        // curl_global_init is not thread-safe; call_once serialises it.
+        if (api.ok && api.global_init(kCurlGlobalDefault) != kCurleOk) api.ok = false;
+    });
+    return api;
+}
+
+bool
+FileExistsPosix(const std::string& p)
+{
+    struct stat st;
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+//! mkdir -p; best effort, like the Windows cache-dir creation.
+void
+MakeDirs(const std::string& dir)
+{
+    std::string p;
+    for (size_t i = 0; i < dir.size(); ++i) {
+        p.push_back(dir[i]);
+        if ((dir[i] == '/' || i + 1 == dir.size()) && p.size() > 1) mkdir(p.c_str(), 0700);
+    }
+}
+
+std::string
+ErrnoText(const char* what)
+{
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "%s failed (%s)", what, strerror(errno));
+    return buf;
+}
+
+//! Per-transfer state the write callback works on.
+struct Transfer {
+    const CurlApi* api = nullptr;
+    CURL* curl = nullptr;
+    const UrlFetchOptions* opts = nullptr;
+    FILE* file = nullptr;
+    bool checked = false; // the first-body checks ran
+    uint64_t total = 0;
+    uint64_t done = 0;
+    std::vector<uint8_t> head;
+    std::string contentType;
+    std::string finalUrl;
+    std::string abortReason; // non-empty = the callback aborted the transfer
+};
+
+/*
+ * The body. The FIRST call runs what WinHTTP checks between receiving the
+ * response and reading it: the redirect chain has ended (curl hands redirect
+ * bodies to nobody), so the final URL is re-checked against the policy, the
+ * status must be 200 and a declared Content-Length must fit the cap — all
+ * before a byte reaches the disk.
+ */
+size_t
+WriteCb(char* ptr, size_t size, size_t nmemb, void* ud)
+{
+    Transfer* t = static_cast<Transfer*>(ud);
+    const size_t got = size * nmemb;
+    if (!t->checked) {
+        t->checked = true;
+        char* eff = nullptr;
+        if (t->api->easy_getinfo(t->curl, kInfoEffectiveUrl, &eff) == kCurleOk && eff != nullptr)
+            t->finalUrl = eff;
+        if (t->opts->urlAllowed && !t->opts->urlAllowed(t->finalUrl)) {
+            t->abortReason = "redirected to a URL the policy does not allow";
+            return 0;
+        }
+        long status = 0;
+        t->api->easy_getinfo(t->curl, kInfoResponseCode, &status);
+        if (status != 200) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "HTTP %ld", status);
+            t->abortReason = buf;
+            return 0;
+        }
+        int64_t clen = -1;
+        if (t->api->easy_getinfo(t->curl, kInfoContentLengthDownloadT, &clen) == kCurleOk && clen > 0) {
+            t->total = static_cast<uint64_t>(clen);
+            if (t->total > t->opts->maxBytes) {
+                t->abortReason = "asset larger than the download cap";
+                return 0;
+            }
+        }
+        char* ct = nullptr;
+        if (t->api->easy_getinfo(t->curl, kInfoContentType, &ct) == kCurleOk && ct != nullptr) t->contentType = ct;
+    }
+    if (got == 0) return 0;
+    t->done += got;
+    if (t->done > t->opts->maxBytes) {
+        t->abortReason = "asset larger than the download cap";
+        return 0;
+    }
+    if (t->head.size() < 16)
+        t->head.insert(t->head.end(), reinterpret_cast<uint8_t*>(ptr),
+                       reinterpret_cast<uint8_t*>(ptr) + std::min<size_t>(got, 16 - t->head.size()));
+    if (std::fwrite(ptr, 1, got, t->file) != got) {
+        t->abortReason = ErrnoText("write");
+        return 0;
+    }
+    if (t->opts->progress) t->opts->progress(t->done, t->total);
+    return got;
+}
+
+} // namespace
+
+std::string
+DefaultCacheDir(const char* appDirName)
+{
+    std::string base;
+    const char* xdg = getenv("XDG_CACHE_HOME");
+    if (xdg != nullptr && xdg[0] == '/') {
+        base = xdg; // the spec: a relative value is invalid and ignored
+    } else {
+        const char* home = getenv("HOME");
+        if (home == nullptr || home[0] != '/') return {};
+        base = std::string(home) + "/.cache";
+    }
+    return base + "/displayxr/" + (appDirName != nullptr ? appDirName : "viewer");
+}
+
+UrlFetchResult
+FetchUrlToCache(const std::string& url, const UrlFetchOptions& opts)
+{
+    UrlFetchResult r;
+    if (opts.cacheDir.empty()) {
+        r.error = "no cache directory";
+        return r;
+    }
+    if (opts.allowedExtensions.empty()) {
+        r.error = "no allowed extensions";
+        return r;
+    }
+    MakeDirs(opts.cacheDir);
+    const std::string base = opts.cacheDir + "/" + Sha1Hex(url);
+
+    // 1. Cache hit: any allowed extension already present for this key.
+    if (!opts.noCache) {
+        for (const std::string& ext : opts.allowedExtensions) {
+            const std::string candidate = base + ext;
+            if (FileExistsPosix(candidate)) {
+                r.ok = true;
+                r.fromCache = true;
+                r.path = candidate;
+                if (opts.progress) opts.progress(1, 1);
+                return r;
+            }
+        }
+    }
+
+    const CurlApi& api = Curl();
+    if (!api.ok) {
+        r.error = "no HTTP library (libcurl) — install libcurl4t64 (Ubuntu 24.04+) or libcurl4 (22.04)";
+        return r;
+    }
+    const bool https = url.compare(0, 8, "https://") == 0;
+    if (!https && url.compare(0, 7, "http://") != 0) {
+        r.error = "malformed URL";
+        return r;
+    }
+
+    const std::string part = base + ".part";
+    Transfer t;
+    t.api = &api;
+    t.opts = &opts;
+    t.finalUrl = url;
+    t.file = std::fopen(part.c_str(), "wb");
+    if (t.file == nullptr) {
+        r.error = ErrnoText("create cache file");
+        return r;
+    }
+    t.curl = api.easy_init();
+    if (t.curl == nullptr) {
+        std::fclose(t.file);
+        unlink(part.c_str());
+        r.error = "curl_easy_init failed";
+        return r;
+    }
+    CURL* c = t.curl;
+    api.easy_setopt(c, kOptUrl, url.c_str());
+    api.easy_setopt(c, kOptUserAgent, "DisplayXR-Viewer/1.0");
+    api.easy_setopt(c, kOptNoSignal, 1L);
+    api.easy_setopt(c, kOptNoProgress, 1L);
+    api.easy_setopt(c, kOptFollowLocation, 1L);
+    api.easy_setopt(c, kOptMaxRedirs, 10L);
+    api.easy_setopt(c, kOptConnectTimeoutMs, static_cast<long>(opts.connectTimeoutMs));
+    api.easy_setopt(c, kOptLowSpeedLimit, 1L);
+    api.easy_setopt(c, kOptLowSpeedTime, static_cast<long>((opts.receiveTimeoutMs + 999) / 1000));
+    api.easy_setopt(c, kOptMaxFileSizeLarge, static_cast<int64_t>(opts.maxBytes));
+    // http(s) only, and never a downgrade redirect (WinHTTP's
+    // REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP); the final URL is re-checked by
+    // the policy in the write callback too.
+    if (api.easy_setopt(c, kOptProtocolsStr, "http,https") == kCurleUnknownOption)
+        api.easy_setopt(c, kOptProtocols, kProtoHttp | kProtoHttps);
+    if (api.easy_setopt(c, kOptRedirProtocolsStr, https ? "https" : "http,https") == kCurleUnknownOption)
+        api.easy_setopt(c, kOptRedirProtocols, https ? kProtoHttps : (kProtoHttp | kProtoHttps));
+    size_t (*cb)(char*, size_t, size_t, void*) = &WriteCb;
+    api.easy_setopt(c, kOptWriteFunction, cb);
+    api.easy_setopt(c, kOptWriteData, static_cast<void*>(&t));
+
+    const CURLcode rc = api.easy_perform(c);
+    const bool closed = std::fclose(t.file) == 0;
+    t.file = nullptr;
+    if (!t.checked && rc == kCurleOk) {
+        // No body at all: still apply the status / policy checks.
+        char* eff = nullptr;
+        if (api.easy_getinfo(c, kInfoEffectiveUrl, &eff) == kCurleOk && eff != nullptr) t.finalUrl = eff;
+        long status = 0;
+        api.easy_getinfo(c, kInfoResponseCode, &status);
+        if (opts.urlAllowed && !opts.urlAllowed(t.finalUrl)) {
+            t.abortReason = "redirected to a URL the policy does not allow";
+        } else if (status != 200) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "HTTP %ld", status);
+            t.abortReason = buf;
+        }
+    }
+    api.easy_cleanup(c);
+    r.finalUrl = t.finalUrl;
+
+    if (!t.abortReason.empty()) {
+        r.error = t.abortReason;
+    } else if (rc == kCurleFilesizeExceeded) {
+        r.error = "asset larger than the download cap";
+    } else if (rc == kCurleTooManyRedirects) {
+        r.error = "too many redirects";
+    } else if (rc == kCurleOperationTimedout) {
+        r.error = "request timed out";
+    } else if (rc != kCurleOk) {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "request failed (%s)", api.easy_strerror(rc));
+        r.error = buf;
+    } else if (!closed) {
+        r.error = ErrnoText("write");
+    } else if (t.done == 0) {
+        r.error = "empty response";
+    }
+    if (!r.error.empty()) {
+        unlink(part.c_str());
+        return r;
+    }
+
+    const std::string ext = ResolveAssetExtension(r.finalUrl, t.contentType, t.head, opts.allowedExtensions);
+    if (ext.empty()) {
+        unlink(part.c_str());
+        r.error = "could not determine the asset type";
+        return r;
+    }
+    const std::string finalPath = base + ext;
+    if (std::rename(part.c_str(), finalPath.c_str()) != 0) {
+        r.error = ErrnoText("rename");
+        unlink(part.c_str());
+        return r;
+    }
+    r.ok = true;
+    r.path = finalPath;
+    r.bytes = t.done;
+    if (opts.progress) opts.progress(t.done, t.done);
+    return r;
+}
+
+} // namespace dxr
+
+#endif // desktop Linux

@@ -670,6 +670,46 @@ ParseLaunchArgs(const std::vector<std::string>& args)
     return a;
 }
 
+//! Percent-encode everything but RFC 3986 unreserved characters, so a value
+//! round-trips through a `displayxr-view:` query string unchanged.
+inline std::string
+PercentEncodeComponent(std::string_view s)
+{
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+/*!
+ * Re-apply the launch policy to the URL a redirect chain ACTUALLY landed on
+ * (UrlFetchOptions::urlAllowed). Re-runs the real parser rather than a second
+ * "https or loopback" rule, so there is one copy of the policy and a redirect
+ * cannot walk a launch out of it. @p fromProtocol re-checks through the
+ * protocol form, which carries the stricter web-page rules; a viewer that
+ * wants the strict rule for every launch passes true.
+ */
+inline bool
+LaunchPolicyAllowsUrl(const std::string& url, bool fromProtocol)
+{
+    if (fromProtocol) {
+        const LaunchArgs a =
+            ParseLaunchArgs({"displayxr-view://open?src=" + PercentEncodeComponent(url) + "&v=1"});
+        return a.ok() && a.srcKind == LaunchSrcKind::Url;
+    }
+    const LaunchArgs a = ParseLaunchArgs({std::string("--src=") + url});
+    return a.ok() && a.srcKind == LaunchSrcKind::Url;
+}
+
 /*!
  * `--rect` placement policy: nudge the rect INSIDE the 3D panel's desktop rect
  * — never snap it TO the panel. The size is never changed; only the origin
