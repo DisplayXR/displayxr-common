@@ -2358,10 +2358,19 @@ namespace {
 //! Half-extent of one table, LOGICAL px. A drag that goes further asks for
 //! the next table (DragLatticeNeeded); this is sized so most drags never do.
 constexpr int32_t kLatticeHalf = 192;
-//! Grid pitch the DP is probed at, LOGICAL px. The window moves in steps no
-//! coarser than this; a lens lattice denser than it is represented by the
-//! nearest phase-correct point in each cell.
+//! The table's bucket size on the wire (SetDragLattice's `cell`), LOGICAL px:
+//! how the extension indexes the table for its nearest-entry search. It is
+//! also the probe pitch on the per-point path (no grid snap provider), where
+//! each query is a round trip to the display processor.
 constexpr int32_t kLatticeCell = 3;
+//! Probe pitch through the grid snap provider, LOGICAL px: 1, the dense table
+//! (dxr_wl_lattice::probe, runtime#1748). A 3 px pitch keeps one entry per
+//! cell and so leaves reachable phase-correct positions out; the window is
+//! then pulled up to ~6 device px at 200 % where ~4.5 would do, and a slow drag
+//! wiggles by that much across its direction. At a non-unit scale the grid
+//! call already evaluates every logical px of the window, so the dense table
+//! costs the display processor nothing more; it costs the worker a few ms.
+constexpr int32_t kLatticeProbeStep = 1;
 
 } // namespace
 
@@ -2383,7 +2392,8 @@ DxrLinuxWindow::wl_probe_lattice(const SnapProviders &sp, const dxr_wl_lattice::
 		// The bulk path (runtime#1723): the helper names the grids its probe
 		// needs (dxr_wl_lattice::plan_grids) — one call at an integer scale,
 		// one per residue class at a fractional one — and runs the same probe
-		// over their answers, so the table is the per-point table.
+		// over their answers. It builds the dense table (every logical px,
+		// runtime#1748); a fallback to single points probes at kLatticeCell.
 		std::vector<SnapGridPoint> tmp;
 		auto grid = [&sp, &tmp](const dxr_wl_lattice::GridSpec &g, dxr_wl_lattice::GridPoint *out,
 		                        bool *declined) {
@@ -2400,7 +2410,8 @@ DxrLinuxWindow::wl_probe_lattice(const SnapProviders &sp, const dxr_wl_lattice::
 			}
 			return true;
 		};
-		p = dxr_wl_lattice::probe_via_grid(grid, point, map, cx, cy, kLatticeHalf, kLatticeCell);
+		p = dxr_wl_lattice::probe_via_grid(grid, point, map, cx, cy, kLatticeHalf, kLatticeProbeStep,
+		                                   kLatticeCell);
 	} else if (point) {
 		p = dxr_wl_lattice::probe(point, map, cx, cy, kLatticeHalf, kLatticeCell);
 	} else {
