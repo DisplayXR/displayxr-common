@@ -1170,6 +1170,9 @@ private:
 	//! publisher cannot take an explicit start.
 	bool
 	wl_lattice_prepare_map(bool quiet);
+	//! The geometry service reported move sync for this drag (runtime#1748):
+	//! no table is built or requested until the next drag starts.
+	bool m_wl_drag_move_sync = false;
 	//! The window's surface is on the 3D panel's output (or no panel known).
 	bool
 	wl_window_on_panel() const;

@@ -382,6 +382,9 @@ DxrWlPlacement::get_own_geometry(OwnGeometry *out)
 			out->monitor[1] = (int32_t)my;
 			out->monitor[2] = (int32_t)mw;
 			out->monitor[3] = (int32_t)mh;
+			// Extension v9+ (runtime#1748). JSON.stringify writes no spaces.
+			const char *ms = strstr(obj, "\"move_sync\":true");
+			out->move_sync = ms != nullptr && ms < end;
 		}
 	}
 	dbus_message_unref(reply);
