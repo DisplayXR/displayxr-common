@@ -67,7 +67,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_lattice_test displayxr_url_fetch_test displayxr_launch_args_test
+        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_url_fetch_test displayxr_launch_args_test
 
       - name: Test (launch contract + SHA-1 cache key)
         run: ./build/tests/displayxr_launch_args_test
@@ -83,6 +83,9 @@ jobs:
 
       - name: Test (drag lattice table + grid snap path, no display)
         run: ./build/tests/displayxr_linux_window_lattice_test
+
+      - name: Test (drag start/end state machines + X11 target choice, no display)
+        run: ./build/tests/displayxr_linux_window_drag_test
 
       - name: Test (probe + arg parsing, no display)
         run: ./build/tests/displayxr_linux_window_test

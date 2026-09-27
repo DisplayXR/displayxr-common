@@ -80,4 +80,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(displayxr_linux_window_lattice_test PROPERTIES
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_lattice_test COMMAND displayxr_linux_window_lattice_test)
+
+    # The window-drag decisions (dxr_drag.h, pure): when an X11 / Wayland drag
+    # starts and ends, and which phase-correct position an X11 drag step lands
+    # on (over a model of XWayland at 200 %).
+    add_executable(displayxr_linux_window_drag_test linux_window_drag_test.cpp)
+    target_include_directories(displayxr_linux_window_drag_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux/xrt_aux/util")
+    set_target_properties(displayxr_linux_window_drag_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_drag_test COMMAND displayxr_linux_window_drag_test)
 endif()

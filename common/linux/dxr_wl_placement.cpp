@@ -25,6 +25,10 @@
 #define WLP_CAP_DRAG_LATTICE 1u
 //! GetPlacementCapabilities bit: SetDragLatticeAt (an explicit start; v8).
 #define WLP_CAP_EXPLICIT_START 2u
+//! GetPlacementCapabilities bit: BeginPointerDrag / EndPointerDrag — the
+//! publisher follows the pointer while a button is held (a secondary-button
+//! content drag under mutter, whose own move grab it cannot end).
+#define WLP_CAP_POINTER_DRAG 4u
 
 DxrWlPlacement::~DxrWlPlacement()
 {
@@ -81,6 +85,7 @@ DxrWlPlacement::connect()
 	dbus_message_unref(reply);
 	m_lattice = (caps & WLP_CAP_DRAG_LATTICE) != 0;
 	m_explicit_start = (caps & WLP_CAP_EXPLICIT_START) != 0;
+	m_pointer_drag = (caps & WLP_CAP_POINTER_DRAG) != 0;
 	m_why = m_lattice ? "ready — the compositor can constrain a drag to the interlace lattice"
 	                  : "the compositor has no Meta.ExternalConstraint, so a drag cannot be constrained — the "
 	                    "title bar drags unsnapped";
@@ -174,25 +179,100 @@ DxrWlPlacement::move_window(int32_t x, int32_t y)
 }
 
 bool
+DxrWlPlacement::begin_pointer_drag(uint32_t button)
+{
+	if (!m_pointer_drag || m_conn == nullptr) {
+		return false;
+	}
+	DBusMessage *call = dbus_message_new_method_call(WLP_BUS, WLP_PATH, WLP_IFACE, "BeginPointerDrag");
+	if (call == nullptr) {
+		return false;
+	}
+	dbus_uint32_t pid = 0, b = button; // 0 = the caller
+	dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_UINT32, &b, DBUS_TYPE_INVALID);
+	// Asynchronous: the press never waits on the shell. The answer is picked
+	// out of the incoming stream by its reply serial (drain()).
+	dbus_uint32_t serial = 0;
+	const bool sent = dbus_connection_send((DBusConnection *)m_conn, call, &serial) == TRUE;
+	dbus_connection_flush((DBusConnection *)m_conn);
+	dbus_message_unref(call);
+	m_pd_serial = sent ? serial : 0;
+	m_pd_have = false;
+	return sent;
+}
+
+void
+DxrWlPlacement::end_pointer_drag()
+{
+	if (!m_pointer_drag || m_conn == nullptr) {
+		return;
+	}
+	DBusMessage *call = dbus_message_new_method_call(WLP_BUS, WLP_PATH, WLP_IFACE, "EndPointerDrag");
+	if (call == nullptr) {
+		return;
+	}
+	dbus_uint32_t pid = 0;
+	dbus_message_append_args(call, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_INVALID);
+	dbus_message_set_no_reply(call, TRUE);
+	dbus_connection_send((DBusConnection *)m_conn, call, nullptr);
+	dbus_connection_flush((DBusConnection *)m_conn);
+	dbus_message_unref(call);
+}
+
+bool
+DxrWlPlacement::take_pointer_drag_answer(bool *accepted)
+{
+	drain();
+	if (!m_pd_have) {
+		return false;
+	}
+	m_pd_have = false;
+	*accepted = m_pd_ok;
+	return true;
+}
+
+bool
 DxrWlPlacement::poll_needed(int32_t *dx, int32_t *dy)
 {
-	if (m_conn == nullptr) {
+	drain();
+	if (!m_have_needed) {
 		return false;
+	}
+	m_have_needed = false;
+	*dx = m_needed_dx; // the newest request wins
+	*dy = m_needed_dy;
+	return true;
+}
+
+void
+DxrWlPlacement::drain()
+{
+	if (m_conn == nullptr) {
+		return;
 	}
 	DBusConnection *conn = (DBusConnection *)m_conn;
 	dbus_connection_read_write(conn, 0);
-	bool got = false;
 	DBusMessage *msg = nullptr;
 	while ((msg = dbus_connection_pop_message(conn)) != nullptr) {
-		if (dbus_message_is_signal(msg, WLP_IFACE, "DragLatticeNeeded")) {
+		if (m_pd_serial != 0 && dbus_message_get_reply_serial(msg) == m_pd_serial) {
+			// The answer to BeginPointerDrag (an error reply = refused: an
+			// extension without the method).
+			dbus_bool_t ok = FALSE;
+			if (dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_METHOD_RETURN) {
+				dbus_message_get_args(msg, nullptr, DBUS_TYPE_BOOLEAN, &ok, DBUS_TYPE_INVALID);
+			}
+			m_pd_ok = ok == TRUE;
+			m_pd_have = true;
+			m_pd_serial = 0;
+		} else if (dbus_message_is_signal(msg, WLP_IFACE, "DragLatticeNeeded")) {
 			dbus_uint32_t pid = 0;
 			dbus_int32_t x = 0, y = 0;
 			if (dbus_message_get_args(msg, nullptr, DBUS_TYPE_UINT32, &pid, DBUS_TYPE_INT32, &x,
 			                          DBUS_TYPE_INT32, &y, DBUS_TYPE_INVALID) &&
 			    (int32_t)pid == (int32_t)getpid()) {
-				*dx = (int32_t)x; // the newest request wins
-				*dy = (int32_t)y;
-				got = true;
+				m_needed_dx = (int32_t)x;
+				m_needed_dy = (int32_t)y;
+				m_have_needed = true;
 			}
 		} else if (dbus_message_is_signal(msg, WLP_IFACE, "DragLatticeDone")) {
 			dbus_uint32_t pid = 0, moves = 0, corrected = 0, misses = 0, maxc = 0, tables = 0;
@@ -213,7 +293,6 @@ DxrWlPlacement::poll_needed(int32_t *dx, int32_t *dy)
 		}
 		dbus_message_unref(msg);
 	}
-	return got;
 }
 
 namespace {
@@ -341,12 +420,14 @@ DxrWlPlacement::clear_drag_lattice()
 void
 DxrWlPlacement::disconnect()
 {
+	m_pd_serial = 0;
 	if (m_conn != nullptr) {
 		dbus_connection_close((DBusConnection *)m_conn);
 		dbus_connection_unref((DBusConnection *)m_conn);
 		m_conn = nullptr;
 	}
 	m_lattice = false;
+	m_pointer_drag = false;
 }
 
 #else // !DXR_APP_HAVE_DBUS
@@ -398,6 +479,30 @@ DxrWlPlacement::move_window(int32_t x, int32_t y)
 {
 	(void)x;
 	(void)y;
+	return false;
+}
+
+bool
+DxrWlPlacement::begin_pointer_drag(uint32_t button)
+{
+	(void)button;
+	return false;
+}
+
+void
+DxrWlPlacement::drain()
+{
+}
+
+void
+DxrWlPlacement::end_pointer_drag()
+{
+}
+
+bool
+DxrWlPlacement::take_pointer_drag_answer(bool *accepted)
+{
+	(void)accepted;
 	return false;
 }
 

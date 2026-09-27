@@ -91,6 +91,38 @@ public:
 		return m_explicit_start;
 	}
 
+	/*!
+	 * The publisher can move this window with the pointer itself while a
+	 * button is held (extension placement capability 4) — the content drag on
+	 * a SECONDARY button under mutter, whose own move grab ends only on
+	 * button 1 (see dxr_drag.h). No compositor grab is involved: the client
+	 * keeps its implicit pointer grab and sees the release, and the publisher
+	 * stops on its own the moment the button is up.
+	 */
+	bool
+	has_pointer_drag() const
+	{
+		return m_pointer_drag;
+	}
+
+	/*!
+	 * Start the publisher's pointer drag of this process's window while
+	 * @p button (1-5) is held. Asynchronous — never waits on the shell; the
+	 * answer is collected by take_pointer_drag_answer(). The window's drag
+	 * table (set_drag_lattice) applies to it exactly as to a compositor drag.
+	 */
+	bool
+	begin_pointer_drag(uint32_t button);
+
+	//! Stop it (the client saw the release). Fire and forget; harmless when
+	//! the publisher already stopped on its own.
+	void
+	end_pointer_drag();
+
+	//! True, once, when the answer to begin_pointer_drag() has arrived.
+	bool
+	take_pointer_drag_answer(bool *accepted);
+
 	//! This process's window as the geometry service publishes it: frame and
 	//! buffer rects (logical), and its monitor's logical rect and scale.
 	struct OwnGeometry
@@ -172,7 +204,17 @@ public:
 
 private:
 	void *m_conn = nullptr; //!< DBusConnection, opaque so the header stays clean
+	//! Everything the publisher sent, sorted into the fields below; shared
+	//! by poll_needed() and take_pointer_drag_answer() so neither eats the
+	//! other's messages.
+	void
+	drain();
+	bool m_have_needed = false;
+	int32_t m_needed_dx = 0, m_needed_dy = 0;
+	uint32_t m_pd_serial = 0; //!< serial of the BeginPointerDrag awaiting its answer (0 = none)
+	bool m_pd_have = false, m_pd_ok = false;
 	bool m_lattice = false;
+	bool m_pointer_drag = false;
 	bool m_explicit_start = false;
 	bool m_have_done = false;
 	DragDone m_done;

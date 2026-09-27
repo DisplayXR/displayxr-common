@@ -62,9 +62,13 @@
  *   avoids this by snapping the window's position to the lens lattice DURING
  *   the drag (WM_WINDOWPOSCHANGING -> the DP's snap_window_rect); the only way
  *   to get the same hook under mutter is to own the drag. So: no decorations,
- *   a button-1 pointer grab anywhere in the window, and every move routed
- *   through the app-installed snap provider (see set_snap_provider(), which
- *   the cube apps back with xrWeaveSnapWindowRectDXR) before XMoveWindow.
+ *   a pointer grab on the drag button (x11_drag_button) anywhere in the
+ *   window, and every move routed through the app-installed snap provider
+ *   (see set_snap_provider(), which the cube apps back with
+ *   xrWeaveSnapWindowRectDXR) before XMoveWindow. Each step lands on the
+ *   phase-correct reachable origin nearest the drag line among all the snap
+ *   offers within 7 px (dxr_drag::X11Picker), and a landing the window
+ *   manager moved re-anchors the lattice there (dxr_drag.h).
  *   Post-map client moves ARE honoured by mutter (verified, #729).
  *   DXR_X11_WM_DECORATIONS=1 restores the decorated, WM-dragged window.
  *
@@ -116,6 +120,7 @@
 #pragma once
 
 #include "u_x11_scale.h" // placement-landing probe (shared with the runtime)
+#include "dxr_drag.h"    // drag start/end + the X11 drag step's target choice (pure, unit tested)
 #include "csd_titlebar.h" // displayxr::csd — the X11 header bar's painter (and Wayland's, via dxr_wl_chrome)
 
 // Xlib first: XR_DXR_xlib_window_binding.h wants the real Display / Window
@@ -333,7 +338,10 @@ struct DxrLinuxWindowDesc
 	//! X11: the button that drags a windowed, undecorated window from
 	//! ANYWHERE in the content, through the phase snap. 1 = left (the cube
 	//! apps' test affordance), 3 = right (the demos' convention, which keeps
-	//! the left button for the scene), 0 = none (header bar only).
+	//! the left button for the scene), 0 = none (header bar only). The drag
+	//! ends on its release — or, when that release never reaches the window,
+	//! on the first motion or pointer query that shows the button up; the app
+	//! then gets a ButtonUp flagged window_drag all the same (dxr_drag.h).
 	uint32_t x11_drag_button = 1;
 
 	//! Wayland: start with the client-side title bar HIDDEN (an undecorated
@@ -341,9 +349,17 @@ struct DxrLinuxWindowDesc
 	//! brings it back. X11's equivalent is simply x11_header_bar = false.
 	bool wayland_title_bar = true;
 
-	//! Wayland: the button that starts a compositor move (xdg_toplevel.move)
-	//! from anywhere in the content. 0 = none (the default: the title bar
-	//! moves the window, as before); demos use 3 to match their X11 leg.
+	//! Wayland: the button that moves the window from anywhere in the
+	//! content. 0 = none (the default: the title bar moves the window, as
+	//! before); demos use 3 to match their X11 leg. Button 1 is always the
+	//! compositor's move (xdg_toplevel.move). A secondary button is too on a
+	//! compositor that ends its move grab on any release; mutter ends it only
+	//! on button 1, so there the window-geometry extension's pointer drag runs
+	//! it (placement capability 4), and without that extension the button does
+	//! not move the window at all (one WARN) rather than start a drag nothing
+	//! can end (dxr_drag.h). The app gets a ButtonUp for the drag button
+	//! either way, flagged window_drag, even when the compositor's grab
+	//! swallowed the real one.
 	uint32_t wayland_drag_button = 0;
 
 	//! With `transparent`: the app STARTS drawing a transparent background,
@@ -867,8 +883,6 @@ private:
 	int m_x_content_off_applied = -1;   //!< the child's current y inside the top-level
 	uint32_t m_x_top_w = 0, m_x_top_h = 0;         //!< top-level size (last ConfigureNotify)
 	uint32_t m_x_content_w = 0, m_x_content_h = 0; //!< content size (bar excluded)
-	unsigned int m_x_drag_btn = 0;      //!< button that started the current drag
-	bool m_x_drag_from_bar = false;     //!< ...and it was a press on the header bar
 	int m_x_drag_off_x = 0;             //!< bound-window origin minus top-level origin, at the grab
 	int m_x_drag_off_y = 0;             //!< ...
 	int m_x_shape_state = 0;            //!< 0 unknown, 1 available, -1 unavailable
@@ -883,10 +897,23 @@ private:
 	//! Fit the content child to (0, bar) .. (W, H) of the top-level.
 	void
 	x11_layout_content();
+	//! A drag press. False when a drag is already running.
+	bool
+	x11_begin_drag(int root_x, int root_y, unsigned int button, bool from_bar = false);
+	//! End a running drag that did not end on its release (fullscreen, a WM
+	//! frame, focus loss). No-op when none runs.
 	void
-	x11_begin_drag(int root_x, int root_y, unsigned int button);
+	x11_end_drag(dxr_drag::ButtonDrag::End why = dxr_drag::ButtonDrag::End::Cancelled);
+	//! After m_x_drag reported the end: ungrab, log, and owe the app its release.
 	void
-	x11_end_drag();
+	x11_after_drag_end();
+	//! While dragging: the queried pointer state ends a drag whose release
+	//! never reached us (once per pump).
+	void
+	x11_poll_drag_button();
+	//! The snap about many targets at once (grid provider when installed).
+	bool
+	x11_snap_many(const std::vector<dxr_drag::Pt> &targets, std::vector<dxr_drag::Pt> *out);
 	void
 	x11_paint_bar();
 	bool
@@ -927,7 +954,16 @@ private:
 	bool m_x_client_drag = false;
 	//! Fullscreen now (created panel-sized, or toggled by F11).
 	bool m_x_fullscreen = false;
-	bool m_x_dragging = false;
+	//! The drag's start and end (dxr_drag.h): release, button-up seen in a
+	//! motion or the queried pointer state, focus loss, cancel.
+	dxr_drag::ButtonDrag m_x_drag;
+	//! Where each drag step lands: every phase-correct reachable position
+	//! around the raw target, then the direction-aware choice; the lattice
+	//! re-anchored at a landing the window manager moved.
+	dxr_drag::X11Picker m_x_picker;
+	//! DXR_X11_DRAG_NEAREST=1: plain nearest among the candidates (A/B only).
+	bool m_x_drag_nearest = false;
+	bool m_x_grab_warned = false;
 	int m_x_drag_ptr_x = 0;    //!< pointer root position at the grab
 	int m_x_drag_ptr_y = 0;    //!< ...
 	int m_x_drag_origin_x = 0; //!< window root origin at the grab (snap origin)
@@ -936,6 +972,12 @@ private:
 	int m_x_drag_at_y = 0;     //!< ...
 	uint64_t m_x_drag_moves = 0;    //!< XMoveWindow calls this drag
 	uint64_t m_x_drag_snapped = 0;  //!< ...of which the snap changed the point
+	uint64_t m_x_drag_missed = 0;   //!< ...that the window manager put somewhere else
+	uint64_t m_x_drag_asked = 0;    //!< targets asked of the snap this drag
+	uint64_t m_x_drag_cands = 0;    //!< candidates summed over the drag's steps
+	double m_x_drag_snap_ms = 0.0;     //!< time in the snap this drag (the step choice's cost)
+	double m_x_drag_snap_ms_max = 0.0; //!< ...its slowest step
+	int m_x_last_ptr_x = 0, m_x_last_ptr_y = 0; //!< last pointer position, window-relative
 
         /*!
          * Landing check: did the window go where the snap asked? A move is
@@ -951,6 +993,8 @@ private:
         bool m_x_probe_pending = false;
         int m_x_probe_want_x = 0;
         int m_x_probe_want_y = 0;
+        int m_x_probe_before_x = 0; //!< where the window was when the move went out
+        int m_x_probe_before_y = 0;
         void x11_check_landing();
 
         // --- X11 programmatic drag test hook (DXR_X11_TEST_DRAG, #1588) ---------
@@ -967,13 +1011,10 @@ private:
 	uint64_t m_x_pump_count = 0;
 	uint64_t m_test_fs_pumps = 0; //!< DXR_TEST_FULLSCREEN_TOGGLE counter
 
-	//! Run the snap provider, or identity when there is none / it declines.
-	//! Reports once, the first time it is asked, what it resolved to.
-	void
-	snap_origin(int origin_x, int origin_y, int target_x, int target_y, int *out_x, int *out_y);
-
-	//! snap_origin() + XMoveWindow, skipping a move that would not change the
-	//! window's position. Logs only when the snap actually moved the point.
+	//! One drag step: the target through m_x_picker (the phase-correct
+	//! reachable origin nearest the drag line; identity without a snap), then
+	//! XMoveWindow, skipping a move that would not change the window's
+	//! position. Logs only when the snap actually moved the point.
 	void
 	x11_move_snapped(int target_x, int target_y);
 
@@ -1382,6 +1423,17 @@ private:
 	double m_wl_axis_x = 0.0, m_wl_axis_y = 0.0;      //!< continuous scroll accumulators
 	bool m_wl_frame_discrete = false;
 	uint32_t m_wl_axis_time = 0;
+
+	//! The content drag in progress (dxr_drag.h): who moves the window, and
+	//! what the app is owed when the compositor swallowed the release.
+	dxr_drag::WlContentDrag m_wl_drag;
+	//! The compositor advertises gtk_shell1: it is mutter, whose move grab
+	//! ends only on button 1 (dxr_drag.h).
+	bool m_wl_gtk_shell = false;
+	bool m_wl_drag_none_warned = false;
+	//! Who runs a content drag here (dxr_drag::wl_drag_mode's input).
+	dxr_drag::WlDragEnv
+	wl_drag_env() const;
 
 	//! Content pointer events forwarded by the chrome (dxr_wl_chrome.h).
 	static void
