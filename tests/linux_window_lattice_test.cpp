@@ -18,9 +18,16 @@
  *    residue class at a fractional one, no point asked singly. Its fallbacks —
  *    a failing grid, a declining one, unanswerable points, no per-point
  *    provider — give the same table too.
+ * 5. The dense table (cell 1, runtime#1748) under a best-phase lens snap: no
+ *    duplicates, a superset of the 3 px table inside the window, every
+ *    reachable fixed point present, a smaller largest pull at 150 % and 200 %,
+ *    the same table through the grid snap, and a failing grid falling back to
+ *    single points at the coarse cell.
  */
 #include "dxr_wl_lattice.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -369,7 +376,112 @@ main()
 				CHECK(g.count_y >= 1 && g.count_y <= L::kGridMaxAxis);
 			}
 		}
+
+	// 5. The dense table (cell 1, runtime#1748), against a best-phase snap
+	//    shaped like a vendor weaver's: the position within ±2 device px of
+	//    the target whose phase (x + slant * y) / period best matches the
+	//    start's. The lens numbers are a test double's, nothing more.
+	{
+		auto phase_err = [](int32_t x, int32_t y) {
+			return std::fabs(std::remainder((x + 0.287 * y) / 2.76, 1.0));
+		};
+		auto lens_snap = [phase_err](int32_t tx, int32_t ty, int32_t *ox, int32_t *oy) {
+			double best = 1e9;
+			for (int32_t i = tx - 2; i <= tx + 2; i++) {
+				for (int32_t j = ty - 2; j <= ty + 2; j++) {
+					const double e = phase_err(i, j);
+					if (e < best) {
+						best = e;
+						*ox = i;
+						*oy = j;
+					}
+				}
+			}
+			return true;
+		};
+		const L::PointSnapFn lens_point = lens_snap;
+		const int32_t half = 60;
+		for (double s : {1.0, 1.25, 1.5, 2.0}) {
+			const L::Map m{311, 257, s};
+			const L::Probe coarse = L::probe(lens_snap, m, 0, 0, half, 3);
+			const L::Probe dense = L::probe(lens_snap, m, 0, 0, half, 1);
+			std::set<std::pair<int32_t, int32_t>> d, c;
+			for (size_t i = 0; i < dense.dxs.size(); i++) {
+				CHECK(d.insert({dense.dxs[i], dense.dys[i]}).second); // no duplicate
+			}
+			for (size_t i = 0; i < coarse.dxs.size(); i++) {
+				c.insert({coarse.dxs[i], coarse.dys[i]});
+			}
+			CHECK(dense.probed == (size_t)(2 * half + 1) * (2 * half + 1));
+			// Everything the coarse table has inside the window, the dense one has.
+			for (const auto &e : c) {
+				if (std::abs(e.first) <= half && std::abs(e.second) <= half) {
+					CHECK(d.count(e) == 1);
+				}
+			}
+			// Every reachable position the snap leaves in place is an entry,
+			// and every entry is as phase-correct as the snap's own answers.
+			for (int32_t y = -half; y <= half; y++) {
+				for (int32_t x = -half; x <= half; x++) {
+					int32_t tx = 0, ty = 0, ox = 0, oy = 0;
+					L::device_displacement(m, x, y, &tx, &ty);
+					lens_snap(tx, ty, &ox, &oy);
+					if (ox == tx && oy == ty) {
+						CHECK(d.count({x, y}) == 1);
+					}
+				}
+			}
+			for (const auto &e : d) {
+				int32_t tx = 0, ty = 0;
+				L::device_displacement(m, e.first, e.second, &tx, &ty);
+				CHECK(phase_err(tx, ty) < 0.05);
+			}
+			// The window's largest pull, in DEVICE px, over positions well
+			// inside the table: never worse, and at a non-unit scale better.
+			auto worst_pull = [&m](const std::set<std::pair<int32_t, int32_t>> &t) {
+				double worst = 0;
+				for (int32_t y = -half + 8; y <= half - 8; y++) {
+					for (int32_t x = -half + 8; x <= half - 8; x++) {
+						int32_t rx = 0, ry = 0;
+						L::device_displacement(m, x, y, &rx, &ry);
+						double best = 1e18;
+						for (const auto &e : t) {
+							if (std::abs(e.first - x) > 6 || std::abs(e.second - y) > 6) {
+								continue;
+							}
+							int32_t ex = 0, ey = 0;
+							L::device_displacement(m, e.first, e.second, &ex, &ey);
+							best = std::min(best, std::hypot(ex - rx, ey - ry));
+						}
+						worst = std::max(worst, best);
+					}
+				}
+				return worst;
+			};
+			const double pull_c = worst_pull(c), pull_d = worst_pull(d);
+			CHECK(pull_d <= pull_c);
+			if (s == 1.5 || s == 2.0) {
+				CHECK(pull_d < pull_c);
+			}
+			std::printf("  dense table: scale %.2f: %zu entries (coarse %zu), largest pull %.2f device px (coarse "
+			            "%.2f)\n",
+			            s, d.size(), c.size(), pull_d, pull_c);
+
+			// Through the grid snap: the same dense table, in the same number
+			// of calls as the coarse one at a non-unit scale.
+			Counts n;
+			const L::Probe g = L::probe_via_grid(make_grid(&n, lens_point), lens_point, m, 0, 0, half, 1, 3);
+			CHECK(same(g, dense) && g.grid_used && g.grid_misses == 0);
+			if (s == 1.0 || s == 2.0) {
+				CHECK(n.grid == 1);
+			}
+			// A grid that fails falls back to single points at the COARSE cell.
+			auto broken = [](const L::GridSpec &, L::GridPoint *, bool *) { return false; };
+			const L::Probe f = L::probe_via_grid(broken, lens_point, m, 0, 0, half, 1, 3);
+			CHECK(same(f, coarse) && !f.grid_used && f.grid_fallback != nullptr);
+		}
 	}
+	} // 4 + 5 share the grid test doubles
 
 	if (g_fail == 0) {
 		std::printf("linux_window_lattice_test: all checks passed\n");

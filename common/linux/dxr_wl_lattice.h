@@ -107,13 +107,41 @@ struct Probe
  * @p snap is `bool(int32_t tx, int32_t ty, int32_t *ox, int32_t *oy)`: the
  * DP's snap with origin (0,0), target = a DEVICE displacement; false = the DP
  * declined (no usable viewing distance).
+ *
+ * ## @p cell == 1: the dense table (runtime#1748)
+ *
+ * A coarser @p cell keeps at most one entry per cell, so the table misses
+ * reachable phase-correct points the lens has, and the window is pulled
+ * further than it needs to be. Measured with a snap of the vendor weaver's
+ * shape (best phase within ±2 device px) over a representative slanted lens,
+ * a 3 px cell leaves 18 % of those points out at 200 % and 31 % at 150 %; the
+ * largest pull is ~6.3 device px where the complete set needs ~4.5, and a
+ * slow straight drag wiggles across its direction by that much.
+ *
+ * At @p cell 1 every logical displacement in the window is a query, so each
+ * reachable point the snap leaves where it is (a fixed point) is found as its
+ * own query's answer, and every reachable answer is kept: no entry the coarse
+ * table has inside the window is missing. The fixed-point search around an
+ * unreachable answer is therefore skipped (it only finds points the dense
+ * sweep visits anyway); what remains is a mapping-only check of the rounded
+ * guess's neighbours for a logical displacement that reaches the answer
+ * exactly. Duplicates are removed across the whole table rather than among
+ * the last few entries, since one reachable point answers several
+ * neighbouring queries. The table stays the size of the coarse one (~13k
+ * entries for ±192 logical px), and the probe's own CPU stays ~10 ms.
  */
 template <typename Snap>
 inline Probe
 probe(const Snap &snap, const Map &m, int32_t cx, int32_t cy, int32_t half, int32_t cell)
 {
 	Probe r;
+	const bool dense = cell == 1;
 	std::vector<std::pair<int32_t, int32_t>> seen;
+	// Dense: one bit per logical displacement of the window (plus the few px
+	// an answer can sit outside it), for the whole-table dedup.
+	const int32_t dpad = 8;
+	const int32_t dspan = dense ? 2 * (half + dpad) + 1 : 0;
+	std::vector<uint8_t> taken(dense ? (size_t)dspan * dspan : 0, 0);
 	auto fixed_point = [&](int32_t lx, int32_t ly) {
 		int32_t tx = 0, ty = 0;
 		device_displacement(m, lx, ly, &tx, &ty);
@@ -149,7 +177,21 @@ probe(const Snap &snap, const Map &m, int32_t cx, int32_t cy, int32_t half, int3
 					found = true;
 				}
 			}
-			for (int32_t ring = 0; ring <= 2 && !found; ring++) {
+			// Dense: the rounded guess can miss a logical displacement that
+			// DOES reach the answer (the rounding depends on the start), so
+			// look at its neighbours — no snap call, only the mapping.
+			for (int32_t j = -1; j <= 1 && dense && !found; j++) {
+				for (int32_t i = -1; i <= 1 && !found; i++) {
+					int32_t px = 0, py = 0;
+					device_displacement(m, bx + i, by + j, &px, &py);
+					if (px == sx && py == sy) {
+						ax = bx + i;
+						ay = by + j;
+						found = true;
+					}
+				}
+			}
+			for (int32_t ring = 0; ring <= 2 && !found && !dense; ring++) {
 				for (int32_t j = -ring; j <= ring && !found; j++) {
 					for (int32_t i = -ring; i <= ring && !found; i++) {
 						if (std::abs(i) != ring && std::abs(j) != ring) {
@@ -167,6 +209,20 @@ probe(const Snap &snap, const Map &m, int32_t cx, int32_t cy, int32_t half, int3
 				continue; // this cell has no reachable phase-correct point
 			}
 			const std::pair<int32_t, int32_t> key{ax, ay};
+			if (dense) {
+				const int32_t ix = ax - (cx - half - dpad), iy = ay - (cy - half - dpad);
+				if (ix >= 0 && iy >= 0 && ix < dspan && iy < dspan) {
+					uint8_t &t = taken[(size_t)iy * dspan + ix];
+					if (!t) {
+						t = 1;
+						r.dxs.push_back(ax);
+						r.dys.push_back(ay);
+					}
+					continue;
+				}
+				// An answer further out than any snap reaches: fall through to
+				// the local dedup below.
+			}
 			bool dup = false;
 			for (auto it = seen.rbegin(); it != seen.rend() && it - seen.rbegin() < 8; ++it) {
 				if (*it == key) {
@@ -404,7 +460,10 @@ cover_points(const std::vector<AxisRun> &runs)
  * Measured by tests/linux_window_lattice_test.cpp on the helper's real shape
  * (129 x 129, ±192 logical, 157,609 points to answer at a non-unit scale):
  * 100 % and 200 % -> ONE call; 150 % -> 4; 166.67 % -> 9; 125 % and 175 % ->
- * 16 (more, at most 64, while the window straddles the monitor's edge).
+ * 16 (more, at most 64, while the window straddles the monitor's edge). The
+ * dense table (cell 1, the helper's grid path since runtime#1748) asks for the
+ * same calls and points at a non-unit scale — those already cover every
+ * logical px — and at 100 % for one call of 385 x 385 (148,225 points).
  */
 inline std::vector<GridSpec>
 plan_grids(const Map &m, int32_t cx, int32_t cy, int32_t half, int32_t cell)
@@ -465,6 +524,12 @@ plan_grids(const Map &m, int32_t cx, int32_t cy, int32_t half, int32_t cell)
  * then declines on its first query unless the DP has come up since, which is
  * the same table or a better one. Without @p point there is nothing to fall
  * back to: a failed grid is then an unanswered probe (declined).
+ *
+ * @p fallback_cell (0 = @p cell) is the cell that per-point probe uses. The
+ * dense table (@p cell 1) is ~9x the queries of a 3 px one: free through a
+ * grid call, which evaluates every logical px of the window at a non-unit
+ * scale anyway, but seconds of round trips one point at a time. So a caller
+ * asking for the dense table names a coarser cell for the per-point fallback.
  */
 inline Probe
 probe_via_grid(const GridSnapFn &grid,
@@ -473,12 +538,13 @@ probe_via_grid(const GridSnapFn &grid,
                int32_t cx,
                int32_t cy,
                int32_t half,
-               int32_t cell)
+               int32_t cell,
+               int32_t fallback_cell = 0)
 {
 	auto fallback = [&](const char *why, uint32_t calls, uint64_t points) {
 		Probe r;
 		if (point) {
-			r = probe(point, m, cx, cy, half, cell);
+			r = probe(point, m, cx, cy, half, fallback_cell > 0 ? fallback_cell : cell);
 		} else {
 			r.declined = true;
 		}
