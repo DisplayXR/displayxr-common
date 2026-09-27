@@ -2963,6 +2963,20 @@ DxrLinuxWindow::wl_lattice_prepare_map(bool quiet)
 	 */
 	DxrWlPlacement::OwnGeometry g;
 	if (m_wl_placement.has_explicit_start() && m_wl_placement.get_own_geometry(&g)) {
+		/*
+		 * Move sync (window-geometry extension v9, runtime#1748): the runtime
+		 * tags every frame with the position it was woven for and the
+		 * compositor shows it only there, so every position is phase-correct
+		 * and a table would only be refused. Deriving one costs the frame loop
+		 * ~90 ms per table (the snap probe), so skip it for the whole drag.
+		 */
+		if (g.move_sync) {
+			if (!m_wl_drag_move_sync) {
+				DXRW_INFO("drag lattice: not needed — the runtime move-syncs this window (runtime#1748)");
+			}
+			m_wl_drag_move_sync = true;
+			return false;
+		}
 		// The window's monitor must be the panel: the rounding is relative to
 		// the monitor the window is drawn on, and the lattice only matters on
 		// the panel.
@@ -3009,7 +3023,8 @@ DxrLinuxWindow::wl_lattice_prepare_map(bool quiet)
 void
 DxrLinuxWindow::wl_lattice_on_placement_change()
 {
-	if (!m_wl_compositor_drag || !m_wl_placement.has_drag_lattice() || !has_snap_provider()) {
+	if (!m_wl_compositor_drag || m_wl_drag_move_sync || !m_wl_placement.has_drag_lattice() ||
+	    !has_snap_provider()) {
 		return;
 	}
 	// A drag that had no table never gets a DragLatticeDone to end it, so
@@ -3062,6 +3077,7 @@ DxrLinuxWindow::wl_drag_prepare(bool sync)
 	// to the last one.
 	m_wl_drag_gen++;
 	m_wl_lattice_req_pending = false;
+	m_wl_drag_move_sync = false; // re-read per drag: the runtime may re-register
 	// What this hook costs is the press->move latency: the caller's
 	// xdg_toplevel.move follows it directly.
 	struct MoveClock
@@ -3089,7 +3105,7 @@ DxrLinuxWindow::wl_drag_prepare(bool sync)
 		return; // the compositor unmaximises under the pointer; nothing to snap
 	}
 	if (!wl_window_on_panel() || !wl_lattice_prepare_map(false)) {
-		m_wl_drag_stats.began_off_lattice = true;
+		m_wl_drag_stats.began_off_lattice = !m_wl_drag_move_sync;
 		return; // the mid-drag path sends one if the window reaches the panel
 	}
 	if (sync) {

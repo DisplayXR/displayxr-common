@@ -131,6 +131,10 @@ public:
 		int32_t buffer[4] = {0, 0, 0, 0};
 		int32_t monitor[4] = {0, 0, 0, 0};
 		double monitor_scale = 0.0;
+		//! The runtime runs MOVE SYNC for this process (extension version 9,
+		//! runtime#1748): every frame is shown where it was woven for, so a
+		//! drag needs no lattice table. False when absent (older publisher).
+		bool move_sync = false;
 	};
 	//! One bounded round trip (GetWindows). False when unavailable.
 	bool
