@@ -4248,7 +4248,19 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				if (x11_bar_visible() && ev.xbutton.y < off_y) {
 					if (b == Button1) {
 						const dxr_csd::Hit hit = m_x_bar.hitTest(ev.xbutton.x, ev.xbutton.y, m_x_top_w);
-						if (hit == dxr_csd::Hit::Drag) {
+						if (hit == dxr_csd::Hit::Drag &&
+						    m_x_dclick.press((uint32_t)ev.xbutton.time, ev.xbutton.x, ev.xbutton.y, 4)) {
+							// Double-click toggles maximise, as a WM title bar
+							// (and our Wayland bar) does. EWMH toggle, so the WM
+							// owns the state and restores the prior geometry.
+							Atom st = XInternAtom(m_x_display, "_NET_WM_STATE", False);
+							Atom mv = XInternAtom(m_x_display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+							Atom mh = XInternAtom(m_x_display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+							x11_send_root_message(m_x_display, m_x_window, st, 2 /* _NET_WM_STATE_TOGGLE */,
+							                      (long)mv, (long)mh, 1, 0);
+							XFlush(m_x_display);
+							DXRW_INFO("Header bar double-click — toggle maximise");
+						} else if (hit == dxr_csd::Hit::Drag) {
 							// The same snapped path as the drag button — the
 							// reason the bar is client-side at all.
 							if (m_x_client_drag && !m_x_test_drag_armed) {

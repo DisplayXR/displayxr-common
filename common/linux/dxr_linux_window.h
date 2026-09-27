@@ -880,6 +880,7 @@ private:
 	Visual *m_x_visual = nullptr;       //!< the top-level's visual (the bar packs pixels for it)
 	bool m_x_bar_enabled = false;       //!< header bar built (windowed, client-dragged at some point)
 	dxr_csd::TitleBar m_x_bar;          //!< the bar's painter + hit test
+	dxr_csd::DoubleClick m_x_dclick;    //!< bar double-click → toggle maximise
 	int m_x_content_off_applied = -1;   //!< the child's current y inside the top-level
 	uint32_t m_x_top_w = 0, m_x_top_h = 0;         //!< top-level size (last ConfigureNotify)
 	uint32_t m_x_content_w = 0, m_x_content_h = 0; //!< content size (bar excluded)
