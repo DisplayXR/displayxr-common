@@ -685,6 +685,27 @@ as regular grids that it plans itself (`dxr_wl_lattice::plan_grids`): one call
 at 100 % and 200 %, one per rounding residue at a fractional scale (150 %: 4).
 The table is the same either way (`tests/linux_window_lattice_test.cpp`).
 
+**Content drags on a secondary button** (`wayland_drag_button = 3`, the demos'
+right-button drag). mutter ends its own move grab only on the release of button
+1, so a right-button `xdg_toplevel.move` kept following the pointer after the
+release. On mutter the helper therefore hands a secondary-button drag to the
+window-geometry extension's pointer drag (placement capability 4), which ends
+the moment the button is up; without that extension version the button does not
+move the window (one WARN; the title bar still does). Button 1, and every
+button on a compositor that ends a move grab on any release, still goes to
+`xdg_toplevel.move`. The rules live in `dxr_drag.h`
+(`tests/linux_window_drag_test.cpp`).
+
+**The X11 drag** ends on its release, and also on the first motion or pointer
+query that shows the drag button up, so a release that never reaches the window
+cannot leave it glued to the pointer. Each step lands on the phase-correct
+position nearest the drag line among every origin the snap offers within 7 px
+(the same `along² + 9·across²` rule, capped at 6 px of lead or lag, that the
+extension applies on Wayland), and a landing the window manager moved
+re-anchors the lattice there: a window created at an odd position under
+XWayland at 200 % otherwise asked for odd, unreachable positions for a whole
+drag.
+
 No environment variable (`WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, …) is read to
 decide: the only questions are "does the connection succeed" and "what does the
 server advertise". After `create()`, the live connection is re-verified and

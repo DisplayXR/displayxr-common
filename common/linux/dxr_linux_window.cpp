@@ -1089,6 +1089,13 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		m_x_rect_snap_pumps = 0;
 	}
 
+	// DXR_X11_DRAG_NEAREST=1: each drag step lands on the plain nearest
+	// phase-correct candidate instead of the one nearest the drag line — the
+	// pre-fix choice, for A/B comparison on a panel only.
+	if (const char *n = getenv("DXR_X11_DRAG_NEAREST")) {
+		m_x_drag_nearest = n[0] == '1';
+	}
+
 	// DXR_X11_TEST_DRAG=dx,dy,steps — TEST HOOK, off by default. Only meaningful
 	// where a drag is possible at all (windowed + client-owned).
 	if (client_drag) {
@@ -1116,37 +1123,53 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
  *
  */
 
-void
-DxrLinuxWindow::snap_origin(int origin_x, int origin_y, int target_x, int target_y, int *out_x, int *out_y)
+bool
+DxrLinuxWindow::x11_snap_many(const std::vector<dxr_drag::Pt> &targets, std::vector<dxr_drag::Pt> *out)
 {
-	int32_t sx = (int32_t)target_x;
-	int32_t sy = (int32_t)target_y;
-	bool snapped = false;
-	if (has_snap_provider()) {
-		snapped = snap_one((int32_t)origin_x, (int32_t)origin_y, (int32_t)target_x, (int32_t)target_y, &sx,
-		                   &sy);
+	const int32_t ox = m_x_picker.anchor_x(), oy = m_x_picker.anchor_y();
+	out->assign(targets.size(), dxr_drag::Pt{});
+	// Grid provider: ONE call over the targets' bounding box (the box around
+	// the raw target, or the new strip of it) — one round trip even for an
+	// IPC session. Points it cannot answer are asked singly below.
+	std::vector<uint8_t> have(targets.size(), 0);
+	if (m_snap_grid_fn != nullptr && targets.size() > 1) {
+		int32_t x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN;
+		for (const auto &t : targets) {
+			x0 = std::min(x0, t.x);
+			y0 = std::min(y0, t.y);
+			x1 = std::max(x1, t.x);
+			y1 = std::max(y1, t.y);
+		}
+		const uint32_t cx = (uint32_t)(x1 - x0 + 1), cy = (uint32_t)(y1 - y0 + 1);
+		if (cx <= 1024 && cy <= 1024 && (uint64_t)cx * cy <= 4096) {
+			std::vector<SnapGridPoint> g((size_t)cx * cy);
+			bool declined = false;
+			if (m_snap_grid_fn(m_snap_grid_userdata, ox, oy, x0, y0, 1, 1, cx, cy, g.data(), &declined)) {
+				if (declined) {
+					return false;
+				}
+				for (size_t k = 0; k < targets.size(); k++) {
+					const SnapGridPoint &p =
+					    g[(size_t)(targets[k].y - y0) * cx + (size_t)(targets[k].x - x0)];
+					if (p.dx != kSnapGridNoAnswer && p.dy != kSnapGridNoAnswer) {
+						(*out)[k] = dxr_drag::Pt{targets[k].x + p.dx, targets[k].y + p.dy};
+						have[k] = 1;
+					}
+				}
+			}
+		}
 	}
-	if (!snapped) {
-		sx = (int32_t)target_x;
-		sy = (int32_t)target_y;
+	for (size_t k = 0; k < targets.size(); k++) {
+		if (have[k]) {
+			continue;
+		}
+		int32_t sx = targets[k].x, sy = targets[k].y;
+		if (!snap_one(ox, oy, targets[k].x, targets[k].y, &sx, &sy)) {
+			return false; // no snap at all: the drag goes to the raw target
+		}
+		(*out)[k] = dxr_drag::Pt{sx, sy};
 	}
-	if (!m_snap_reported) {
-		m_snap_reported = true;
-                DXRW_INFO("drag: snap provider %s — %s",
-                          m_snap_fn != nullptr        ? "installed"
-                          : m_snap_grid_fn != nullptr ? "installed (grid only)"
-                                                      : "ABSENT (identity)",
-                          snapped ? "the display processor is OFFERING snapped "
-                                    "origins — whether the window "
-                                    "actually lands on them is checked per "
-                                    "move ('drag: placement')"
-                                  : "identity (no DP lattice snap on this "
-                                    "runtime, or the runtime refused "
-                                    "the snap — see its log); the drag "
-                                    "mechanics are unaffected");
-        }
-	*out_x = (int)sx;
-	*out_y = (int)sy;
+	return true;
 }
 
 void
@@ -1155,11 +1178,39 @@ DxrLinuxWindow::x11_move_snapped(int target_x, int target_y)
 	if (m_x_display == nullptr || m_x_window == 0) {
 		return;
 	}
-        x11_check_landing();
+	// The previous move's landing first: a window-manager answer other than
+	// the request re-anchors the lattice before this step is chosen.
+	x11_check_landing();
 
-        int sx = target_x;
+	int sx = target_x;
 	int sy = target_y;
-	snap_origin(m_x_drag_origin_x, m_x_drag_origin_y, target_x, target_y, &sx, &sy);
+	bool snapped = false;
+	if (has_snap_provider()) {
+		const dxr_drag::SnapMany snap = [this](const std::vector<dxr_drag::Pt> &t,
+		                                       std::vector<dxr_drag::Pt> *o) { return x11_snap_many(t, o); };
+		const auto t0 = std::chrono::steady_clock::now();
+		const dxr_drag::X11Picker::Result r = m_x_picker.pick(snap, target_x, target_y, m_x_drag_nearest);
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		m_x_drag_snap_ms += ms;
+		m_x_drag_snap_ms_max = std::max(m_x_drag_snap_ms_max, ms);
+		snapped = r.snapped;
+		sx = r.x;
+		sy = r.y;
+		m_x_drag_asked += r.asked;
+		m_x_drag_cands += r.candidates;
+	}
+	if (!m_snap_reported) {
+		m_snap_reported = true;
+		DXRW_INFO("drag: snap provider %s — %s",
+		          m_snap_fn != nullptr        ? "installed"
+		          : m_snap_grid_fn != nullptr ? "installed (grid only)"
+		                                      : "ABSENT (identity)",
+		          snapped ? "the display processor is OFFERING snapped origins; each step lands on the one "
+		                    "nearest the drag line among every phase-correct reachable origin within 7 px, "
+		                    "and every landing is verified ('drag: placement')"
+		                  : "identity (no DP lattice snap on this runtime, or the runtime refused the snap — "
+		                    "see its log); the drag mechanics are unaffected");
+	}
 
 	if (sx != target_x || sy != target_y) {
 		m_x_drag_snapped++;
@@ -1176,46 +1227,62 @@ DxrLinuxWindow::x11_move_snapped(int target_x, int target_y)
 	// content-in-top-level offset captured at the grab.
 	XMoveWindow(m_x_display, m_x_window, sx - m_x_drag_off_x, sy - m_x_drag_off_y);
 	XFlush(m_x_display);
+	m_x_probe_before_x = m_x_drag_at_x;
+	m_x_probe_before_y = m_x_drag_at_y;
 	m_x_drag_at_x = sx;
 	m_x_drag_at_y = sy;
 	m_x_drag_moves++;
-        m_x_probe_pending = true;
-        m_x_probe_want_x = sx;
-        m_x_probe_want_y = sy;
+	m_x_probe_pending = true;
+	m_x_probe_want_x = sx;
+	m_x_probe_want_y = sy;
 }
 
-void DxrLinuxWindow::x11_check_landing() {
-  if (!m_x_probe_pending || m_x_display == nullptr || m_x_window == 0) {
-    return;
-  }
-  m_x_probe_pending = false;
-  int got_x = 0, got_y = 0;
-  x11_root_origin(m_x_display, x11_bound_window(), &got_x, &got_y);
-  u_x11_placement_probe_note(&m_x_probe, m_x_probe_want_x, m_x_probe_want_y,
-                             got_x, got_y);
+void
+DxrLinuxWindow::x11_check_landing()
+{
+	if (!m_x_probe_pending || m_x_display == nullptr || m_x_window == 0) {
+		return;
+	}
+	m_x_probe_pending = false;
+	int got_x = 0, got_y = 0;
+	x11_root_origin(m_x_display, x11_bound_window(), &got_x, &got_y);
+	const dxr_drag::Landing l = dxr_drag::classify_landing(m_x_probe_before_x, m_x_probe_before_y,
+	                                                        m_x_probe_want_x, m_x_probe_want_y, got_x, got_y);
+	if (l == dxr_drag::Landing::Pending) {
+		return; // the window manager has not answered the move yet: no verdict
+	}
+	u_x11_placement_probe_note(&m_x_probe, m_x_probe_want_x, m_x_probe_want_y, got_x, got_y);
+	if (l == dxr_drag::Landing::Moved) {
+		/*
+		 * The window manager put the window somewhere other than asked, so the
+		 * lattice the snap searched (anchored at the drag origin) is not the
+		 * one the window can reach — typically a window created at an odd
+		 * position under XWayland at 200 %, which the window manager has never
+		 * placed: every origin + 2*Z^2 target is then odd and rounded away.
+		 * Where it landed IS reachable: anchor there, and treat it as where
+		 * the window is.
+		 */
+		m_x_drag_missed++;
+		const bool first = m_x_picker.reanchors() == 0;
+		m_x_picker.reanchor(got_x, got_y);
+		m_x_drag_at_x = got_x;
+		m_x_drag_at_y = got_y;
+		if (first) {
+			DXRW_INFO("drag: placement — asked (%d, %d), the window manager put the window at (%d, %d); "
+			          "the drag lattice is re-anchored there (a landed position is reachable)",
+			          m_x_probe_want_x, m_x_probe_want_y, got_x, got_y);
+		}
+	}
 
-  if (!m_x_probe.reported && u_x11_placement_probe_is_quantized(&m_x_probe)) {
-    m_x_probe.reported = true;
-    // One line, once per process: the claim a snapped drag makes is
-    // "the window lands where the lens wants it". It does not, so say so,
-    // and name the cause that has actually produced this.
-    DXRW_WARN("drag: placement NOT honoured — %u of %u moves landed somewhere "
-              "other than the "
-              "requested origin (worst %u px); landed positions fall on a %u "
-              "px lattice. The "
-              "window cannot reach every pixel, so the 3D will stutter while "
-              "dragging. Most "
-              "likely cause: XWayland is running the X screen at global scale "
-              "%u because some "
-              "output (often NOT the 3D panel) is scaled above 100%%. Fix: "
-              "every output at "
-              "100%%, or set DXR_X11_PLACEMENT_QUANTUM=%u so the runtime snaps "
-              "on the reachable "
-              "lattice. `displayxr-cli info` shows the per-output evidence.",
-              m_x_probe.diverged, m_x_probe.moves, m_x_probe.worst_delta,
-              m_x_probe.inferred_quantum, m_x_probe.inferred_quantum,
-              m_x_probe.inferred_quantum);
-  }
+	if (!m_x_probe.reported && u_x11_placement_probe_is_quantized(&m_x_probe)) {
+		m_x_probe.reported = true;
+		// One line, once per process: what the placement evidence says.
+		DXRW_INFO("drag: placement — %u of %u moves landed somewhere other than the requested origin (worst %u "
+		          "px); landed positions fall on a %u px lattice (XWayland scales the whole X screen when any "
+		          "output is scaled). The runtime searches that lattice, and a drag re-anchors it at the first "
+		          "landing the window manager moved; `displayxr-cli info` shows the per-output evidence.",
+		          m_x_probe.diverged, m_x_probe.moves, m_x_probe.worst_delta, m_x_probe.inferred_quantum);
+	}
 }
 
 void
@@ -1226,7 +1293,7 @@ DxrLinuxWindow::x11_rect_snap_tick()
 	}
 	// A drag, fullscreen or the WM's own decorations took the window over
 	// first: the user placed it, nothing is owed any more.
-	if (m_x_dragging || m_x_fullscreen || !m_x_client_drag) {
+	if (m_x_drag.active() || m_x_fullscreen || !m_x_client_drag) {
 		m_x_rect_snap_owed = false;
 		return;
 	}
@@ -1264,6 +1331,8 @@ DxrLinuxWindow::x11_rect_snap_tick()
 	x11_root_origin(m_x_display, m_x_window, &tx, &ty);
 	XMoveWindow(m_x_display, m_x_window, sx - (cx - tx), sy - (cy - ty));
 	XFlush(m_x_display);
+	m_x_probe_before_x = cx;
+	m_x_probe_before_y = cy;
 	m_x_drag_at_x = sx;
 	m_x_drag_at_y = sy;
 	// Read back on the next move's landing check, like a drag step.
@@ -1297,6 +1366,9 @@ DxrLinuxWindow::x11_drive_test_drag()
 		m_x_drag_at_y = m_x_drag_origin_y;
 		m_x_drag_moves = 0;
 		m_x_drag_snapped = 0;
+		m_x_drag_missed = 0;
+		m_x_picker.begin(m_x_drag_origin_x, m_x_drag_origin_y);
+		m_x_probe_pending = false;
 		DXRW_INFO("drag: start (TEST HOOK) — grab origin (%d, %d), walking %+d,%+d in %d steps",
 		          m_x_drag_origin_x, m_x_drag_origin_y, m_x_test_drag_dx, m_x_test_drag_dy,
 		          m_x_test_drag_steps);
@@ -1307,22 +1379,21 @@ DxrLinuxWindow::x11_drive_test_drag()
 	// step is origin + d with no rounding residue.
 	const int i = m_x_test_drag_step;
 	const int n = m_x_test_drag_steps;
-	const int tx = m_x_drag_origin_x + (int)((int64_t)m_x_test_drag_dx * i / n);
-	const int ty = m_x_drag_origin_y + (int)((int64_t)m_x_test_drag_dy * i / n);
-	x11_move_snapped(tx, ty);
-
-	if (i >= n) {
-		m_x_test_drag_done = true;
-                DXRW_INFO("drag: end (TEST HOOK) — %llu move(s), %llu snapped "
-                          "away from the raw target, "
-                          "origin (%d, %d) -> (%d, %d); placement so far: %u "
-                          "of %u verified moves landed exactly",
-                          (unsigned long long)m_x_drag_moves,
-                          (unsigned long long)m_x_drag_snapped,
-                          m_x_drag_origin_x, m_x_drag_origin_y, m_x_drag_at_x,
-                          m_x_drag_at_y, m_x_probe.moves - m_x_probe.diverged,
-                          m_x_probe.moves);
-        }
+	if (i <= n) {
+		const int tx = m_x_drag_origin_x + (int)((int64_t)m_x_test_drag_dx * i / n);
+		const int ty = m_x_drag_origin_y + (int)((int64_t)m_x_test_drag_dy * i / n);
+		x11_move_snapped(tx, ty);
+		return;
+	}
+	// One pump after the last step: its landing is verified too.
+	x11_check_landing();
+	m_x_test_drag_done = true;
+	DXRW_INFO("drag: end (TEST HOOK) — %llu move(s), %llu snapped away from the raw target, %llu moved by the "
+	          "window manager, %u re-anchor(s), origin (%d, %d) -> (%d, %d); placement so far: %u of %u verified "
+	          "moves landed exactly",
+	          (unsigned long long)m_x_drag_moves, (unsigned long long)m_x_drag_snapped,
+	          (unsigned long long)m_x_drag_missed, m_x_picker.reanchors(), m_x_drag_origin_x, m_x_drag_origin_y,
+	          m_x_drag_at_x, m_x_drag_at_y, m_x_probe.moves - m_x_probe.diverged, m_x_probe.moves);
 }
 
 bool
@@ -1368,12 +1439,12 @@ DxrLinuxWindow::x11_layout_content()
 	}
 }
 
-void
-DxrLinuxWindow::x11_begin_drag(int root_x, int root_y, unsigned int button)
+bool
+DxrLinuxWindow::x11_begin_drag(int root_x, int root_y, unsigned int button, bool from_bar)
 {
-	m_x_dragging = true;
-	m_x_drag_from_bar = false; // the bar's caller sets it after this returns
-	m_x_drag_btn = button;
+	if (!m_x_drag.press(button, from_bar)) {
+		return false; // one drag at a time; a second button never restarts it
+	}
 	m_x_drag_ptr_x = root_x;
 	m_x_drag_ptr_y = root_y;
 	int top_x = 0, top_y = 0;
@@ -1385,33 +1456,96 @@ DxrLinuxWindow::x11_begin_drag(int root_x, int root_y, unsigned int button)
 	m_x_drag_at_y = m_x_drag_origin_y;
 	m_x_drag_moves = 0;
 	m_x_drag_snapped = 0;
+	m_x_drag_missed = 0;
+	m_x_drag_asked = 0;
+	m_x_drag_cands = 0;
+	m_x_drag_snap_ms = 0.0;
+	m_x_drag_snap_ms_max = 0.0;
+	m_x_probe_pending = false;
+	m_x_picker.begin(m_x_drag_origin_x, m_x_drag_origin_y);
 	// Grab so motion OUTSIDE the window keeps arriving: the pointer routinely
 	// leaves a window being dragged fast (and, with a click-through input
 	// shape, leaves the shape on the very first pixel).
 	const unsigned int motion_mask =
 	    button == Button1 ? Button1MotionMask : (button == Button2 ? Button2MotionMask : Button3MotionMask);
-	XGrabPointer(m_x_display, m_x_window, False, ButtonReleaseMask | PointerMotionMask | motion_mask, GrabModeAsync,
-	             GrabModeAsync, None, None, CurrentTime);
-	DXRW_INFO("drag: start (button %u) — grab origin (%d, %d), pointer (%d, %d)", button, m_x_drag_origin_x,
-	          m_x_drag_origin_y, m_x_drag_ptr_x, m_x_drag_ptr_y);
+	const int grab = XGrabPointer(m_x_display, m_x_window, False, ButtonReleaseMask | PointerMotionMask | motion_mask,
+	                              GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+	if (grab != GrabSuccess && !m_x_grab_warned) {
+		m_x_grab_warned = true;
+		// Not fatal: the press's implicit grab still routes the release here,
+		// and the pointer state is checked every pump while dragging.
+		DXRW_WARN("drag: XGrabPointer failed (%d) — the drag follows the press's implicit grab; its end is "
+		          "also checked against the pointer state every frame",
+		          grab);
+	}
+	DXRW_INFO("drag: start (button %u%s) — grab origin (%d, %d), pointer (%d, %d)", button,
+	          from_bar ? ", header bar" : "", m_x_drag_origin_x, m_x_drag_origin_y, m_x_drag_ptr_x,
+	          m_x_drag_ptr_y);
+	return true;
 }
 
 void
-DxrLinuxWindow::x11_end_drag()
+DxrLinuxWindow::x11_end_drag(dxr_drag::ButtonDrag::End why)
 {
-	if (!m_x_dragging) {
-		return;
+	if (m_x_drag.cancel(why)) {
+		x11_after_drag_end();
 	}
-	m_x_dragging = false;
-	m_x_drag_from_bar = false;
-	m_x_drag_btn = 0;
+}
+
+void
+DxrLinuxWindow::x11_after_drag_end()
+{
 	XUngrabPointer(m_x_display, CurrentTime);
 	XFlush(m_x_display);
-	DXRW_INFO("drag: end — %llu move(s), %llu snapped away from the raw target, origin (%d, %d) -> (%d, %d); "
-	          "placement so far: %u of %u verified moves landed exactly",
-	          (unsigned long long)m_x_drag_moves, (unsigned long long)m_x_drag_snapped, m_x_drag_origin_x,
+	// The last step's landing, so the summary counts it.
+	x11_check_landing();
+	static const char *const kWhy[] = {"-",
+	                                   "release",
+	                                   "button up in a motion — the release was not delivered",
+	                                   "button up in the pointer state — the release was not delivered",
+	                                   "focus lost",
+	                                   "cancelled"};
+	const unsigned w = (unsigned)m_x_drag.last_end();
+	DXRW_INFO("drag: end (%s) — %llu move(s), %llu snapped away from the raw target, %llu moved by the window "
+	          "manager, %u re-anchor(s), %.1f candidates/step, %llu snap queries in %.1f ms (slowest step %.2f ms), "
+	          "origin (%d, %d) -> (%d, %d); placement so far: %u of %u verified moves landed exactly",
+	          w < sizeof(kWhy) / sizeof(kWhy[0]) ? kWhy[w] : "?", (unsigned long long)m_x_drag_moves,
+	          (unsigned long long)m_x_drag_snapped, (unsigned long long)m_x_drag_missed, m_x_picker.reanchors(),
+	          m_x_drag_moves > 0 ? (double)m_x_drag_cands / (double)m_x_drag_moves : 0.0,
+	          (unsigned long long)m_x_drag_asked, m_x_drag_snap_ms, m_x_drag_snap_ms_max, m_x_drag_origin_x,
 	          m_x_drag_origin_y, m_x_drag_at_x, m_x_drag_at_y, m_x_probe.moves - m_x_probe.diverged,
 	          m_x_probe.moves);
+	// A drag that ended without its release: the app saw the press, so it
+	// gets the release now (the real one, if it still comes, is swallowed).
+	const unsigned owed = m_x_drag.take_synthetic_release();
+	if (owed != 0) {
+		DxrWindowEvent up;
+		up.type = DxrWindowEvent::Type::ButtonUp;
+		up.button = owed;
+		up.window_drag = true;
+		up.x = m_x_last_ptr_x;
+		up.y = m_x_last_ptr_y;
+		m_events.push_back(up);
+	}
+}
+
+void
+DxrLinuxWindow::x11_poll_drag_button()
+{
+	if (!m_x_drag.active() || m_x_display == nullptr) {
+		return;
+	}
+	::Window root = 0, child = 0;
+	int rx = 0, ry = 0, wx = 0, wy = 0;
+	unsigned int mask = 0;
+	if (!XQueryPointer(m_x_display, m_x_window, &root, &child, &rx, &ry, &wx, &wy, &mask)) {
+		return; // pointer on another screen: no verdict
+	}
+	m_x_last_ptr_x = wx;
+	m_x_last_ptr_y = wy - x11_content_offset_y();
+	if (m_x_drag.poll(mask)) {
+		x11_after_drag_end();
+	}
 }
 
 void
@@ -1533,6 +1667,10 @@ DxrLinuxWindow::s_registry_global(void *data, struct wl_registry *r, uint32_t na
 		    s_seat_name,
 		};
 		wl_seat_add_listener(self->m_wl_seat, &kSeatListener, self);
+	} else if (strcmp(iface, "gtk_shell1") == 0) {
+		// Not bound — only its presence matters: it is mutter's, and mutter's
+		// move grab does not end on a secondary button (dxr_drag.h).
+		self->m_wl_gtk_shell = true;
 	} else if (strcmp(iface, wp_viewporter_interface.name) == 0) {
 		self->m_wl_viewporter =
 		    static_cast<struct wp_viewporter *>(wl_registry_bind(r, name, &wp_viewporter_interface, 1));
@@ -2353,6 +2491,19 @@ DxrLinuxWindow::wl_to_buffer(double lx, double ly, int32_t *bx, int32_t *by) con
 	*by = (int32_t)(ly * sy);
 }
 
+dxr_drag::WlDragEnv
+DxrLinuxWindow::wl_drag_env() const
+{
+	dxr_drag::WlDragEnv env;
+	env.mutter = m_wl_gtk_shell;
+#ifdef DXR_APP_HAVE_WL_CHROME
+	// The window-geometry extension runs inside GNOME Shell: mutter.
+	env.mutter = env.mutter || m_wl_placement.has_drag_lattice() || m_wl_placement.has_pointer_drag();
+	env.shell_pointer_drag = m_wl_placement.has_pointer_drag();
+#endif
+	return env;
+}
+
 void
 DxrLinuxWindow::s_content_pointer(void *userdata, const DxrWlPointerEvent &ev)
 {
@@ -2365,16 +2516,54 @@ DxrLinuxWindow::wl_content_pointer(const DxrWlPointerEvent &pe)
 	DxrWindowEvent ev;
 	ev.mods = m_mods;
 	ev.time_ms = pe.time;
+	// The release a drag owes the app (it saw the press; the compositor's
+	// grab — or a lost implicit grab — swallowed the release).
+	auto owe = [&](const dxr_drag::WlContentDrag::Out &o) {
+		if (o.stop_shell) {
+#ifdef DXR_APP_HAVE_WL_CHROME
+			m_wl_placement.end_pointer_drag();
+#endif
+		}
+		if (o.ended) {
+#ifdef DXR_APP_HAVE_WL_CHROME
+			// The drag is over here, whatever the publisher reports later: no
+			// more mid-drag tables (a DragLatticeDone, if one comes, still
+			// logs its summary).
+			m_wl_compositor_drag = false;
+#endif
+			DXRW_INFO("drag: content drag over (%s)", pe.kind == DxrWlPointerEvent::Kind::Enter
+			                                              ? "the pointer came back after the compositor's move"
+			                                          : pe.kind == DxrWlPointerEvent::Kind::Leave
+			                                              ? "the pointer left mid-drag — the button went up unseen"
+			                                              : "button released");
+		}
+		if (o.synth_release != 0) {
+			DxrWindowEvent up;
+			up.type = DxrWindowEvent::Type::ButtonUp;
+			up.button = o.synth_release;
+			up.window_drag = true;
+			up.mods = m_mods;
+			up.time_ms = pe.time;
+			wl_to_buffer(pe.x, pe.y, &up.x, &up.y);
+			m_events.push_back(up);
+		}
+	};
 	switch (pe.kind) {
 	case DxrWlPointerEvent::Kind::Enter:
+		owe(m_wl_drag.on_enter());
+		[[fallthrough]];
 	case DxrWlPointerEvent::Kind::Motion:
 		m_wl_ptr_x = pe.x;
 		m_wl_ptr_y = pe.y;
+		if (m_wl_drag.suppress_motion()) {
+			return; // the shell is moving the window with the pointer
+		}
 		ev.type = DxrWindowEvent::Type::Motion;
 		wl_to_buffer(pe.x, pe.y, &ev.x, &ev.y);
 		m_events.push_back(ev);
 		return;
 	case DxrWlPointerEvent::Kind::Leave:
+		owe(m_wl_drag.on_leave());
 		ev.type = DxrWindowEvent::Type::PointerLeave;
 		m_events.push_back(ev);
 		return;
@@ -2389,14 +2578,25 @@ DxrLinuxWindow::wl_content_pointer(const DxrWlPointerEvent &pe)
 		default: return;
 		}
 		wl_to_buffer(pe.x, pe.y, &ev.x, &ev.y);
-		// The content drag button: the compositor's own move (the same one
-		// the title bar and Super+drag run), so the runtime's
-		// geometry-service phase tracking is unchanged. A fullscreen window
-		// is never dragged.
+		if (!pe.pressed) {
+			// The drag button's release reached us: the shell pointer drag
+			// (the client keeps its implicit grab) or a refused move.
+			const dxr_drag::WlContentDrag::Out o = m_wl_drag.on_release(ev.button);
+			owe(o);
+			ev.window_drag = o.ended;
+			m_events.push_back(ev);
+			return;
+		}
+		// The content drag button. A fullscreen window is never dragged, and
+		// one drag at a time.
 		if (m_desc.wayland_drag_button != 0 && ev.button == m_desc.wayland_drag_button && !m_wl_fullscreen &&
-		    m_wl_toplevel != nullptr && m_wl_seat != nullptr) {
-			ev.window_drag = true;
-			if (pe.pressed) {
+		    m_wl_toplevel != nullptr && m_wl_seat != nullptr && !m_wl_drag.active()) {
+			const dxr_drag::WlDragMode mode = dxr_drag::wl_drag_mode(ev.button, wl_drag_env());
+			switch (mode) {
+			case dxr_drag::WlDragMode::CompositorMove:
+				// The compositor's own move (the same one the title bar
+				// and Super+drag run), so the runtime's geometry-service
+				// phase tracking is unchanged.
 #ifdef DXR_APP_HAVE_WL_CHROME
 				// The same phase-snapped drag the title bar runs (#1609):
 				// hand the compositor this drag's lattice first.
@@ -2404,7 +2604,33 @@ DxrLinuxWindow::wl_content_pointer(const DxrWlPointerEvent &pe)
 #endif
 				xdg_toplevel_move(m_wl_toplevel, m_wl_seat, pe.serial);
 				DXRW_INFO("drag: compositor move (button %u)", ev.button);
+				break;
+			case dxr_drag::WlDragMode::ShellPointer:
+#ifdef DXR_APP_HAVE_WL_CHROME
+				// mutter's move grab would never end on this button's
+				// release; the extension follows the pointer until the
+				// button is up instead, through the same drag table.
+				wl_drag_prepare();
+				m_wl_placement.begin_pointer_drag(ev.button);
+				DXRW_INFO("drag: shell pointer drag (button %u) — mutter's move grab ends only on button 1, "
+				          "so the window-geometry extension moves the window while the button is held",
+				          ev.button);
+#endif
+				break;
+			case dxr_drag::WlDragMode::Nobody:
+				if (!m_wl_drag_none_warned) {
+					m_wl_drag_none_warned = true;
+					DXRW_WARN("drag: button %u does not move the window here — mutter ends a move grab only on "
+					          "button 1, so a drag started on button %u could never be released. Update the "
+					          "window-geometry@displayxr.org extension (its pointer drag, placement "
+					          "capability 4, runs this drag instead); the title bar and Super+drag still move "
+					          "the window.",
+					          ev.button, ev.button);
+				}
+				break;
 			}
+			m_wl_drag.begin(ev.button, mode);
+			ev.window_drag = mode != dxr_drag::WlDragMode::Nobody;
 		}
 		m_events.push_back(ev);
 		return;
@@ -4009,9 +4235,9 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 						if (hit == dxr_csd::Hit::Drag) {
 							// The same snapped path as the drag button — the
 							// reason the bar is client-side at all.
-							if (m_x_client_drag && !m_x_test_drag_armed && !m_x_dragging) {
-								x11_begin_drag(ev.xbutton.x_root, ev.xbutton.y_root, Button1);
-								m_x_drag_from_bar = true;
+							if (m_x_client_drag && !m_x_test_drag_armed) {
+								x11_begin_drag(ev.xbutton.x_root, ev.xbutton.y_root, Button1,
+								               true);
 							}
 						} else if (hit != dxr_csd::Hit::Outside) {
 							m_x_bar.setPressed(hit);
@@ -4022,12 +4248,15 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				out.type = DxrWindowEvent::Type::ButtonDown;
 				out.button = b;
 				if (m_desc.x11_drag_button != 0 && b == m_desc.x11_drag_button && m_x_client_drag &&
-				    !m_x_test_drag_armed && !m_x_dragging) {
+				    !m_x_test_drag_armed && !m_x_drag.active()) {
 					// The content drag button: the whole window is the drag
 					// handle (an undecorated window has none, and a
 					// transparent one may have little else).
-					out.window_drag = true;
-					x11_begin_drag(ev.xbutton.x_root, ev.xbutton.y_root, b);
+					out.window_drag = x11_begin_drag(ev.xbutton.x_root, ev.xbutton.y_root, b);
+				} else {
+					// Any other press: a stale release of this button is not
+					// coming any more (dxr_drag::ButtonDrag::press).
+					m_x_drag.note_press(b);
 				}
 				m_events.push_back(out);
 				break;
@@ -4042,10 +4271,16 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				out.time_ms = (uint32_t)ev.xbutton.time;
 				out.x = ev.xbutton.x;
 				out.y = ev.xbutton.y - off_y;
+				// The late release of a drag that already ended without it
+				// (and was reported to the app then): drop it.
+				if (m_x_drag.swallow_release(b)) {
+					break;
+				}
 				// A drag ends on the release of the button that started it.
-				if (m_x_dragging && b == m_x_drag_btn) {
-					const bool from_bar = m_x_drag_from_bar;
-					x11_end_drag();
+				if (m_x_drag.active() && b == m_x_drag.button()) {
+					const bool from_bar = m_x_drag.from_bar();
+					m_x_drag.release(b);
+					x11_after_drag_end();
 					if (from_bar) {
 						break; // the bar consumed this press; the app never saw it
 					}
@@ -4077,7 +4312,16 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 			}
 
 			case MotionNotify:
-				if (m_x_dragging) {
+				m_x_last_ptr_x = ev.xmotion.x;
+				m_x_last_ptr_y = ev.xmotion.y - off_y;
+				if (m_x_drag.active()) {
+					// The drag button UP in a motion's state: its release was
+					// not delivered to us. End here rather than follow.
+					if (m_x_drag.motion(ev.xmotion.state)) {
+						x11_after_drag_end();
+						have_motion = false;
+						break;
+					}
 					have_motion = true;
 					motion_root_x = ev.xmotion.x_root;
 					motion_root_y = ev.xmotion.y_root;
@@ -4104,7 +4348,7 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 
 			case LeaveNotify:
 				m_x_bar.setHover(dxr_csd::Hit::Outside);
-				if (!m_x_dragging) {
+				if (!m_x_drag.active()) {
 					out.type = DxrWindowEvent::Type::PointerLeave;
 					m_events.push_back(out);
 				}
@@ -4123,7 +4367,7 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 						m_x_keys_down.reset();
 						// A drag whose button-up will land in another window
 						// must not keep the window glued to the pointer.
-						x11_end_drag();
+						x11_end_drag(dxr_drag::ButtonDrag::End::FocusLost);
 					}
 					out.type = ev.type == FocusIn ? DxrWindowEvent::Type::FocusGained
 					                              : DxrWindowEvent::Type::FocusLost;
@@ -4135,7 +4379,12 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 			}
 		}
 
-		if (have_motion && m_x_dragging) {
+		// A drag still running after the queue is drained: is its button
+		// still down? (A release that never reached us, with no motion after
+		// it, is caught here — once per pump, only while dragging.)
+		x11_poll_drag_button();
+
+		if (have_motion && m_x_drag.active()) {
 			// Absolute, not incremental: origin + (pointer now - pointer at
 			// grab). A snap that holds the window back for a few pixels
 			// therefore never makes the window lag the pointer permanently.
@@ -4242,6 +4491,17 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 			    ++m_wl_lattice_retry_in >= 20) {
 				m_wl_lattice_retry_in = 0;
 				wl_lattice_on_placement_change();
+			}
+			bool pd_ok = false;
+			if (m_wl_placement.take_pointer_drag_answer(&pd_ok)) {
+				if (pd_ok) {
+					DXRW_INFO("drag: the shell is moving the window with the pointer");
+				} else {
+					// Too late (the button was already up) or refused: the
+					// release that ends our side comes, or came, anyway.
+					DXRW_INFO("drag: the shell declined the pointer drag (the button was already up, or "
+					          "the window is fullscreen)");
+				}
 			}
 			int32_t ndx = 0, ndy = 0;
 			if (m_wl_placement.poll_needed(&ndx, &ndy) && m_wl_lattice_active) {
@@ -4607,7 +4867,7 @@ DxrLinuxWindow::toggle_fullscreen()
 		// the panel-sized weave off the panel); a windowed one owns its drag
 		// unless the WM does.
 		m_x_client_drag = !want && !m_x_wm_drag;
-		if (want && m_x_dragging) {
+		if (want && m_x_drag.active()) {
 			x11_end_drag();
 		}
 		// The bar hides / returns now; the sizes settle on the ConfigureNotify

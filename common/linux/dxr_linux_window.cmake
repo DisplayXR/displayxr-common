@@ -49,6 +49,7 @@ add_library(displayxr_linux_window STATIC
     "${_dxr_lw_dir}/dxr_x11_chrome.cpp"
     "${_dxr_lw_dir}/dxr_x11_chrome.h"
     "${_dxr_lw_dir}/dxr_weave_snap.h"
+    "${_dxr_lw_dir}/dxr_drag.h"
 )
 add_library(displayxr::linux_window ALIAS displayxr_linux_window)
 set_target_properties(displayxr_linux_window PROPERTIES

@@ -12,7 +12,11 @@
  * then two real windows go through create -> pump -> destroy — the plain
  * window of the runtime's cube apps and the demos' shape (header bar, ARGB
  * visual, right-button drag) — including synthetic key and button events,
- * whose CONTENT coordinates must come back with the bar subtracted.
+ * whose CONTENT coordinates must come back with the bar subtracted — and the
+ * right-button drag's END when its release never reaches the window: a
+ * synthetic (XSendEvent) press starts a drag while the real button is up, so
+ * the helper must end it from the pointer state or from a motion's state, owe
+ * the app exactly one release, and swallow the late real one.
  */
 
 #include "dxr_linux_window.h"
@@ -137,6 +141,42 @@ send_button(Display *dpy, ::Window w, unsigned int button, int x, int y)
 	ev.xbutton.time = 2000;
 	ev.xbutton.same_screen = True;
 	XSendEvent(dpy, w, False, ButtonPressMask, &ev);
+	XFlush(dpy);
+}
+
+static void
+send_release(Display *dpy, ::Window w, unsigned int button, int x, int y)
+{
+	XEvent ev = {};
+	ev.xbutton.type = ButtonRelease;
+	ev.xbutton.display = dpy;
+	ev.xbutton.window = w;
+	ev.xbutton.root = DefaultRootWindow(dpy);
+	ev.xbutton.button = button;
+	ev.xbutton.x = x;
+	ev.xbutton.y = y;
+	ev.xbutton.time = 2100;
+	ev.xbutton.same_screen = True;
+	XSendEvent(dpy, w, False, ButtonReleaseMask, &ev);
+	XFlush(dpy);
+}
+
+static void
+send_motion(Display *dpy, ::Window w, int x, int y, int root_x, int root_y, unsigned int state)
+{
+	XEvent ev = {};
+	ev.xmotion.type = MotionNotify;
+	ev.xmotion.display = dpy;
+	ev.xmotion.window = w;
+	ev.xmotion.root = DefaultRootWindow(dpy);
+	ev.xmotion.x = x;
+	ev.xmotion.y = y;
+	ev.xmotion.x_root = root_x;
+	ev.xmotion.y_root = root_y;
+	ev.xmotion.state = state;
+	ev.xmotion.time = 2050;
+	ev.xmotion.same_screen = True;
+	XSendEvent(dpy, w, False, PointerMotionMask, &ev);
 	XFlush(dpy);
 }
 
@@ -285,6 +325,76 @@ test_x11_window(bool demo_shape)
 	CHECK(saw_down && saw_up, "key press + release delivered with keysyms");
 	CHECK(saw_btn, "button press delivered");
 	CHECK(saw_scroll, "wheel delivered as a Scroll step");
+
+	if (demo_shape) {
+		// The right-button drag must end even when its release never reaches
+		// the window. A synthetic press starts the drag while the real
+		// button is UP, so no release will ever come from the server.
+		auto count = [](const std::vector<DxrWindowEvent> &ev, DxrWindowEvent::Type t, unsigned b,
+		                bool *drag_flag) {
+			int n = 0;
+			for (const auto &e : ev) {
+				if (e.type == t && e.button == b) {
+					n++;
+					if (drag_flag != nullptr) {
+						*drag_flag = e.window_drag;
+					}
+				}
+			}
+			return n;
+		};
+		auto origin = [&](int *x, int *y) {
+			::Window child = 0;
+			XTranslateCoordinates(dpy, win.x11_bound_window(), DefaultRootWindow(dpy), 0, 0, x, y, &child);
+		};
+		int ox = 0, oy = 0;
+		origin(&ox, &oy);
+
+		// (a) Only the pointer state says it is over: the drag ends within
+		// the pump that saw the press, and the app is owed one release.
+		send_button(dpy, top, Button3, 300, 100 + bar);
+		auto ev = pump_for(win, 2);
+		bool down_drag = false, up_drag = false;
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonDown, 3, &down_drag) == 1 && down_drag,
+		      "drag press delivered, flagged window_drag");
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonUp, 3, &up_drag) == 1 && up_drag,
+		      "released-button drag: ended from the pointer state, one synthetic ButtonUp");
+		// The late real release (here: a synthetic one) is swallowed.
+		send_release(dpy, top, Button3, 300, 100 + bar);
+		ev = pump_for(win, 2);
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonUp, 3, nullptr) == 0, "the late release is swallowed");
+
+		// (b) A motion whose state has the button up ends it before the
+		// window follows that motion.
+		send_button(dpy, top, Button3, 300, 100 + bar);
+		send_motion(dpy, top, 400, 150 + bar, ox + 400, oy + 150, 0);
+		ev = pump_for(win, 2);
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonUp, 3, nullptr) == 1,
+		      "motion with the button up: ended, one synthetic ButtonUp");
+		int nx = 0, ny = 0;
+		origin(&nx, &ny);
+		CHECK(nx == ox && ny == oy, "the window did not follow a motion made with the button up");
+		send_release(dpy, top, Button3, 400, 150 + bar);
+		(void)pump_for(win, 2);
+
+		// (c) A release that DOES arrive with the press (both synthetic, one
+		// batch) ends it normally: one ButtonUp, nothing swallowed later.
+		send_button(dpy, top, Button3, 300, 100 + bar);
+		send_release(dpy, top, Button3, 300, 100 + bar);
+		ev = pump_for(win, 2);
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonUp, 3, &up_drag) == 1 && up_drag,
+		      "delivered release: one ButtonUp, flagged window_drag");
+		// A plain press/release of the drag button afterwards is delivered
+		// in full (no stale swallow left behind).
+		send_button(dpy, top, Button3, 300, 100 + bar);
+		(void)pump_for(win, 2); // ends from the pointer state again (button is up)
+		send_release(dpy, top, Button3, 300, 100 + bar);
+		send_button(dpy, top, Button3, 300, 100 + bar);
+		ev = pump_for(win, 2);
+		CHECK(count(ev, DxrWindowEvent::Type::ButtonDown, 3, nullptr) == 1, "a new press after a swallow");
+		send_release(dpy, top, Button3, 300, 100 + bar);
+		(void)pump_for(win, 2);
+	}
 
 	const DxrWindowRect r = {10, 10, 100, 50};
 	const bool shaped = win.set_input_region(&r, 1);
