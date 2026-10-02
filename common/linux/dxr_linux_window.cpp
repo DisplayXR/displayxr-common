@@ -44,8 +44,15 @@
 #include <unistd.h>                  // close() the keymap fd
 #ifdef DXR_LW_HAVE_XKBCOMMON
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-compose.h> // set_text_input(true): dead keys / Compose
+#endif
+#ifdef DXR_APP_HAVE_WL_CHROME
+#include "cursor-shape-v1-client-protocol.h" // set_cursor() shape values
 #endif
 #endif
+
+#include "dxr_input_text.h" // the text rule + uri-list parsing (pure, unit tested)
+#include <X11/cursorfont.h> // set_cursor() on X11: themed font cursors
 
 #include <dlfcn.h>  // libdbus-1 is loaded at run time for the probe — no build dependency
 #include <unistd.h> // getpid() for _NET_WM_PID
@@ -903,6 +910,10 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 	m_x_wm_delete = XInternAtom(m_x_display, "WM_DELETE_WINDOW", False);
 	XSetWMProtocols(m_x_display, m_x_window, &m_x_wm_delete, 1);
 
+	// File drops (XDND v5): XdndAware on the top-level — the window a source
+	// talks to. Receive only; see dxr_x11_dnd.h.
+	m_x_dnd.init(m_x_display, m_x_window);
+
 	// Decorations off BEFORE the map, so a frame is never created in the first
 	// place. Mutter reparenting us into a title bar is what clamped the #729
 	// window to 3840x2086 at (3456, 74) — and for a WINDOWED run (#1588) the
@@ -1605,10 +1616,165 @@ dxr_key_from_keysym(KeySym ks)
 	}
 }
 
+/*
+ *
+ * X11 text input + cursors (additive; see set_text_input() / set_cursor()).
+ *
+ */
+
+void
+DxrLinuxWindow::x11_set_text_input(bool enabled)
+{
+	if (m_x_display == nullptr || m_x_window == 0) {
+		return;
+	}
+	if (!enabled) {
+		if (m_x_ic != nullptr) {
+			XUnsetICFocus(m_x_ic);
+			XDestroyIC(m_x_ic);
+			m_x_ic = nullptr;
+		}
+		if (m_x_im != nullptr) {
+			XCloseIM(m_x_im);
+			m_x_im = nullptr;
+		}
+		DXRW_INFO("text input: X11 input context off");
+		return;
+	}
+	if (m_x_ic != nullptr) {
+		return;
+	}
+	// The app's locale decides the input method (setlocale is the app's to
+	// call, never this helper's). XOpenIM falls back to the built-in "local"
+	// method — Compose / dead keys from the locale's compose table.
+	if (XSupportsLocale()) {
+		m_x_im = XOpenIM(m_x_display, nullptr, nullptr, nullptr);
+	}
+	if (m_x_im != nullptr) {
+		m_x_ic = XCreateIC(m_x_im, XNInputStyle, XIMPreeditNothing | XIMStatusNothing, XNClientWindow, m_x_window,
+		                   XNFocusWindow, m_x_window, nullptr);
+	}
+	if (m_x_ic == nullptr) {
+		if (m_x_im != nullptr) {
+			XCloseIM(m_x_im);
+			m_x_im = nullptr;
+		}
+		DXRW_WARN("text input: no X input method for this locale — per-key text only (no compose / dead keys)");
+		return;
+	}
+	// Whatever extra events the input method needs, on top of ours.
+	long filter = 0;
+	if (XGetICValues(m_x_ic, XNFilterEvents, &filter, nullptr) == nullptr && filter != 0) {
+		XWindowAttributes wa = {};
+		XGetWindowAttributes(m_x_display, m_x_window, &wa);
+		XSelectInput(m_x_display, m_x_window, wa.your_event_mask | filter);
+	}
+	XSetICFocus(m_x_ic);
+	XFlush(m_x_display);
+	DXRW_INFO("text input: X11 input context on (input method '%s')",
+	          XLocaleOfIM(m_x_im) != nullptr ? XLocaleOfIM(m_x_im) : "?");
+}
+
+void
+DxrLinuxWindow::x11_key_text(XKeyEvent *ev, uint32_t mods, char *out, size_t out_size)
+{
+	out[0] = '\0';
+	char buf[32] = {};
+	KeySym ks = 0;
+	if (m_x_ic != nullptr) {
+		Status st = 0;
+		const int n = Xutf8LookupString(m_x_ic, ev, buf, (int)sizeof(buf) - 1, &ks, &st);
+		if ((st != XLookupChars && st != XLookupBoth) || n <= 0) {
+			return;
+		}
+		buf[n] = '\0';
+	} else {
+		// No input context: XLookupString's Latin-1, one character.
+		char l1[8] = {};
+		const int n = XLookupString(ev, l1, (int)sizeof(l1), &ks, nullptr);
+		if (n != 1) {
+			return;
+		}
+		dxr_input::utf8_encode((unsigned char)l1[0], buf);
+	}
+	dxr_input::accept_text(buf, (mods & (DxrModCtrl | DxrModAlt)) != 0, out, out_size);
+}
+
+namespace {
+unsigned int
+x11_font_cursor(DxrCursor c)
+{
+	switch (c) {
+	case DxrCursor::Pointer: return XC_hand2;
+	case DxrCursor::Text: return XC_xterm;
+	case DxrCursor::Move: return XC_fleur;
+	case DxrCursor::Crosshair: return XC_crosshair;
+	case DxrCursor::NotAllowed: return XC_X_cursor;
+	case DxrCursor::Wait: return XC_watch;
+	case DxrCursor::ResizeEW: return XC_sb_h_double_arrow;
+	case DxrCursor::ResizeNS: return XC_sb_v_double_arrow;
+	case DxrCursor::ResizeNWSE: return XC_bottom_right_corner;
+	case DxrCursor::ResizeNESW: return XC_bottom_left_corner;
+	default: return XC_left_ptr;
+	}
+}
+} // namespace
+
+void
+DxrLinuxWindow::x11_apply_cursor()
+{
+	if (m_x_display == nullptr) {
+		return;
+	}
+	// The BOUND window: the content child under a header bar (so the bar keeps
+	// its own arrow), else the top-level.
+	const ::Window w = x11_bound_window();
+	if (w == 0) {
+		return;
+	}
+	const size_t idx = (size_t)m_cursor;
+	if (idx >= sizeof(m_x_cursors) / sizeof(m_x_cursors[0])) {
+		return;
+	}
+	if (m_x_cursors[idx] == 0) {
+		if (m_cursor == DxrCursor::Hidden) {
+			static const char kBlank[1] = {0};
+			Pixmap pm = XCreateBitmapFromData(m_x_display, w, kBlank, 1, 1);
+			XColor black = {};
+			m_x_cursors[idx] = XCreatePixmapCursor(m_x_display, pm, pm, &black, &black, 0, 0);
+			XFreePixmap(m_x_display, pm);
+		} else {
+			// libX11 loads the THEMED cursor of the same name when Xcursor
+			// is installed, so this matches the desktop's cursor theme.
+			m_x_cursors[idx] = XCreateFontCursor(m_x_display, x11_font_cursor(m_cursor));
+		}
+	}
+	if (m_cursor == DxrCursor::Default) {
+		XUndefineCursor(m_x_display, w); // the parent's (the WM's / root's) arrow
+	} else {
+		XDefineCursor(m_x_display, w, m_x_cursors[idx]);
+	}
+	XFlush(m_x_display);
+}
+
 void
 DxrLinuxWindow::destroy_x11()
 {
 	if (m_x_display != nullptr) {
+		if (m_x_ic != nullptr) {
+			XDestroyIC(m_x_ic);
+			m_x_ic = nullptr;
+		}
+		if (m_x_im != nullptr) {
+			XCloseIM(m_x_im);
+			m_x_im = nullptr;
+		}
+		for (Cursor &c : m_x_cursors) {
+			if (c != 0) {
+				XFreeCursor(m_x_display, c);
+				c = 0;
+			}
+		}
 		dxr_x11_chrome::Release(m_x_display);
 		if (m_x_window != 0) {
 			XDestroyWindow(m_x_display, m_x_window); // takes the content child with it
@@ -1639,6 +1805,11 @@ void
 DxrLinuxWindow::s_registry_global(void *data, struct wl_registry *r, uint32_t name, const char *iface, uint32_t version)
 {
 	auto *self = static_cast<DxrLinuxWindow *>(data);
+
+	// wl_data_device_manager: file drops (Drop events, dxr_wl_dnd.h).
+	if (self->m_wl_dnd.on_global(r, name, iface, version)) {
+		return;
+	}
 
 #ifdef DXR_APP_HAVE_WL_CHROME
 	// wl_shm / wl_subcompositor / decoration manager / cursor shapes (#1654).
@@ -2313,7 +2484,99 @@ DxrLinuxWindow::s_kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
 	ev.time_ms = time;
 	ev.x = 0;
 	ev.y = 0;
+	if (ev.type == DxrWindowEvent::Type::KeyDown) {
+		self->wl_key_text(key, ev.text, sizeof(ev.text));
+	}
 	self->m_events.push_back(ev);
+}
+
+void
+DxrLinuxWindow::wl_set_text_input(bool enabled)
+{
+#ifdef DXR_LW_HAVE_XKBCOMMON
+	if (!enabled) {
+		if (m_wl_compose_state != nullptr) {
+			xkb_compose_state_unref(static_cast<struct xkb_compose_state *>(m_wl_compose_state));
+			m_wl_compose_state = nullptr;
+		}
+		return;
+	}
+	if (m_wl_compose_state != nullptr) {
+		return;
+	}
+	if (m_wl_xkb_ctx == nullptr) {
+		m_wl_xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	}
+	if (m_wl_xkb_ctx == nullptr) {
+		return;
+	}
+	if (m_wl_compose_table == nullptr) {
+		// The user's locale, by the precedence libc uses for LC_CTYPE (read,
+		// never set — the process locale is the app's).
+		const char *loc = getenv("LC_ALL");
+		if (loc == nullptr || *loc == '\0') {
+			loc = getenv("LC_CTYPE");
+		}
+		if (loc == nullptr || *loc == '\0') {
+			loc = getenv("LANG");
+		}
+		if (loc == nullptr || *loc == '\0') {
+			loc = "C";
+		}
+		m_wl_compose_table = xkb_compose_table_new_from_locale(static_cast<struct xkb_context *>(m_wl_xkb_ctx), loc,
+		                                                       XKB_COMPOSE_COMPILE_NO_FLAGS);
+		if (m_wl_compose_table == nullptr) {
+			DXRW_WARN("text input: no compose table for locale '%s' — per-key text only", loc);
+			return;
+		}
+	}
+	m_wl_compose_state = xkb_compose_state_new(static_cast<struct xkb_compose_table *>(m_wl_compose_table),
+	                                           XKB_COMPOSE_STATE_NO_FLAGS);
+	DXRW_INFO("text input: Wayland compose %s", m_wl_compose_state != nullptr ? "on" : "unavailable");
+#else
+	(void)enabled;
+#endif
+}
+
+void
+DxrLinuxWindow::wl_key_text(uint32_t key, char *out, size_t out_size)
+{
+	out[0] = '\0';
+	const bool ctrl_or_alt = (m_mods & (DxrModCtrl | DxrModAlt)) != 0;
+	char buf[32] = {};
+#ifdef DXR_LW_HAVE_XKBCOMMON
+	if (m_wl_xkb_state != nullptr) {
+		auto *st = static_cast<struct xkb_state *>(m_wl_xkb_state);
+		const xkb_keycode_t kc = key + 8;
+		if (m_wl_compose_state != nullptr) {
+			auto *cs = static_cast<struct xkb_compose_state *>(m_wl_compose_state);
+			const xkb_keysym_t sym = xkb_state_key_get_one_sym(st, kc);
+			// A modifier keysym is IGNORED by the feed (libxkbcommon), so
+			// Shift inside a sequence never cancels it.
+			if (sym != XKB_KEY_NoSymbol && xkb_compose_state_feed(cs, sym) == XKB_COMPOSE_FEED_ACCEPTED) {
+				switch (xkb_compose_state_get_status(cs)) {
+				case XKB_COMPOSE_COMPOSING: return; // mid-sequence: no text yet
+				case XKB_COMPOSE_COMPOSED:
+					xkb_compose_state_get_utf8(cs, buf, sizeof(buf));
+					xkb_compose_state_reset(cs);
+					dxr_input::accept_text(buf, false, out, out_size);
+					return;
+				case XKB_COMPOSE_CANCELLED: xkb_compose_state_reset(cs); return;
+				case XKB_COMPOSE_NOTHING: break;
+				}
+			}
+		}
+		xkb_state_key_get_utf8(st, kc, buf, sizeof(buf));
+		dxr_input::accept_text(buf, ctrl_or_alt, out, out_size);
+		return;
+	}
+#endif
+	// No keymap: the US table, Shift from the modifier state.
+	const uint32_t cp = dxr_input::us_keysym_char(wl_keysym(key), (m_mods & DxrModShift) != 0);
+	if (cp != 0) {
+		dxr_input::utf8_encode(cp, buf);
+		dxr_input::accept_text(buf, ctrl_or_alt, out, out_size);
+	}
 }
 
 void
@@ -3440,6 +3703,9 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		};
 		wl_surface_add_listener(m_wl_surface, &kSurfaceListener, this);
 	}
+	// File drops onto the content surface (the seat exists after the
+	// roundtrips above).
+	m_wl_dnd.attach(m_wl_display, m_wl_seat, m_wl_surface);
 	if (m_wl_viewporter != nullptr) {
 		m_wl_viewport = wp_viewporter_get_viewport(m_wl_viewporter, m_wl_surface);
 	}
@@ -3822,7 +4088,16 @@ DxrLinuxWindow::destroy_wayland()
 		wl_keyboard_release(m_wl_keyboard);
 		m_wl_keyboard = nullptr;
 	}
+	m_wl_dnd.destroy();
 #ifdef DXR_LW_HAVE_XKBCOMMON
+	if (m_wl_compose_state != nullptr) {
+		xkb_compose_state_unref(static_cast<struct xkb_compose_state *>(m_wl_compose_state));
+		m_wl_compose_state = nullptr;
+	}
+	if (m_wl_compose_table != nullptr) {
+		xkb_compose_table_unref(static_cast<struct xkb_compose_table *>(m_wl_compose_table));
+		m_wl_compose_table = nullptr;
+	}
 	if (m_wl_xkb_state != nullptr) {
 		xkb_state_unref(static_cast<struct xkb_state *>(m_wl_xkb_state));
 		m_wl_xkb_state = nullptr;
@@ -3946,6 +4221,7 @@ DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc_
 		}
 		verify_connection(backend);
 		note_content_size();
+		apply_input_prefs();
 		return true;
 	}
 
@@ -3960,6 +4236,7 @@ DxrLinuxWindow::create(DxrWindowBackend backend, const DxrLinuxWindowDesc &desc_
 		}
 		verify_connection(backend);
 		note_content_size();
+		apply_input_prefs();
 		return true;
 	}
 #endif
@@ -4212,7 +4489,32 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		while (XPending(m_x_display) > 0) {
 			XEvent ev;
 			XNextEvent(m_x_display, &ev);
+			// set_text_input(true) only: an input method may take a key
+			// (the first half of a compose sequence). Without an input
+			// context nothing is filtered — the key path is unchanged.
+			if (m_x_ic != nullptr && XFilterEvent(&ev, None)) {
+				continue;
+			}
 			DxrWindowEvent out;
+			// XDND traffic (ClientMessages + the dropped data's
+			// SelectionNotify). Consumed whole; a completed drop becomes one
+			// Drop event at the drop point, in content px.
+			{
+				bool dropped = false;
+				int rx = 0, ry = 0;
+				if (m_x_dnd.handle(ev, &dropped, &out.paths, &rx, &ry)) {
+					if (dropped) {
+						int ox = 0, oy = 0;
+						x11_root_origin(m_x_display, x11_bound_window(), &ox, &oy);
+						out.type = DxrWindowEvent::Type::Drop;
+						out.x = rx - ox;
+						out.y = ry - oy;
+						DXRW_INFO("drop: %zu item(s) on the window at (%d, %d)", out.paths.size(), out.x, out.y);
+						m_events.push_back(out);
+					}
+					continue;
+				}
+			}
 			switch (ev.type) {
 			case ClientMessage:
 				if ((Atom)ev.xclient.data.l[0] == m_x_wm_delete) {
@@ -4231,6 +4533,7 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				out.repeat = m_x_keys_down.test(kc);
 				out.mods = dxr_mods_from_x11(ev.xkey.state);
 				out.time_ms = (uint32_t)ev.xkey.time;
+				x11_key_text(&ev.xkey, out.mods, out.text, sizeof(out.text));
 				m_x_keys_down.set(kc);
 				if (out.keysym == XK_F11 && !out.repeat) {
 					toggle_fullscreen(); // a window concern: handled here
@@ -4424,6 +4727,13 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 				// and an app's held keys are dropped mid-drag.
 				if (ev.xfocus.mode == NotifyNormal || ev.xfocus.mode == NotifyWhileGrabbed) {
 					m_x_bar.setFocused(ev.type == FocusIn);
+					if (m_x_ic != nullptr) {
+						if (ev.type == FocusIn) {
+							XSetICFocus(m_x_ic);
+						} else {
+							XUnsetICFocus(m_x_ic);
+						}
+					}
 					if (ev.type == FocusOut) {
 						m_x_keys_down.reset();
 						// A drag whose button-up will land in another window
@@ -4444,6 +4754,7 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 		// still down? (A release that never reached us, with no motion after
 		// it, is caught here — once per pump, only while dragging.)
 		x11_poll_drag_button();
+		m_x_dnd.tick(); // a drop whose data never came is given up on
 
 		if (have_motion && m_x_drag.active()) {
 			// Absolute, not incremental: origin + (pointer now - pointer at
@@ -4588,6 +4899,21 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 			}
 		}
 #endif
+
+		// A dropped payload, drained a little per pump (never blocks).
+		{
+			std::vector<std::string> paths;
+			double dx = 0.0, dy = 0.0;
+			if (m_wl_dnd.pump(&paths, &dx, &dy)) {
+				DxrWindowEvent d;
+				d.type = DxrWindowEvent::Type::Drop;
+				d.paths = std::move(paths);
+				d.mods = m_mods;
+				wl_to_buffer(dx, dy, &d.x, &d.y);
+				DXRW_INFO("drop: %zu item(s) on the window at (%d, %d)", d.paths.size(), d.x, d.y);
+				m_events.push_back(std::move(d));
+			}
+		}
 
 		// F11 is a window concern: handled here, still delivered.
 		for (const DxrWindowEvent &e : m_events) {
@@ -5102,6 +5428,76 @@ DxrLinuxWindow::verify_connection(DxrWindowBackend requested)
 		          required_openxr_extension());
 	}
 	m_backend = got;
+}
+
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+static uint32_t
+wl_cursor_shape(DxrCursor c)
+{
+	switch (c) {
+	case DxrCursor::Pointer: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER;
+	case DxrCursor::Text: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT;
+	case DxrCursor::Move: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE;
+	case DxrCursor::Crosshair: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR;
+	case DxrCursor::NotAllowed: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED;
+	case DxrCursor::Wait: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT;
+	case DxrCursor::ResizeEW: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE;
+	case DxrCursor::ResizeNS: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE;
+	case DxrCursor::ResizeNWSE: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE;
+	case DxrCursor::ResizeNESW: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE;
+	default: return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT;
+	}
+}
+#endif
+
+void
+DxrLinuxWindow::set_cursor(DxrCursor cursor)
+{
+	if (cursor == m_cursor) {
+		return;
+	}
+	m_cursor = cursor;
+	if (m_backend == DxrWindowBackend::X11) {
+		x11_apply_cursor();
+	}
+#if defined(DXR_APP_HAVE_WAYLAND) && defined(DXR_APP_HAVE_WL_CHROME)
+	else if (m_backend == DxrWindowBackend::Wayland) {
+		m_wl_chrome.set_app_cursor(wl_cursor_shape(cursor), cursor == DxrCursor::Hidden);
+	}
+#endif
+}
+
+void
+DxrLinuxWindow::apply_input_prefs()
+{
+	// set_cursor() / set_text_input() called before create(): apply them now.
+	const DxrCursor c = m_cursor;
+	const bool t = m_text_input;
+	m_cursor = DxrCursor::Default;
+	m_text_input = false;
+	if (c != DxrCursor::Default) {
+		set_cursor(c);
+	}
+	if (t) {
+		set_text_input(true);
+	}
+}
+
+void
+DxrLinuxWindow::set_text_input(bool enabled)
+{
+	if (enabled == m_text_input) {
+		return;
+	}
+	m_text_input = enabled;
+	if (m_backend == DxrWindowBackend::X11) {
+		x11_set_text_input(enabled);
+	}
+#ifdef DXR_APP_HAVE_WAYLAND
+	else if (m_backend == DxrWindowBackend::Wayland) {
+		wl_set_text_input(enabled);
+	}
+#endif
 }
 
 void

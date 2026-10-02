@@ -102,4 +102,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(displayxr_linux_window_drag_test PROPERTIES
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_drag_test COMMAND displayxr_linux_window_drag_test)
+
+    # Text input + file drops, the pure halves (dxr_input_text.h,
+    # dxr_fd_drain.h): the text rule, UTF-8, the uri-list parser, and the
+    # never-blocking pipe drain over a real pipe.
+    add_executable(displayxr_linux_window_input_test linux_window_input_test.cpp)
+    target_include_directories(displayxr_linux_window_input_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux")
+    set_target_properties(displayxr_linux_window_input_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_input_test COMMAND displayxr_linux_window_input_test)
 endif()

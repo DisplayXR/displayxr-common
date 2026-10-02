@@ -222,6 +222,15 @@ public:
 		m_content_userdata = userdata;
 	}
 
+	/*!
+	 * The APP's pointer shape over the content (DxrLinuxWindow::set_cursor):
+	 * a wp_cursor_shape_device_v1 shape (0 = default), or @p hidden. Shown
+	 * only on the content away from its resize edges; the bar and the edges
+	 * keep the chrome's shapes, and the app's returns on re-entry.
+	 */
+	void
+	set_app_cursor(uint32_t shape, bool hidden);
+
 	//! Retitle the bar (repaints on the next update()).
 	void
 	set_title(const char *title);
@@ -279,6 +288,11 @@ private:
 	show(bool visible);
 	void
 	set_cursor(uint32_t serial, uint32_t shape);
+	//! Show the app's shape (set_app_cursor) — the pointer is on the content.
+	void
+	apply_app_cursor();
+	uint32_t m_app_shape = 0; //!< 0 = the default arrow
+	bool m_app_hidden = false;
 	//! Which resize edge (xdg_toplevel_resize_edge), if any, a point on the
 	//! CONTENT surface is on. 0 = none.
 	uint32_t

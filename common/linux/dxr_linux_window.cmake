@@ -50,6 +50,10 @@ add_library(displayxr_linux_window STATIC
     "${_dxr_lw_dir}/dxr_x11_chrome.h"
     "${_dxr_lw_dir}/dxr_weave_snap.h"
     "${_dxr_lw_dir}/dxr_drag.h"
+    "${_dxr_lw_dir}/dxr_input_text.h"
+    "${_dxr_lw_dir}/dxr_fd_drain.h"
+    "${_dxr_lw_dir}/dxr_x11_dnd.cpp"
+    "${_dxr_lw_dir}/dxr_x11_dnd.h"
 )
 add_library(displayxr::linux_window ALIAS displayxr_linux_window)
 set_target_properties(displayxr_linux_window PROPERTIES
@@ -153,6 +157,8 @@ target_sources(displayxr_linux_window PRIVATE
     "${_dxr_lw_dir}/dxr_wl_placement.cpp"
     "${_dxr_lw_dir}/dxr_wl_placement.h"
     "${_dxr_lw_dir}/dxr_wl_lattice.h"
+    "${_dxr_lw_dir}/dxr_wl_dnd.cpp"
+    "${_dxr_lw_dir}/dxr_wl_dnd.h"
 )
 
 # libdbus-1 (optional, libdbus-1-dev): the client of the compositor's drag

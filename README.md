@@ -721,7 +721,9 @@ compile-time macros.
 | `request_initial_rect(x, y, w, h)` | call before `create()`: an app's `--rect`. The CONTENT opens at exactly that desktop device-px rect, windowed at any size. X11: created there and re-moved after the map (X root coordinates). Wayland: sized at the target output's scale, then placed through the window-geometry extension's `MoveWindow` once the first frame is presented (the runtime's device convention, `u_wayland_geom.h`); without the extension the compositor's placement stands. One `initial rect:` log line per outcome |
 | `session_binding_chain(next)` | the `XR_DXR_xlib_window_binding` or `XR_DXR_wayland_surface_binding` (+ `XrWaylandSurfaceGeometryDXR`) struct to chain into `xrCreateSession`, with `transparentBackgroundEnabled` |
 | `attach_session(instance, session)` | arms the per-frame Wayland geometry feed (`xrSetWaylandSurfaceGeometryDXR`) |
-| `pump_events(on_event, &running)` | keys (X11 keysyms at level 0 on both backends, + modifiers, auto-repeat marked), buttons, motion, scroll, focus, pointer-leave and content resizes, all in content buffer px |
+| `pump_events(on_event, &running)` | keys (X11 keysyms at level 0 on both backends, + modifiers, auto-repeat marked; a `KeyDown` also carries the UTF-8 `text` it types — printable characters only, never with Ctrl/Alt, so Enter / Backspace / Ctrl+K stay keysym-only), buttons, motion, scroll, focus, pointer-leave, content resizes and file `Drop`s (`paths`: decoded local paths for `file:` URIs, other URIs verbatim), all in content buffer px |
+| `set_text_input(bool)` | full text entry: an XIM input context on X11 (`Xutf8LookupString`), libxkbcommon's compose table on Wayland — dead keys / Compose produce `text`. Off by default (no input context, no `XFilterEvent`: the key path is unchanged) |
+| `set_cursor(DxrCursor)` | the pointer shape over the content (`Default`, `Pointer`, `Text`, `Move`, resize arrows, `Hidden`, ...): `wp_cursor_shape_v1` on Wayland, themed font cursors on X11. The header bar and resize edges keep their own shapes; the app's returns on re-entry |
 | `current_size()` | content size in buffer px (the swapchain's space) |
 | `toggle_fullscreen()` | F11 — also handled inside the pump |
 | `set_input_region()` / `clear_input_region()` | click-through: XShape `ShapeInput` on X11, `wl_surface.set_input_region` on Wayland; the header bar is always kept clickable |
@@ -737,6 +739,15 @@ surface is **mapped** (its first `wl_surface.enter`). mutter discards the output
 of a `set_fullscreen` made before the first buffer and uses whatever monitor it
 considers current. The surface's actual output is logged and compared with the
 panel's (`MATCH` / `MISMATCH`).
+
+**File drops** need nothing from the app either: the window accepts
+`text/uri-list` on its content and reports one `Drop` event per drop. On
+Wayland (`wl_data_device` v3, `dxr_wl_dnd`) the payload is read from its pipe
+a little per pump, never blocking a frame, capped at 1 MiB and 3 s; on X11
+(XDND v5, `dxr_x11_dnd`) it is the `XdndSelection`, read on `SelectionNotify`.
+The parser and the pipe drain are pure and unit tested
+(`tests/linux_window_input_test.cpp`); the X11 drop runs end to end against a
+second client in `tests/linux_window_test.cpp`.
 
 Capture exclusion needs nothing from the app: the display processor asks the
 window-geometry extension to exclude every window of the process. On X11 the
