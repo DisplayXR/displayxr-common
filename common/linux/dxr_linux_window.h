@@ -1228,6 +1228,14 @@ private:
 		double press_to_table_ms = -1.0; //!< press to the first table the compositor accepted
 	} m_wl_drag_stats;
 	/*! @} */
+
+	/*!
+	 * Device px per STAGE px for the monitor in a window-geometry snapshot:
+	 * the factor its rects convert by. The monitor scale only in mutter's
+	 * LOGICAL layout mode; 1 in PHYSICAL (dxr_wl_scale.h).
+	 */
+	double
+	wl_geometry_stage_factor(const DxrWlPlacement::OwnGeometry &g) const;
 #endif // DXR_APP_HAVE_WL_CHROME
 
 	/*!
