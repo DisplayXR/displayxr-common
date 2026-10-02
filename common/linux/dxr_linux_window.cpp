@@ -35,6 +35,7 @@
 // app's output match and the runtime's window-rect conversion cannot drift
 // apart (#1595/#1596). Header-only; see src/xrt/auxiliary/util/.
 #include "util/u_wayland_geom.h"
+#include "dxr_wl_scale.h"
 
 #include "dxr_wl_chrome.h"            // DxrWlPointerEvent (content pointer forwarding)
 #include <linux/input-event-codes.h> // raw evdev keycodes (the no-xkbcommon fallback table)
@@ -2994,7 +2995,9 @@ DxrLinuxWindow::wl_lattice_prepare_map(bool quiet)
 		}
 		m_wl_lattice_map.rel0_x = g.buffer[0] - g.monitor[0];
 		m_wl_lattice_map.rel0_y = g.buffer[1] - g.monitor[1];
-		m_wl_lattice_map.scale = g.monitor_scale;
+		// Device px per STAGE px — the monitor scale only in mutter's
+		// LOGICAL layout mode (1 in PHYSICAL).
+		m_wl_lattice_map.scale = wl_geometry_stage_factor(g);
 		m_wl_lattice_start_frame_x = g.frame[0];
 		m_wl_lattice_start_frame_y = g.frame[1];
 		m_wl_lattice_explicit = true;
@@ -3156,6 +3159,26 @@ wl_logical_offset_for(int32_t device_offset, double scale)
 }
 } // namespace
 
+#ifdef DXR_APP_HAVE_WL_CHROME
+double
+DxrLinuxWindow::wl_geometry_stage_factor(const DxrWlPlacement::OwnGeometry &g) const
+{
+	// This client's own view of the monitor: the output at its stage origin.
+	// mode / xdg_output.logical_size is the stage factor in both of mutter's
+	// layout modes — the fallback for an extension older than version 11.
+	double output_stage = 0.0;
+	for (const auto &out : m_wl_outputs) {
+		if (out.have_logical_size && out.logical_w > 0 && out.mode_w > 0 && out.logical_x == g.monitor[0] &&
+		    out.logical_y == g.monitor[1]) {
+			output_stage = (double)out.mode_w / (double)out.logical_w;
+			break;
+		}
+	}
+	return dxr_wl_stage_factor(g.monitor_scale, g.device_scale, (enum u_wl_layout_mode)g.layout_mode,
+	                           output_stage);
+}
+#endif
+
 const DxrLinuxWindow::WlOutput *
 DxrLinuxWindow::wl_rect_target_output() const
 {
@@ -3299,7 +3322,8 @@ DxrLinuxWindow::wl_rect_tick()
 	if (finish) {
 		// Report in the requester's space: the monitor the window is on now,
 		// through the runtime's own conversion.
-		const double sc = g.monitor_scale > 0.0 ? g.monitor_scale : 1.0;
+		const double stage = wl_geometry_stage_factor(g);
+		const double sc = stage > 0.0 ? stage : 1.0;
 		const int32_t px =
 		    u_wl_logical_to_px(g.monitor[0], sc) + u_wl_logical_to_px(g.buffer[0] - g.monitor[0], sc);
 		const int32_t py =
@@ -3574,8 +3598,12 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		m_wl_fs_on_panel = true;
 		for (const auto &out : m_wl_outputs) {
 			if (out.output == m_wl_panel_output && out.have_logical_size) {
-				m_wl_config_w = out.logical_w;
-				m_wl_config_h = out.logical_h;
+				// SURFACE units: the mode over the surface scale. That is
+				// the logical size in mutter's LOGICAL layout, and half of
+				// it at 200 % in PHYSICAL (dxr_wl_scale.h).
+				const double s = dxr_wl_surface_scale_estimate(out.mode_w, out.logical_w, out.int_scale);
+				m_wl_config_w = (int32_t)((double)out.mode_w / s + 0.5);
+				m_wl_config_h = (int32_t)((double)out.mode_h / s + 0.5);
 			}
 		}
 		DXRW_INFO("Wayland: fullscreen on %s requested — DEFERRED until the surface is mapped (mutter "
@@ -3597,12 +3625,16 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		// scale is only known once it is on an output, so start from the 3D
 		// panel's scale (where the app aims to be) and correct on the first
 		// wp_fractional_scale_v1.preferred_scale (s_frac_preferred_scale).
+		// Two factors (dxr_wl_scale.h): `est` sizes the surface (device px
+		// per SURFACE unit), `rect_scale` places it (device px per STAGE px).
+		// One number in mutter's LOGICAL layout, 2 vs 1 at 200 % in PHYSICAL.
 		double est = 1.0;
 		for (const auto &out : m_wl_outputs) {
 			if (out.output == m_wl_panel_output && out.have_logical_size && out.logical_w > 0) {
-				est = (double)out.mode_w / (double)out.logical_w;
+				est = dxr_wl_surface_scale_estimate(out.mode_w, out.logical_w, out.int_scale);
 			}
 		}
+		double stage_scale = 0.0;
 		// request_initial_rect(): the window is going to the output the rect
 		// covers most, so size it at THAT output's scale, and hold the size
 		// (m_wl_size_from_desc off) — the first preferred_scale comes from
@@ -3610,7 +3642,8 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		// may be another output at another scale.
 		rect_out = m_rect.active ? wl_rect_target_output() : nullptr;
 		if (rect_out != nullptr) {
-			est = (double)rect_out->mode_w / (double)rect_out->logical_w;
+			est = dxr_wl_surface_scale_estimate(rect_out->mode_w, rect_out->logical_w, rect_out->int_scale);
+			stage_scale = (double)rect_out->mode_w / (double)rect_out->logical_w;
 		}
 		if (m_wl_frac_manager == nullptr) {
 			// No preferred scale will ever arrive, so the declared buffer is the
@@ -3620,7 +3653,7 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		m_wl_config_w = (int32_t)((double)desc.width / est + 0.5);
 		m_wl_config_h = (int32_t)((double)desc.height / est + 0.5);
 		m_wl_size_from_desc = m_wl_frac_manager != nullptr && rect_out == nullptr;
-		rect_scale = est;
+		rect_scale = stage_scale;
 		m_wl_windowed_w = m_wl_config_w;
 		m_wl_windowed_h = m_wl_config_h;
 		DXRW_INFO("Wayland: requested %ux%u device px -> %dx%d logical at an estimated scale %.4f "

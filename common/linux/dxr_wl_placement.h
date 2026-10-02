@@ -130,7 +130,16 @@ public:
 		int32_t frame[4] = {0, 0, 0, 0};
 		int32_t buffer[4] = {0, 0, 0, 0};
 		int32_t monitor[4] = {0, 0, 0, 0};
+		//! Mutter's monitor scale (`monitor.scale`). NOT the factor the
+		//! rects above convert by: in mutter's PHYSICAL layout mode the stage
+		//! already is device px. Convert with dxr_wl_stage_factor().
 		double monitor_scale = 0.0;
+		//! Device px per stage px (`monitor.device_scale`, extension version
+		//! 11); 0 when the publisher does not say.
+		double device_scale = 0.0;
+		//! `layout_mode` (extension version 11): a u_wl_layout_mode value,
+		//! 0 (unknown) when the publisher does not say.
+		int layout_mode = 0;
 		//! The runtime runs MOVE SYNC for this process (extension version 9,
 		//! runtime#1748): every frame is shown where it was woven for, so a
 		//! drag needs no lattice table. False when absent (older publisher).

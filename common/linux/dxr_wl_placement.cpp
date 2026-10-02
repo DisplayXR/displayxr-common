@@ -7,6 +7,8 @@
 
 #include "dxr_wl_placement.h"
 
+#include "util/u_wayland_layout.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -378,6 +380,25 @@ DxrWlPlacement::get_own_geometry(OwnGeometry *out)
 			     json_num(mon, end, "\"y\":", &my) && json_num(mon, end, "\"w\":", &mw) &&
 			     json_num(mon, end, "\"h\":", &mh) && json_num(mon, end, "\"scale\":", &out->monitor_scale) &&
 			     out->monitor_scale > 0.0;
+			// Extension v11: device px per stage px, inside the monitor
+			// object (after "scale"; `"scale":` above never matches the
+			// `"device_scale":` key, whose quote precedes "device").
+			out->device_scale = 0.0;
+			if (!json_num(mon, end, "\"device_scale\":", &out->device_scale) || !(out->device_scale > 0.0)) {
+				out->device_scale = 0.0;
+			}
+			// Top level, before the window list.
+			const char *windows = strstr(json, "\"windows\":");
+			const char *lm = strstr(json, "\"layout_mode\":\"");
+			out->layout_mode = 0;
+			if (lm != nullptr && (windows == nullptr || lm < windows)) {
+				lm += strlen("\"layout_mode\":\"");
+				if (strncmp(lm, "logical\"", 8) == 0) {
+					out->layout_mode = U_WL_LAYOUT_MODE_LOGICAL;
+				} else if (strncmp(lm, "physical\"", 9) == 0) {
+					out->layout_mode = U_WL_LAYOUT_MODE_PHYSICAL;
+				}
+			}
 			out->monitor[0] = (int32_t)mx;
 			out->monitor[1] = (int32_t)my;
 			out->monitor[2] = (int32_t)mw;
