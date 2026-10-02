@@ -128,10 +128,13 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h> // XSizeHints for INV-1.3 window placement
 
+#include "dxr_x11_dnd.h" // XDND drop target (Drop events)
+
 #ifdef DXR_APP_HAVE_WAYLAND
 // Likewise: the Wayland binding header forward-declares wl_display/wl_surface,
 // so the real definitions have to come first.
 #include <wayland-client.h>
+#include "dxr_wl_dnd.h" // wl_data_device drop target (Drop events)
 #ifdef DXR_APP_HAVE_WL_CHROME
 #include "dxr_wl_chrome.h"    // title bar for the native-Wayland leg (#1654)
 #include "dxr_wl_placement.h" // drag lattice: a phase-snapped compositor drag (#1609)
@@ -222,6 +225,9 @@ struct DxrWindowEvent
 		FocusGained,  //!< keyboard focus gained ("FocusIn" is an X11 macro)
 		FocusLost,    //!< keyboard focus lost — release any held-key state
 		Resize,       //!< width/height: the new CONTENT size in buffer px
+		//! Files (or URIs) dropped on the content: `paths`, in drop order,
+		//! and x/y where they were dropped. See the DRAG AND DROP note below.
+		Drop,
 	};
 	Type type = Type::Motion;
 	uint32_t keysym = 0;  //!< X11 keysym value (XK_*), shift level 0
@@ -238,6 +244,59 @@ struct DxrWindowEvent
 	int32_t scroll_steps_x = 0;   //!< horizontal notches, +1 = right
 	uint32_t width = 0, height = 0; //!< Resize only
 	uint32_t time_ms = 0;         //!< server timestamp (for double-click detection)
+
+	/*!
+	 * KeyDown only: the TEXT the press types, UTF-8, NUL-terminated ("" when
+	 * it types nothing). Additive — `keysym` is unchanged, so shortcuts keep
+	 * working exactly as before. Set only for a printable character with
+	 * neither Ctrl nor Alt held: Enter, Backspace, Tab, Escape, arrows and
+	 * Ctrl+K carry no text (use the keysym). Layout-aware on both backends:
+	 * Wayland asks the compositor's keymap (libxkbcommon; a US table without
+	 * it), X11 asks Xlib (Xutf8LookupString through an input context once
+	 * set_text_input(true), else XLookupString). Dead keys / compose
+	 * sequences produce text only with set_text_input(true).
+	 */
+	char text[8] = {};
+
+	/*!
+	 * Drop only. A local PATH for each dropped `file:` URI (percent-decoded),
+	 * any other URI verbatim (e.g. an https link), in the order the source
+	 * listed them. Never empty for a Drop event.
+	 */
+	std::vector<std::string> paths;
+};
+
+/*!
+ * DRAG AND DROP (both backends, always on, receive only).
+ *
+ * The window accepts `text/uri-list` drops on its CONTENT (the header bar
+ * is chrome) and reports each as one Drop event. Wayland: wl_data_device
+ * (protocol v3, copy action); the payload is drained from its pipe a
+ * little per pump(), never blocking a frame, capped at 1 MiB and 3 s.
+ * X11: XDND version 5 (XdndAware on the top-level, the selection read on
+ * SelectionNotify). Other MIME types are refused, so a source shows a
+ * "no drop" cursor for, say, plain text.
+ */
+
+/*!
+ * Pointer shape over the CONTENT (set_cursor()). The header bar and the
+ * resize edges keep their own shapes; the app's shape returns when the
+ * pointer comes back to the content.
+ */
+enum class DxrCursor
+{
+	Default,    //!< the arrow
+	Pointer,    //!< a hand: a link / clickable control
+	Text,       //!< I-beam: a text field
+	Move,       //!< four-way arrows
+	Crosshair,  //!< precise picking
+	NotAllowed, //!< refused action
+	Wait,       //!< busy
+	ResizeEW,   //!< horizontal double arrow
+	ResizeNS,   //!< vertical double arrow
+	ResizeNWSE, //!< diagonal, top-left to bottom-right
+	ResizeNESW, //!< diagonal, top-right to bottom-left
+	Hidden,     //!< no cursor at all
 };
 
 //! A rectangle in CONTENT buffer pixels (see set_input_region()).
@@ -544,6 +603,43 @@ public:
 	void
 	clear_input_region();
 
+	/*!
+	 * The pointer shape over the CONTENT. Cheap to call every frame (only a
+	 * change reaches the window system). Over the header bar and the resize
+	 * edges the chrome's own shapes win; the app's comes back as soon as the
+	 * pointer is on the content again. Wayland: wp_cursor_shape_v1 (no-op on
+	 * a compositor without it — the compositor's default stays; Hidden still
+	 * works); X11: the themed cursor of the same name on the bound window.
+	 * Default until called — so an app that never calls it is unchanged.
+	 */
+	void
+	set_cursor(DxrCursor cursor);
+
+	DxrCursor
+	cursor() const
+	{
+		return m_cursor;
+	}
+
+	/*!
+	 * Full text input: an input method / compose sequences (dead keys,
+	 * Compose key) feed DxrWindowEvent::text. Off by default, which keeps the
+	 * key path exactly as it was (X11: no input context, no XFilterEvent);
+	 * KeyDown still carries the plain per-key text either way. Turn it on
+	 * while a text field has focus, or for the whole run of an app with text
+	 * fields. X11: an XIM input context (when the server's locale supports
+	 * one; logged once either way). Wayland: libxkbcommon's compose table for
+	 * the user's locale (no-op without libxkbcommon).
+	 */
+	void
+	set_text_input(bool enabled);
+
+	bool
+	text_input() const
+	{
+		return m_text_input;
+	}
+
 	//! The window really is transparent-capable (desc.transparent AND, on
 	//! X11, an ARGB visual was available).
 	bool
@@ -838,6 +934,13 @@ private:
 	void
 	frame_stats_tick();
 
+	//! set_cursor() / set_text_input() state.
+	DxrCursor m_cursor = DxrCursor::Default;
+	bool m_text_input = false;
+	//! At the end of create(): apply what was asked before the window existed.
+	void
+	apply_input_prefs();
+
 	//! set_transparent_background() state: the bar is hidden while true.
 	bool m_transparent_bg = false;
 	//! One-shot guard for the set_keep_above() Wayland no-op log.
@@ -890,6 +993,21 @@ private:
 	std::bitset<256> m_x_keys_down;     //!< held keycodes (auto-repeat detection)
 	bool m_x_detectable_repeat = false; //!< XkbSetDetectableAutoRepeat took
 	bool m_x_keep_above = false;
+	//! Drop target (Drop events).
+	DxrX11Dnd m_x_dnd;
+	//! set_text_input(true): the input method and its context (null = off,
+	//! or the server has no input method for the locale).
+	XIM m_x_im = nullptr;
+	XIC m_x_ic = nullptr;
+	//! set_cursor(): created on first use, per DxrCursor value.
+	Cursor m_x_cursors[16] = {};
+	//! The text a KeyPress types (the DxrWindowEvent::text rule).
+	void
+	x11_key_text(XKeyEvent *ev, uint32_t mods, char *out, size_t out_size);
+	void
+	x11_apply_cursor();
+	void
+	x11_set_text_input(bool enabled);
 
 	bool
 	x11_bar_visible() const;
@@ -1430,6 +1548,15 @@ private:
 	void *m_wl_xkb_ctx = nullptr;    //!< struct xkb_context * (libxkbcommon builds)
 	void *m_wl_xkb_keymap = nullptr; //!< struct xkb_keymap *
 	void *m_wl_xkb_state = nullptr;  //!< struct xkb_state *
+	void *m_wl_compose_table = nullptr; //!< struct xkb_compose_table * (set_text_input(true))
+	void *m_wl_compose_state = nullptr; //!< struct xkb_compose_state *
+	//! Drop target (Drop events).
+	DxrWlDnd m_wl_dnd;
+	//! The text an evdev key press types (the DxrWindowEvent::text rule).
+	void
+	wl_key_text(uint32_t evdev_key, char *out, size_t out_size);
+	void
+	wl_set_text_input(bool enabled);
 	double m_wl_ptr_x = 0.0, m_wl_ptr_y = 0.0; //!< last content pointer position, LOGICAL
 	int32_t m_wl_discrete_x = 0, m_wl_discrete_y = 0; //!< this frame's wheel clicks
 	double m_wl_axis_x = 0.0, m_wl_axis_y = 0.0;      //!< continuous scroll accumulators

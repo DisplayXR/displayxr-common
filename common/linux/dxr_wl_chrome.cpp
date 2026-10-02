@@ -599,7 +599,48 @@ DxrWlChrome::on_pointer_motion(double x, double y)
 		m_bar.setHover(h);
 		set_cursor(m_ptr_enter_serial, edge_cursor(hit_edge(h)));
 	} else if (m_ptr_surface == m_content && m_content != nullptr) {
-		set_cursor(m_ptr_enter_serial, edge_cursor(content_edge(x, y)));
+		const uint32_t edge = content_edge(x, y);
+		if (edge != XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+			set_cursor(m_ptr_enter_serial, edge_cursor(edge));
+		} else {
+			apply_app_cursor();
+		}
+	}
+}
+
+namespace {
+//! m_cursor_shape while the app's Hidden cursor is applied (no real shape is
+//! this value, so the next visible shape is always re-sent).
+constexpr uint32_t kHiddenShape = 0xFFFFFFFFu;
+} // namespace
+
+void
+DxrWlChrome::apply_app_cursor()
+{
+	if (m_app_hidden) {
+		if (m_pointer != nullptr && m_cursor_shape != kHiddenShape) {
+			wl_pointer_set_cursor(m_pointer, m_ptr_enter_serial, nullptr, 0, 0);
+			m_cursor_shape = kHiddenShape;
+		}
+		return;
+	}
+	set_cursor(m_ptr_enter_serial, m_app_shape != 0 ? m_app_shape : WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+}
+
+void
+DxrWlChrome::set_app_cursor(uint32_t shape, bool hidden)
+{
+	if (shape == m_app_shape && hidden == m_app_hidden) {
+		return;
+	}
+	m_app_shape = shape;
+	m_app_hidden = hidden;
+	// Applied now only where the app's shape is the one showing: on the
+	// content, off its resize edges. Elsewhere the chrome's shape stays, and
+	// the app's returns when the pointer comes back (on_pointer_motion).
+	if (m_ptr_surface != nullptr && m_ptr_surface == m_content &&
+	    content_edge(m_ptr_x, m_ptr_y) == XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+		apply_app_cursor();
 	}
 }
 

@@ -22,6 +22,7 @@
 #include "dxr_linux_window.h"
 
 #include <X11/keysym.h>
+#include <X11/Xatom.h> // XA_ATOM (the XdndAware check)
 
 #include <sys/mman.h> // memfd_create (the fake WSI's buffer)
 #include <unistd.h>
@@ -191,6 +192,221 @@ pump_for(DxrLinuxWindow &win, int pumps)
 	}
 	CHECK(running, "no close request during the test");
 	return got;
+}
+
+static void
+send_key_state(Display *dpy, ::Window w, KeySym sym, unsigned int state)
+{
+	XEvent ev = {};
+	ev.xkey.type = KeyPress;
+	ev.xkey.display = dpy;
+	ev.xkey.window = w;
+	ev.xkey.root = DefaultRootWindow(dpy);
+	ev.xkey.keycode = XKeysymToKeycode(dpy, sym);
+	ev.xkey.state = state;
+	ev.xkey.time = 3000;
+	ev.xkey.same_screen = True;
+	XSendEvent(dpy, w, False, KeyPressMask, &ev);
+	XFlush(dpy);
+}
+
+static void
+send_client(Display *dpy, ::Window to, Atom type, long l0, long l1, long l2, long l3, long l4)
+{
+	XEvent ev = {};
+	ev.xclient.type = ClientMessage;
+	ev.xclient.display = dpy;
+	ev.xclient.window = to;
+	ev.xclient.message_type = type;
+	ev.xclient.format = 32;
+	ev.xclient.data.l[0] = l0;
+	ev.xclient.data.l[1] = l1;
+	ev.xclient.data.l[2] = l2;
+	ev.xclient.data.l[3] = l3;
+	ev.xclient.data.l[4] = l4;
+	XSendEvent(dpy, to, False, NoEventMask, &ev);
+	XFlush(dpy);
+}
+
+/*!
+ * The additive input APIs on X11: KeyDown text (the printable-only rule),
+ * a full XDND v5 drop from a second client acting as the source, and
+ * set_cursor() / set_text_input() on a live window.
+ */
+static void
+test_x11_text_dnd_cursor()
+{
+	DxrLinuxWindowDesc desc;
+	desc.width = 400;
+	desc.height = 300;
+	desc.panel_width = 1280;
+	desc.panel_height = 720;
+	desc.title = "linux_window_test (text/dnd/cursor)";
+	desc.x11_header_bar = true;
+	desc.x11_drag_button = 3;
+	desc.has_position = true;
+	desc.x = 100;
+	desc.y = 120;
+
+	DxrLinuxWindow win;
+	CHECK(win.create(DxrWindowBackend::X11, desc), "create X11 window (input)");
+	if (win.backend() != DxrWindowBackend::X11) {
+		return;
+	}
+	Display *dpy = win.x11_display();
+	::Window top = 0;
+	{
+		::Window root = 0, *kids = nullptr;
+		unsigned int n = 0;
+		XQueryTree(dpy, win.x11_bound_window(), &root, &top, &kids, &n);
+		if (kids != nullptr) {
+			XFree(kids);
+		}
+	}
+	pump_for(win, 5);
+
+	// --- Text ---------------------------------------------------------------
+	auto key_text = [&](KeySym sym, unsigned int state, uint32_t *keysym) {
+		send_key_state(dpy, top, sym, state);
+		std::string t;
+		bool seen = false;
+		for (const DxrWindowEvent &e : pump_for(win, 3)) {
+			if (e.type == DxrWindowEvent::Type::KeyDown && !seen) {
+				seen = true;
+				t = e.text;
+				if (keysym != nullptr) {
+					*keysym = e.keysym;
+				}
+			}
+		}
+		CHECK(seen, "a KeyDown arrived");
+		return t;
+	};
+	uint32_t ks = 0;
+	CHECK(key_text(XK_a, 0, &ks) == "a" && ks == XK_a, "'a' types \"a\"");
+	CHECK(key_text(XK_a, ShiftMask, &ks) == "A" && ks == XK_a, "Shift+a types \"A\", keysym still level 0");
+	CHECK(key_text(XK_k, ControlMask, &ks).empty() && ks == XK_k, "Ctrl+K: keysym only, no text");
+	CHECK(key_text(XK_Return, 0, &ks).empty() && ks == XK_Return, "Enter: no text");
+	CHECK(key_text(XK_BackSpace, 0, nullptr).empty(), "Backspace: no text");
+	CHECK(key_text(XK_slash, 0, nullptr) == "/", "'/' types \"/\"");
+
+	win.set_text_input(true); // an XIM context when the locale has one; logged either way
+	CHECK(win.text_input(), "text input on");
+	CHECK(key_text(XK_b, 0, nullptr) == "b", "with text input on, 'b' still types \"b\"");
+	win.set_text_input(false);
+
+	// --- Cursor -------------------------------------------------------------
+	win.set_cursor(DxrCursor::Text);
+	CHECK(win.cursor() == DxrCursor::Text, "cursor recorded");
+	win.set_cursor(DxrCursor::Hidden);
+	win.set_cursor(DxrCursor::Pointer);
+	win.set_cursor(DxrCursor::Default);
+	XSync(dpy, False);
+	pump_for(win, 2);
+
+	// --- XDND drop ----------------------------------------------------------
+	Display *src = XOpenDisplay(nullptr);
+	CHECK(src != nullptr, "second X connection (the drag source)");
+	if (src == nullptr) {
+		win.destroy();
+		return;
+	}
+	::Window sw = XCreateSimpleWindow(src, DefaultRootWindow(src), 0, 0, 10, 10, 0, 0, 0);
+	XSelectInput(src, sw, PropertyChangeMask);
+	const Atom aware = XInternAtom(src, "XdndAware", False);
+	const Atom enter = XInternAtom(src, "XdndEnter", False);
+	const Atom position = XInternAtom(src, "XdndPosition", False);
+	const Atom status = XInternAtom(src, "XdndStatus", False);
+	const Atom drop = XInternAtom(src, "XdndDrop", False);
+	const Atom finished = XInternAtom(src, "XdndFinished", False);
+	const Atom selection = XInternAtom(src, "XdndSelection", False);
+	const Atom copy = XInternAtom(src, "XdndActionCopy", False);
+	const Atom uri = XInternAtom(src, "text/uri-list", False);
+	{
+		Atom type = None;
+		int format = 0;
+		unsigned long n = 0, after = 0;
+		unsigned char *data = nullptr;
+		XGetWindowProperty(src, top, aware, 0, 1, False, XA_ATOM, &type, &format, &n, &after, &data);
+		CHECK(data != nullptr && n == 1 && *reinterpret_cast<unsigned long *>(data) == 5,
+		      "XdndAware = 5 on the top-level");
+		if (data != nullptr) {
+			XFree(data);
+		}
+	}
+	XSetSelectionOwner(src, selection, sw, CurrentTime);
+	int cx = 0, cy = 0;
+	{
+		::Window child = 0;
+		XTranslateCoordinates(dpy, win.x11_bound_window(), DefaultRootWindow(dpy), 0, 0, &cx, &cy, &child);
+	}
+	const int px = cx + 40, py = cy + 30;
+	send_client(src, top, enter, (long)sw, 5L << 24, (long)XInternAtom(src, "text/plain", False), (long)uri, 0);
+	send_client(src, top, position, (long)sw, 0, ((long)px << 16) | py, CurrentTime, (long)copy);
+	pump_for(win, 3);
+	bool accepted = false;
+	for (int i = 0; i < 50 && XPending(src) == 0; i++) {
+		XSync(src, False);
+	}
+	while (XPending(src) > 0) {
+		XEvent ev;
+		XNextEvent(src, &ev);
+		if (ev.type == ClientMessage && ev.xclient.message_type == status) {
+			accepted = (ev.xclient.data.l[1] & 1) != 0 && (Atom)ev.xclient.data.l[4] == copy;
+		}
+	}
+	CHECK(accepted, "XdndStatus: text/uri-list accepted, copy action");
+	send_client(src, top, drop, (long)sw, 0, CurrentTime, 0, 0);
+
+	const char payload[] = "file:///tmp/My%20Clip.mp4\r\nfile:///tmp/b.png\r\n";
+	std::vector<DxrWindowEvent> drops;
+	bool served = false, fin_ok = false;
+	for (int round = 0; round < 40 && (drops.empty() || !fin_ok); round++) {
+		for (const DxrWindowEvent &e : pump_for(win, 1)) {
+			if (e.type == DxrWindowEvent::Type::Drop) {
+				drops.push_back(e);
+			}
+		}
+		XSync(src, False);
+		while (XPending(src) > 0) {
+			XEvent ev;
+			XNextEvent(src, &ev);
+			if (ev.type == SelectionRequest) {
+				const XSelectionRequestEvent &rq = ev.xselectionrequest;
+				XEvent rep = {};
+				rep.xselection.type = SelectionNotify;
+				rep.xselection.requestor = rq.requestor;
+				rep.xselection.selection = rq.selection;
+				rep.xselection.target = rq.target;
+				rep.xselection.time = rq.time;
+				rep.xselection.property = None;
+				if (rq.target == uri) {
+					XChangeProperty(src, rq.requestor, rq.property, uri, 8, PropModeReplace,
+					                (const unsigned char *)payload, (int)sizeof(payload) - 1);
+					rep.xselection.property = rq.property;
+				}
+				XSendEvent(src, rq.requestor, False, NoEventMask, &rep);
+				XFlush(src);
+				served = true;
+			} else if (ev.type == ClientMessage && ev.xclient.message_type == finished) {
+				fin_ok = (ev.xclient.data.l[1] & 1) != 0;
+			}
+		}
+	}
+	CHECK(served, "the drop asked the source for text/uri-list");
+	CHECK(fin_ok, "XdndFinished: accepted");
+	CHECK(drops.size() == 1, "exactly one Drop event");
+	if (drops.size() == 1) {
+		const DxrWindowEvent &d = drops[0];
+		CHECK(d.paths.size() == 2 && d.paths[0] == "/tmp/My Clip.mp4" && d.paths[1] == "/tmp/b.png",
+		      "Drop paths decoded, in order");
+		CHECK(d.x == 40 && d.y == 30, "Drop position in content px");
+		std::printf("x11 drop: %zu path(s) at (%d, %d): %s\n", d.paths.size(), d.x, d.y,
+		            d.paths.empty() ? "" : d.paths[0].c_str());
+	}
+	XDestroyWindow(src, sw);
+	XCloseDisplay(src);
+	win.destroy();
 }
 
 /*!
@@ -673,6 +889,16 @@ test_wayland_window()
 	CHECK(sw0 == sw1 && sh0 == sh1, "wayland: declared size unchanged by the transparency toggle");
 	win.set_transparent_background(false);
 	CHECK(win.header_bar_visible(), "wayland: title bar back when opaque");
+	// The additive input APIs on a live Wayland window: no protocol error.
+	win.set_cursor(DxrCursor::Text);
+	win.set_cursor(DxrCursor::Hidden);
+	win.set_cursor(DxrCursor::Default);
+	win.set_text_input(true);
+	win.set_text_input(false);
+	for (int i = 0; i < 3; i++) {
+		win.pump_events({}, &running);
+	}
+	CHECK(running, "wayland: cursor / text-input calls leave the connection alive");
 	CHECK(win.toggle_fullscreen(), "F11 on Wayland");
 	for (int i = 0; i < 5; i++) {
 		win.pump_events({}, &running);
@@ -699,6 +925,7 @@ main()
 			test_x11_window(true);
 			test_x11_initial_rect(false);
 			test_x11_initial_rect(true);
+			test_x11_text_dnd_cursor();
 		}
 	} else {
 		std::printf("X11 window checks skipped (set DXR_LW_TEST_X11=1 under xvfb-run to run them)\n");
