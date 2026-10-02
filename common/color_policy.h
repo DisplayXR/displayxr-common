@@ -37,7 +37,9 @@
 
 namespace dxr {
 
-//! What `DXR_SWAPCHAIN_ENCODING` asked for.
+//! What `DXR_SWAPCHAIN_ENCODING` asked for. Governs BOTH the projection/quad
+//! swapchain (ChooseColorSwapchainFormat) and the window-space ones
+//! (ChooseWindowSpaceSwapchainFormat), so one switch A/Bs the whole app.
 enum class ColorEncodingPreference {
     HonestSrgb,  //!< default (env unset or unrecognized) — prefer an `_SRGB` format
     ForceSrgb,   //!< `DXR_SWAPCHAIN_ENCODING=srgb`
@@ -182,6 +184,101 @@ SceneLinearToDisplayReferred(float c)
         return c * 12.92f;
     }
     return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+/*!
+ * THE selection rule for a **window-space / HUD / toast / Local2D** swapchain —
+ * the layers whose pixels are rasterized on the CPU (D2D/DirectWrite,
+ * Core Graphics) or by a private device into **display-referred R8G8B8A8**
+ * bytes and then *moved* into the swapchain image, never rendered into it.
+ *
+ * ADR-044 §7 / INV-4.6. On a format-honest runtime (D3D11 ≥ v2.21.0, D3D12 ≥
+ * v2.21.1, GL ≥ v2.21.2, vk_native ≥ v2.21.7) a UNORM swapchain holds LINEAR
+ * values and the runtime sRGB-encodes them, so display-referred bytes in one
+ * are encoded twice (washed out: lifted backdrop, grey text). The bytes ARE
+ * encoded, so the honest declaration is the `_SRGB` format — which costs no
+ * quality and needs no conversion anywhere, provided the bytes land by a RAW
+ * copy (see README § *Window-space swapchains*).
+ *
+ * Unlike ChooseColorSwapchainFormat() this deliberately does NOT follow the
+ * channel order of `formats[0]`: the CPU rasterizers always emit R8G8B8A8, and
+ * the copy into the image must stay inside that one family (D3D12
+ * `CopyTextureRegion` requires it; a buffer→image copy reinterprets the bytes
+ * in the image's order). R8G8B8A8_UNORM → its `_SRGB` sibling is the same
+ * typeless family (DXGI 28/29 are both R8G8B8A8_TYPELESS, which is what the
+ * runtime allocates), so a raw copy stays legal and byte-exact.
+ *
+ *  - HonestSrgb (default) / ForceSrgb → the first R8G8B8A8 `_SRGB` code
+ *    advertised **together with its UNORM sibling** — DXGI 29, VK 43,
+ *    GL_SRGB8_ALPHA8 0x8C43, Metal 71 (the pair requirement is what keeps a
+ *    colliding code from another API, e.g. VK_FORMAT_R8G8B8_SRGB = 29, from
+ *    being taken). Else the R8G8B8A8 UNORM code (fellBack: the runtime offers
+ *    no sibling, so the bytes stay as before and the caller should say so
+ *    once). Else `formats[0]` (fellBack).
+ *  - ForceUnorm (`DXR_SWAPCHAIN_ENCODING=unorm`) → the R8G8B8A8 UNORM code —
+ *    exactly the pre-v2.27.0 behaviour, so ONE switch A/Bs the projection and
+ *    the window-space swapchains together. Else `formats[0]` (fellBack).
+ *
+ * Header-inline so `displayxr::rules` consumers (the Android legs, which cannot
+ * link `displayxr::common`) choose through the same rule. Pure: reads no
+ * environment, touches no global state, and never calls
+ * NoteColorSwapchainFormat() — the projection swapchain alone decides
+ * RenderSceneLinear().
+ */
+inline ColorFormatChoice
+ChooseWindowSpaceSwapchainFormat(const std::vector<int64_t> &formats, ColorEncodingPreference pref)
+{
+    struct Rgba8Pair {
+        int64_t unorm;
+        int64_t srgb;
+    };
+    // Same order the pre-v2.27.0 UNORM list was scanned in.
+    static const Rgba8Pair kRgba8[] = {
+        {28, 29},         // DXGI R8G8B8A8_UNORM     / R8G8B8A8_UNORM_SRGB
+        {37, 43},         // VK   R8G8B8A8_UNORM     / R8G8B8A8_SRGB
+        {0x8058, 0x8C43}, // GL   RGBA8              / SRGB8_ALPHA8
+        {70, 71},         // Metal RGBA8Unorm        / RGBA8Unorm_sRGB
+    };
+    auto advertised = [&formats](int64_t f) {
+        for (int64_t x : formats) {
+            if (x == f) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    ColorFormatChoice out;
+    out.preference = pref;
+    if (formats.empty()) {
+        return out;
+    }
+
+    if (pref != ColorEncodingPreference::ForceUnorm) {
+        for (const Rgba8Pair &p : kRgba8) {
+            if (advertised(p.srgb) && advertised(p.unorm)) {
+                out.format = p.srgb;
+                out.isSrgb = true;
+                return out;
+            }
+        }
+    }
+    for (const Rgba8Pair &p : kRgba8) {
+        if (advertised(p.unorm)) {
+            out.format = p.unorm;
+            out.fellBack = (pref != ColorEncodingPreference::ForceUnorm);
+            return out;
+        }
+    }
+    out.format = formats[0];
+    out.isSrgb = false;
+    for (const Rgba8Pair &p : kRgba8) {
+        if (p.srgb == formats[0]) {
+            out.isSrgb = true;
+        }
+    }
+    out.fellBack = true;
+    return out;
 }
 
 } // namespace dxr

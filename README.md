@@ -341,12 +341,59 @@ siblings, then make the storage view in the UNORM sibling and the sampled / atta
 the `_SRGB` one — the same recipe the runtime's Vulkan compositor uses for its own swapchain
 images. The bytes are unchanged; only the view decides whether a read decodes.
 
-**Not migrated (deliberate):** the window-space HUD swapchain
-(`CreateWindowSpaceSwapchain`, `CreateHudSwapchain`) stays `R8G8B8A8_UNORM`. It is a CPU-upload
-path — the HUD is rasterized on the CPU into display-referred RGBA8 and copied in, so nothing
-in it can encode, and the format also pins the copy family on four graphics APIs
-(`CopyTextureRegion` / `vkCmdCopy*`). Declaring those bytes `_SRGB` is the correct end state and
-costs no quality, but it needs its own verified change.
+#### Window-space swapchains: `_SRGB` by default too (`v2.27.0`, ADR-044 §7)
+
+> **Behaviour change in `v2.27.0`.** `CreateWindowSpaceSwapchain` / `CreateHudSwapchain` (both
+> overloads) now ask for the **R8G8B8A8 `_SRGB` sibling** — DXGI `29`, VK `43`,
+> `GL_SRGB8_ALPHA8`, Metal `71` — instead of R8G8B8A8 UNORM. **An app that moves the HUD bytes in
+> with a raw copy needs no change**, and its HUD/toast stops washing out on a format-honest
+> runtime. `DXR_SWAPCHAIN_ENCODING=unorm` restores the old format (same switch as above, so one
+> variable A/Bs projection and window-space together).
+
+Window-space (HUD, toast, button, Local2D) layers carry **display-referred** R8G8B8A8 bytes: the
+CPU rasterizers (`HudRenderer` = D2D/DirectWrite into a private `R8G8B8A8_UNORM` texture,
+`HudRendererMacOS` = a `kCGColorSpaceSRGB` bitmap) write the authored sRGB values verbatim. The
+runtime is format-honest on D3D11 ≥ v2.21.0, D3D12 ≥ v2.21.1, GL ≥ v2.21.2 and vk_native ≥
+v2.21.7 ([ADR-044](https://github.com/DisplayXR/displayxr-runtime/blob/main/docs/adr/ADR-044-colour-contract-per-backend.md),
+[INV-4.6](https://github.com/DisplayXR/displayxr-runtime/blob/main/docs/guides/displayxr-app-rules.md)):
+a UNORM swapchain holds **linear** values and is sRGB-encoded on the way to the panel, so those
+bytes in the old UNORM swapchain were **encoded twice** — the translucent black backdrop lifted to
+grey, the text washed out. Declaring them `_SRGB` is correct on every backend, Metal included
+(which is not yet format-honest and passes bytes through either way).
+
+`dxr::ChooseWindowSpaceSwapchainFormat()` (`color_policy.h`, header-inline, so `displayxr::rules`
+— i.e. the Android legs — can call it too) is the rule:
+
+| `DXR_SWAPCHAIN_ENCODING` | Chosen format |
+|---|---|
+| *unset* (**default**) / `srgb` | the first R8G8B8A8 `_SRGB` code advertised **together with its UNORM sibling** (`29`/`28`, `43`/`37`, `0x8C43`/`0x8058`, `71`/`70`); else the R8G8B8A8 UNORM code with one `WARN`; else `formats[0]` |
+| `unorm` | the R8G8B8A8 UNORM code — exactly the pre-`v2.27.0` choice |
+
+Unlike the projection rule it **never follows `formats[0]`'s channel order** (a Vulkan runtime
+lists BGRA first): the copy is family-bound. `28 → 29` is the same `R8G8B8A8_TYPELESS` family the
+runtime allocates, so the copy stays legal and byte-exact. The pair requirement keeps a colliding
+code from another API (`29` is also `VK_FORMAT_R8G8B8_SRGB`) from being taken.
+
+**What the change means for the code that fills the image** — the bytes are already encoded, so
+they must land **without conversion**:
+
+| Method into the window-space image | On `_SRGB` | |
+|---|---|---|
+| D3D11 `UpdateSubresource` / `CopyResource` / `CopySubresourceRegion`; D3D12 `CopyTextureRegion` (upload buffer → image, footprint format = the swapchain format or its UNORM sibling) | raw copy | ✅ byte-exact |
+| Vulkan `vkCmdCopyBufferToImage` (`dxr::CachedLayerUploader`) / `vkCmdCopyImage` | raw copy | ✅ byte-exact |
+| GL `glTexSubImage2D` | raw upload (`GL_FRAMEBUFFER_SRGB` does not apply to uploads) | ✅ byte-exact |
+| Metal `replaceRegion:` / blit-encoder `copyFromTexture:` | raw copy | ✅ byte-exact |
+| D3D draw through an RTV created with the swapchain format (`29`), or D2D `CreateDxgiSurfaceRenderTarget` on the swapchain texture | encodes on write; **D2D cannot bind an `_SRGB` surface at all** | ❌ — draw into a private UNORM texture and copy, or create the RTV with the **UNORM** sibling (`28`) over the runtime's `R8G8B8A8_TYPELESS` texture |
+| `vkCmdBlitImage` from a UNORM source | encodes on write | ❌ — blit into a UNORM-sibling scratch, then `vkCmdCopyImage` |
+| GL draw / `glBlitFramebuffer` into the image with `GL_FRAMEBUFFER_SRGB` enabled | encodes on write | ❌ — disable `GL_FRAMEBUFFER_SRGB` for that pass and restore the app's state |
+| Clear to transparent `(0,0,0,0)` | 0 encodes to 0 | ✅ |
+| Clear to an authored, non-zero colour | the value is linear on an `_SRGB` target | ❌ — `ClearRenderTargetViewDisplayReferred()` / `dxr::VkDisplayReferredClearColor()` / `d3d12_clear.h` / `gl_clear.h` |
+
+Inside this library every write into a window-space image is in the first rows: `HudRenderer`
+clears and draws only its **private** UNORM texture (whose bytes are then read back), and the only
+library code that touches a swapchain image is `CachedLayerUploader`'s `vkCmdCopyBufferToImage`.
+The writes into the swapchain image live in the apps — audit them with the table above. **Metal**
+is compile-checked by CI only; a macOS atlas check is owed before relying on the Metal row.
 
 ### The undock launch contract (`launch_args.h`, `url_fetch.h`, `view_protocol.h`)
 

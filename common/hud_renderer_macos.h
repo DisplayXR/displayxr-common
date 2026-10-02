@@ -8,6 +8,13 @@
  * version): produces an R8G8B8A8 CPU buffer that the caller uploads into its
  * graphics-API-specific HUD swapchain image (Metal `replaceRegion:`,
  * GL `glTexSubImage2D`, Vulkan staging-buffer copy).
+ *
+ * The bitmap is a kCGColorSpaceSRGB context, i.e. DISPLAY-REFERRED bytes. All
+ * three uploads above are RAW copies, so they stay byte-exact into the `_SRGB`
+ * HUD swapchain CreateHudSwapchain() picks by default since v2.27.0 (ADR-044
+ * §7: MTLPixelFormatRGBA8Unorm_sRGB / GL_SRGB8_ALPHA8 / VK_FORMAT_R8G8B8A8_SRGB).
+ * GL: keep GL_FRAMEBUFFER_SRGB irrelevant by uploading with glTexSubImage2D,
+ * never by drawing or glBlitFramebuffer-ing into the image.
  */
 
 #pragma once
