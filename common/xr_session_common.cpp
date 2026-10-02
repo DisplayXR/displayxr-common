@@ -854,33 +854,38 @@ bool CreateWindowSpaceSwapchain(XrSessionManager& xr, SwapchainInfo& out,
     std::vector<int64_t> formats(formatCount);
     XR_CHECK(xrEnumerateSwapchainFormats(xr.session, formatCount, &formatCount, formats.data()));
 
-    // Prefer R8G8B8A8_UNORM for window-space swapchains because HudRenderer
-    // (standalone D3D11 device) always outputs R8G8B8A8_UNORM pixels. Using the
-    // runtime's default format (often B8G8R8A8 on Vulkan-backed compositors)
-    // would cause a format family mismatch in D3D12 CopyTextureRegion, silently
-    // failing the copy.
-    // Well-known R8G8B8A8_UNORM codes: DXGI=28, VK=37, GL_RGBA8=0x8058.
+    // ADR-044 §7 / INV-4.6: the R8G8B8A8 `_SRGB` sibling by default.
+    // Window-space layers carry DISPLAY-REFERRED (sRGB-encoded) bytes —
+    // HudRenderer rasterizes them with D2D/DirectWrite into a private
+    // R8G8B8A8_UNORM texture and the app moves them into this image. On a
+    // format-honest runtime a UNORM swapchain is read as LINEAR and encoded
+    // again (washed out), so the honest declaration is `_SRGB`.
     //
-    // #1589: this one deliberately does NOT follow the honest-sRGB default. It
-    // is a CPU-upload path — the HUD is rasterized on the CPU into
-    // display-referred RGBA8 and copied in, so nothing here can encode. Making
-    // it `_SRGB` is the right end state (the bytes ARE encoded, so an `_SRGB`
-    // texture would simply be declaring them honestly, at no quality cost), but
-    // it changes the copy-format family on four graphics APIs and so needs its
-    // own verified change; it is NOT part of the chooser migration. Until then
-    // the HUD is a known display-referred-into-UNORM source.
-    int64_t selectedFormat = formats[0];
-    const int64_t preferredFormats[] = { 28, 37, 0x8058 };
-    for (int64_t pref : preferredFormats) {
-        for (uint32_t i = 0; i < formatCount; i++) {
-            if (formats[i] == pref) {
-                selectedFormat = pref;
-                goto found;
-            }
-        }
+    // The family stays R8G8B8A8 (never formats[0]'s channel order): DXGI
+    // 28 -> 29 is the same R8G8B8A8_TYPELESS family the runtime allocates, so
+    // D3D12 CopyTextureRegion / D3D11 CopyResource / UpdateSubresource,
+    // vkCmdCopyBufferToImage and glTexSubImage2D all stay legal and BYTE-EXACT.
+    // What changes is anything that RENDERS, BLITS or CLEARS into the image —
+    // that now encodes on write. Move the bytes with a raw copy only; see
+    // README "Window-space swapchains". DXR_SWAPCHAIN_ENCODING=unorm restores
+    // the R8G8B8A8_UNORM choice (same switch as the projection swapchain).
+    const dxr::ColorEncodingPreference pref = dxr::ColorEncodingPreferenceFromEnvironment();
+    const dxr::ColorFormatChoice choice = dxr::ChooseWindowSpaceSwapchainFormat(formats, pref);
+    if (choice.format == 0) {
+        LOG_ERROR("Window-space swapchain: the runtime advertised no swapchain formats");
+        return false;
     }
-    found:
-    LOG_INFO("Selected window-space swapchain format: %lld (0x%llX)", selectedFormat, selectedFormat);
+    const int64_t selectedFormat = choice.format;
+    if (choice.fellBack) {
+        LOG_WARN("Window-space swapchain: no R8G8B8A8 %s pair advertised — using %lld (0x%llX); "
+                 "display-referred bytes in a non-sRGB swapchain wash out on a format-honest runtime",
+                 pref == dxr::ColorEncodingPreference::ForceUnorm ? "UNORM" : "_SRGB/UNORM",
+                 selectedFormat, selectedFormat);
+    } else {
+        LOG_INFO("Selected window-space swapchain format: %s %lld (0x%llX)%s",
+                 choice.isSrgb ? "honest _SRGB" : "UNORM", selectedFormat, selectedFormat,
+                 pref == dxr::ColorEncodingPreference::HonestSrgb ? " (default)" : " (DXR_SWAPCHAIN_ENCODING)");
+    }
 
     XrSwapchainCreateInfo swapchainInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |

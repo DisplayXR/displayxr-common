@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 
 #include "xr_window_space_hud.h"
+#include "color_policy.h" // ChooseWindowSpaceSwapchainFormat (ADR-044 §7)
 
 #include <stdio.h>
 #include <vector>
@@ -17,24 +18,24 @@ bool CreateHudSwapchain(XrSession session, uint32_t width, uint32_t height, XrHu
         return false;
     }
 
-    // Prefer R8G8B8A8_UNORM in any of the well-known per-API codes; the CPU
-    // rasterizer always emits RGBA8 pixels and a family mismatch silently
-    // corrupts the upload (CopyTextureRegion on D3D12 / vkCmdCopy on Vulkan).
-    // DXGI_FORMAT_R8G8B8A8_UNORM=28, VK_FORMAT_R8G8B8A8_UNORM=37,
-    // GL_RGBA8=0x8058, MTLPixelFormatRGBA8Unorm=70.
-    //
-    // #1589: deliberately NOT migrated to the honest-sRGB default (see the twin
-    // note in xr_session_common.cpp::CreateWindowSpaceSwapchain). CPU-uploaded
-    // display-referred pixels; moving it to the `_SRGB` sibling is correct but
-    // must be validated on all four copy paths first.
-    const int64_t preferred[] = { 28, 37, 0x8058, 70 };
-    int64_t selected = formats[0];
-    for (int64_t pref : preferred) {
-        for (int64_t f : formats) {
-            if (f == pref) { selected = pref; goto found; }
-        }
+    // ADR-044 §7 / INV-4.6: the R8G8B8A8 `_SRGB` sibling by default — the
+    // same rule as xr_session_common.cpp::CreateWindowSpaceSwapchain, via the
+    // one shared chooser. The CPU rasterizers (HudRenderer / HudRendererMacOS)
+    // emit DISPLAY-REFERRED R8G8B8A8 bytes; on a format-honest runtime a UNORM
+    // swapchain is read as LINEAR and encoded a second time (washed out), so
+    // `_SRGB` is the honest declaration: DXGI 29, VK 43, GL_SRGB8_ALPHA8,
+    // MTLPixelFormatRGBA8Unorm_sRGB (71). The family stays R8G8B8A8 so the
+    // upload (CopyTextureRegion / vkCmdCopyBufferToImage / glTexSubImage2D /
+    // replaceRegion:) stays a legal, byte-exact RAW copy. Anything that
+    // renders, blits or clears into the image now encodes on write — move the
+    // bytes with a raw copy only (README "Window-space swapchains").
+    // DXR_SWAPCHAIN_ENCODING=unorm restores the R8G8B8A8 UNORM choice.
+    const dxr::ColorFormatChoice choice = dxr::ChooseWindowSpaceSwapchainFormat(
+        formats, dxr::ColorEncodingPreferenceFromEnvironment());
+    const int64_t selected = choice.format;
+    if (selected == 0) {
+        return false;
     }
-found:
 
     XrSwapchainCreateInfo sci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
     sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |

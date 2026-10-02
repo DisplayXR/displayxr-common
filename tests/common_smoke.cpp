@@ -1618,6 +1618,72 @@ static void test_color_policy()
     }
 }
 
+// ADR-044 §7 / INV-4.6: window-space (HUD / toast / Local2D) swapchains carry
+// display-referred R8G8B8A8 bytes moved in by a raw copy, so the honest format
+// is the R8G8B8A8 `_SRGB` sibling — and the family must never follow
+// formats[0]'s channel order (the copy is family-bound).
+static void test_window_space_format_policy()
+{
+    using dxr::ColorEncodingPreference;
+    const ColorEncodingPreference kDefault = ColorEncodingPreference::HonestSrgb;
+
+    // The four lists the runtime actually advertises (ADR-044 §1), in order.
+    const std::vector<int64_t> d3d = {28, 29, 87, 91, 10, 11};           // D3D11 / D3D12
+    const std::vector<int64_t> vk = {44, 50, 37, 43, 97, 91, 64};        // vk_native
+    const std::vector<int64_t> gl = {0x8058, 0x8C43, 0x881A, 0x8814};    // GL
+    const std::vector<int64_t> mtl = {70, 71, 80, 81, 115, 90};          // Metal
+
+    dxr::ColorFormatChoice c = dxr::ChooseWindowSpaceSwapchainFormat(d3d, kDefault);
+    CHECK(c.format == 29 && c.isSrgb && !c.fellBack, "D3D window-space -> R8G8B8A8_UNORM_SRGB (29)");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(vk, kDefault);
+    CHECK(c.format == 43 && c.isSrgb && !c.fellBack,
+          "VK window-space -> R8G8B8A8_SRGB (43), NOT formats[0]'s BGRA sibling (50)");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(gl, kDefault);
+    CHECK(c.format == 0x8C43 && c.isSrgb, "GL window-space -> GL_SRGB8_ALPHA8");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(mtl, kDefault);
+    CHECK(c.format == 71 && c.isSrgb, "Metal window-space -> RGBA8Unorm_sRGB (71)");
+
+    // Same typeless family both ways: the raw copy the HUD path relies on
+    // stays legal (28 <-> 29, 37 <-> 43, RGBA8 <-> SRGB8_ALPHA8, 70 <-> 71).
+    CHECK(dxr::UnormSiblingOf(29) == 28 && dxr::UnormSiblingOf(43) == 37 &&
+              dxr::UnormSiblingOf(0x8C43) == 0x8058 && dxr::UnormSiblingOf(71) == 70,
+          "every window-space sRGB pick is the R8G8B8A8 UNORM code's own sibling");
+
+    // =srgb agrees with the default; =unorm is exactly the pre-v2.27.0 choice.
+    c = dxr::ChooseWindowSpaceSwapchainFormat(vk, ColorEncodingPreference::ForceSrgb);
+    CHECK(c.format == 43, "=srgb agrees with the default");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(d3d, ColorEncodingPreference::ForceUnorm);
+    CHECK(c.format == 28 && !c.isSrgb && !c.fellBack, "=unorm -> DXGI R8G8B8A8_UNORM (old behaviour)");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(vk, ColorEncodingPreference::ForceUnorm);
+    CHECK(c.format == 37 && !c.isSrgb, "=unorm -> VK R8G8B8A8_UNORM, not formats[0] (44)");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(gl, ColorEncodingPreference::ForceUnorm);
+    CHECK(c.format == 0x8058, "=unorm -> GL_RGBA8");
+    c = dxr::ChooseWindowSpaceSwapchainFormat(mtl, ColorEncodingPreference::ForceUnorm);
+    CHECK(c.format == 70, "=unorm -> Metal RGBA8Unorm");
+
+    // A runtime without the sibling: the UNORM code, flagged so the caller warns.
+    c = dxr::ChooseWindowSpaceSwapchainFormat({87, 28}, kDefault);
+    CHECK(c.format == 28 && !c.isSrgb && c.fellBack, "no 29 advertised -> 28, reported as a fallback");
+
+    // The sRGB code alone is not enough: it must come WITH its UNORM sibling,
+    // so a colliding code from another API (VK_FORMAT_R8G8B8_SRGB = 29) is
+    // never mistaken for DXGI R8G8B8A8_UNORM_SRGB.
+    c = dxr::ChooseWindowSpaceSwapchainFormat({44, 50, 37, 29}, kDefault);
+    CHECK(c.format == 37 && c.fellBack, "a lone colliding 29 on a VK list is not taken");
+
+    // Nothing in the family: formats[0], flagged. Empty: 0.
+    c = dxr::ChooseWindowSpaceSwapchainFormat({87, 91}, kDefault);
+    CHECK(c.format == 87 && c.fellBack, "no R8G8B8A8 at all -> formats[0], flagged");
+    c = dxr::ChooseWindowSpaceSwapchainFormat({}, kDefault);
+    CHECK(c.format == 0, "an empty list yields 0");
+
+    // Choosing a window-space format must not touch the projection note that
+    // drives RenderSceneLinear() (the chooser is pure).
+    const bool before = dxr::ColorSwapchainIsSrgb();
+    (void)dxr::ChooseWindowSpaceSwapchainFormat(d3d, kDefault);
+    CHECK(dxr::ColorSwapchainIsSrgb() == before, "window-space choice leaves the projection note alone");
+}
+
 int main()
 {
     test_capture_numbering();
@@ -1634,6 +1700,7 @@ int main()
     test_content_bounds();
     test_content_mask();
     test_color_policy();
+    test_window_space_format_policy();
     test_clear_policy();
 #ifdef _WIN32
     test_input_state_defaults();

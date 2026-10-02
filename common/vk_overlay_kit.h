@@ -262,6 +262,12 @@ struct FencedStage {
  * submitted layer. Changed hash → one staging copy submitted with a fence and
  * NO wait. Barriers match the demos' hand-rolled pattern (UNDEFINED →
  * TRANSFER_DST → COLOR_ATTACHMENT_OPTIMAL).
+ *
+ * Colour: vkCmdCopyBufferToImage is a RAW copy — it never converts — so
+ * display-referred RGBA8 bytes land byte-exact in the `_SRGB` window-space
+ * swapchain (VK_FORMAT_R8G8B8A8_SRGB) that CreateHudSwapchain /
+ * CreateWindowSpaceSwapchain choose by default since v2.27.0 (ADR-044 §7).
+ * Do not replace it with vkCmdBlitImage: a blit into an `_SRGB` image encodes.
  */
 class CachedLayerUploader {
 public:

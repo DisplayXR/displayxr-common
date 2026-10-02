@@ -32,10 +32,15 @@ struct XrHudSwapchain {
 };
 
 /*!
- * Create a HUD swapchain that prefers an RGBA8_UNORM format. The CPU-side
- * rasterizer (HudRenderer on Windows / HudRendererMacOS on macOS) emits
- * R8G8B8A8 pixels, so a format-family mismatch would silently corrupt the
- * upload on Vulkan/D3D12 backends.
+ * Create a HUD swapchain in the R8G8B8A8 family, preferring the `_SRGB` sibling
+ * (DXGI 29 / VK 43 / GL_SRGB8_ALPHA8 / MTLPixelFormatRGBA8Unorm_sRGB 71) and
+ * falling back to R8G8B8A8 UNORM only when the sibling is not advertised
+ * (ADR-044 §7, v2.27.0+; `DXR_SWAPCHAIN_ENCODING=unorm` forces UNORM). The
+ * CPU-side rasterizer (HudRenderer on Windows / HudRendererMacOS on macOS)
+ * emits DISPLAY-REFERRED R8G8B8A8 pixels: the family keeps the upload legal on
+ * Vulkan/D3D12, and the `_SRGB` declaration keeps a format-honest runtime from
+ * encoding them a second time. Upload with a RAW copy only (`out.format` says
+ * which format was chosen); see README "Window-space swapchains".
  */
 bool CreateHudSwapchain(XrSession session, uint32_t width, uint32_t height, XrHudSwapchain& out);
 

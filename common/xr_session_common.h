@@ -362,6 +362,15 @@ bool ReleaseHudSwapchainImage(XrSessionManager& xr);
 // Generic window-space swapchain helpers (the Hud* ones above are thin wrappers
 // over these). Used for additional independent UI layers (e.g. a standalone
 // button bar). Acquire/Release operate on the passed SwapchainInfo directly.
+//
+// Format (ADR-044 §7, v2.27.0+): the R8G8B8A8 `_SRGB` sibling by default —
+// DXGI 29 / VK 43 / GL_SRGB8_ALPHA8 — falling back to R8G8B8A8_UNORM only when
+// the sibling is not advertised; DXR_SWAPCHAIN_ENCODING=unorm forces UNORM.
+// `out.format` says which. The image holds DISPLAY-REFERRED bytes, so fill it
+// with a RAW copy (CopyResource / CopyTextureRegion / UpdateSubresource /
+// vkCmdCopyBufferToImage / vkCmdCopyImage / glTexSubImage2D). A draw through an
+// `_SRGB` RTV, a vkCmdBlitImage, or a clear to a non-transparent colour now
+// encodes on write — see README "Window-space swapchains".
 bool CreateWindowSpaceSwapchain(XrSessionManager& xr, SwapchainInfo& out,
                                 uint32_t width, uint32_t height);
 bool AcquireWindowSpaceImage(SwapchainInfo& sc, uint32_t& imageIndex);

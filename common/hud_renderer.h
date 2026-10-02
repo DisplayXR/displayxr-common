@@ -55,6 +55,14 @@ bool InitializeHudRenderer(HudRenderer& hud, uint32_t w, uint32_t h, uint32_t fo
 // Returns pixel pointer (R8G8B8A8_UNORM) and row pitch in bytes.
 // Caller must call UnmapHud() after consuming the pixels.
 //
+// The bytes are DISPLAY-REFERRED (D2D writes the authored sRGB values verbatim
+// into a private UNORM texture). Move them into the window-space swapchain
+// image — `_SRGB` by default since v2.27.0 (ADR-044 §7) — with a RAW copy:
+// UpdateSubresource / CopyResource / CopyTextureRegion / a staging buffer +
+// vkCmdCopyBufferToImage / glTexSubImage2D. Never draw them through an `_SRGB`
+// RTV, vkCmdBlitImage them, or point D2D at the swapchain image itself (D2D
+// cannot bind an `_SRGB` surface): each of those encodes a second time.
+//
 // `drawBody`: when false, skip the text sections and emit only the buttons.
 // Lets a HUD-toggle key hide the info panel without losing always-visible
 // chrome buttons. When buttons are present, body text is laid out below the
