@@ -138,6 +138,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Rear-depth-budget clip policy: near/far/clipFar from `XrRearDepthBudgetDXR` (+ pre-extension fallback) | `clip_policy.h` | both |
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
+| **Smooth 2D↔3D transitions**: `dxr::ModeSwitch` — eases the stereo disparity around every rendering-mode switch and sequences the request (see [below](#smooth-2d3d-transitions-mode_switchh--every-app-every-platform)); `XrSessionUpdateModeSwitch()` is the Windows wrapper | `mode_switch.h` (header-only), `xr_session_common.{h,cpp}` | both (also `displayxr::rules`, so Linux/Android legs and engine ports get it) |
 | View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — submit every located view, aliasing the ones the active mode does not use (ADR-041) | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
 | Vulkan **frame ring**: N frames in flight (default 3), ONE `vkQueueSubmit` per frame, per-slot command buffer + fence + dynamic-offset UBO slice allocated once, tile barriers, deferred deletion, one named blocking escape hatch (`submitImmediate`) — see *Vulkan frame discipline* below | `vk_frame_ring.h` | all (also `displayxr::rules`, so Linux/Android legs get it; needs `<vulkan/vulkan.h>`) |
 | Vulkan overlay kit: content-hash-gated layer uploads (`CachedLayerUploader`) + fence-pipelined readbacks (`PipelinedReadback`), each with ONE reused command buffer ([runtime#837](https://github.com/DisplayXR/displayxr-runtime/issues/837)) | `vk_overlay_kit.h` | all (needs `<vulkan/vulkan.h>`) |
@@ -245,6 +246,67 @@ resize/teardown; `ring.submitImmediate(record)` is the one sanctioned blocking s
 `DXR_VK_FRAMES_IN_FLIGHT=1..8` overrides the depth for A/B tests (`1` reproduces the anti-pattern);
 Android has no usable environment, so pass `Config::framesInFlight` there. `tests/vk_frame_ring_test.cpp`
 pins the ring arithmetic, env clamp, UBO slice alignment and deferred-deletion order GPU-free.
+
+### Smooth 2D↔3D transitions (`mode_switch.h`) — every app, every platform
+
+**What the runtime does, and what it does not.** `xrRequestDisplayRenderingModeDXR(session, mode)` switches
+the display in **one frame**: from the frame the new mode lands, the atlas recipe (view count, tile layout),
+the display processor's weave-vs-flat choice and the switchable lens / backlight all follow that mode
+(runtime ADR-028). The runtime does **not** ease the change, on any platform: the stereo disparity you see
+is the *app's* content — the separation of the views it renders — and the app owns it. The runtime's only
+transition aid is a one-frame guard (runtime #615) that keeps the first frame of a 2D→3D switch flat while
+the display processor's eye set catches up. So an app that calls `xrRequestDisplayRenderingModeDXR` straight
+from a key press **snaps** between full parallax and flat, on Windows, macOS, Linux and Android alike.
+
+**What every app must do: route its mode requests through `dxr::ModeSwitch`.** It ramps the view rig's
+`ipdFactor` (0 = both eyes at the centre = flat, `steady` = the user's full 3D) over 0.18 s (SmoothStep,
+wall-clock driven) and — the part hand-rolled versions get wrong — owns the **order** of ramp and request:
+
+| Switch | Sequence | Why |
+|---|---|---|
+| 3D → 2D | ramp disparity to 0 **first**, request the 2D mode on the frame it lands | 2D engages on content that is already flat: no jump at the cut |
+| 2D → 3D | request the 3D mode **first** (its first frame is flat), then ramp disparity up to steady | the lens switches on flat content, depth then grows in |
+| 3D → 3D, 2D → 2D | request now, keep the disparity | nothing to flatten |
+| toggle mashed mid-ramp | retarget from the disparity on screen; an un-fired 3D → 2D that is reversed ramps back up and **never** switches | no half-switched state |
+
+It restores the app's **tuned** `ipdFactor`, not 1.0, and it is header-only and dependency-free (no OpenXR,
+no platform headers), so the same file serves the native apps, the demos, the Android legs (through
+`displayxr::rules`) and the engine ports.
+
+**Wiring — one call per frame, before `xrLocateViews`:**
+
+- **Windows** (`XrSessionManager` apps): `XrSessionUpdateModeSwitch(xr, inputState, dt)`. It consumes the
+  V / 0-8 request flags from `input_handler`, writes `inputState.viewParams.ipdFactor`, and issues the request.
+- **Every other leg** (macOS, Linux, Android, engines — they carry their own session code):
+
+```cpp
+#include "mode_switch.h"
+static dxr::ModeSwitch g_modeSwitch;               // defaults: 0.18 s SmoothStep, no configure() needed
+
+int32_t want = -1;                                 // -1 = no request this frame
+if (vPressed)     want = dxr::ModeSwitch::cycleTarget(currentMode, modeCount);
+if (digitPressed) want = digit;                    // absolute 0-8; out-of-range is ignored
+if (!canRequest)  want = -1;                       // no session / no PFN yet: the ramp still advances
+dxr::ModeSwitchFrame f = g_modeSwitch.step(dt, want, modeCount, modeViewCounts, currentMode, steadyIpd);
+rig.ipdFactor = f.ipd;                             // XrDisplayRigDXR / XrCameraRigDXR, THIS frame
+if (f.fire)
+    xrRequestDisplayRenderingModeDXR(session, f.mode);
+```
+
+The inputs: `modeViewCounts[i]` is `XrDisplayRenderingModeInfoDXR::viewCount` from
+`xrEnumerateDisplayRenderingModesDXR` (1 = a 2D mode); `currentMode` is the mode the **runtime** reports — the
+enumerate's `isActive`, then every `XrEventDataRenderingModeChangedDXR` — never `f.mode` (a denied or reverted
+request must not desynchronise the app); `steadyIpd` is the user-tuned full-3D value (`ViewParams::steadyIpdFactor`
+— edit *that* from the +/- keys, not `ipdFactor`, which is the ramp's output). An app that computes its own
+Kooima instead of declaring an `XR_DXR_view_rig` scales its eye separation by `f.ipd` before the projection.
+
+**Mode changes the app did not ask for are not eased.** A runtime-owned V press in a `_hosted` / legacy app,
+the workspace shell's Ctrl+V, or an agent's mode request reach the app only as `XrEventDataRenderingModeChangedDXR`
+after the fact; the app updates `currentMode` and renders the new mode at steady disparity.
+
+**Reference wiring:** the runtime's `cube_handle_*` test apps (Windows: `XrSessionUpdateModeSwitch`; macOS:
+`step()`) and `displayxr-demo-modelviewer`'s Windows / macOS / Linux legs. `tests/common_smoke.cpp` pins the sequencing, the
+interruption, the first-press case and `step()`'s request routing.
 
 ### Color: honest sRGB by default (`color_policy.h`, ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589))
 

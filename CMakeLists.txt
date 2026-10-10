@@ -261,8 +261,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/rig_mode.h
     common/rig_transition.cpp # platform-neutral convert-then-lerp rig transition
     common/rig_transition.h
-    common/mode_switch.cpp # platform-neutral smooth 2D<->3D mode-switch sequencer
-    common/mode_switch.h
+    common/mode_switch.h  # header-only smooth 2D<->3D mode-switch sequencer (every platform; also via displayxr::rules)
     common/toast.cpp      # platform-neutral transient confirmation-message state
     common/toast.h
     common/recenter_control.h # header-only per-axis dynamic-recenter pin state
@@ -331,6 +330,12 @@ endif()
 #
 # Keep it header-only: anything added here must compile on Windows, macOS,
 # Linux AND Android with no platform sources and no external dependencies.
+#
+# common/mode_switch.h (dxr::ModeSwitch) is the same story for 2D<->3D
+# transitions: every leg must ease a rendering-mode switch the same way, and
+# before it went header-only the macOS / Linux legs hand-copied the per-frame
+# glue that only Windows' XrSessionUpdateModeSwitch had. It needs nothing at all
+# (no OpenXR, no platform headers).
 #
 # common/dxr_view_config.h is the same story for the view CONFIGURATION: the
 # PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486) has to be applied by every leg,
