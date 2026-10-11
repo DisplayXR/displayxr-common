@@ -15,8 +15,14 @@
  * queued GPU work into the app thread.
  *
  * The shared discipline: submit with a fence, never wait on the hot path —
- * consume/reuse on the NEXT invocation, by which time the fence is long
- * signaled (the runtime's per-frame commit already drains the queue).
+ * consume/reuse on the NEXT invocation. Do NOT assume the runtime drains the
+ * queue for you: it used to vkQueueWaitIdle at every commit, but no longer
+ * does (runtime #1923 / #1936), so the fence of the previous use may really
+ * still be pending — the wait is ~free only because a frame or more has
+ * passed. Each stage allocates its command buffer ONCE and resets it per use
+ * (per-use allocate/free is a measurable per-frame cost on Adreno — the cost
+ * runtime #1936 removed from the compositor). For the app's main render
+ * submit, see vk_frame_ring.h.
  *
  *   dxr::CachedLayerUploader  — window-space / Local2D layer image uploads,
  *       gated on a caller-provided content hash: unchanged hash = complete
@@ -128,8 +134,8 @@ FindHostVisibleType(VkPhysicalDevice phys, uint32_t typeBits, bool forCpuReads =
     return UINT32_MAX;
 }
 
-//! Shared plumbing: a mapped host-visible buffer + own cmd pool + one fence +
-//! the lazily-retired previous command buffer.
+//! Shared plumbing: a mapped host-visible buffer + own cmd pool + ONE command
+//! buffer (allocated once, reset per use) + one fence.
 struct FencedStage {
     VkDevice dev = VK_NULL_HANDLE;
     VkBuffer buf = VK_NULL_HANDLE;
@@ -138,7 +144,7 @@ struct FencedStage {
     VkDeviceSize bytes = 0;
     VkCommandPool pool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    VkCommandBuffer prevCmd = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE; // allocated once in init()
     bool pending = false;
     //! Did the allocation actually land on a HOST_CACHED type? Read it back and
     //! LOG it — "we asked for cached" is not the same claim as "the driver had
@@ -181,13 +187,18 @@ struct FencedStage {
         pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pi.queueFamilyIndex = queueFamily;
         if (vkCreateCommandPool(dev, &pi, nullptr, &pool) != VK_SUCCESS) return false;
+        VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cai.commandPool = pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(dev, &cai, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         return vkCreateFence(dev, &fi, nullptr, &fence) == VK_SUCCESS;
     }
 
-    //! Wait the in-flight submission (if any) and retire its command buffer.
-    //! Called at the START of the next use — by then the fence is long
-    //! signaled, so the wait is ~free.
+    //! Wait the in-flight submission (if any) so the staging buffer and the
+    //! command buffer may be reused. Called at the START of the next use —
+    //! normally a frame or more later, so the wait is ~free.
     void
     retire()
     {
@@ -195,45 +206,33 @@ struct FencedStage {
             vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
             pending = false;
         }
-        if (prevCmd != VK_NULL_HANDLE) {
-            vkFreeCommandBuffers(dev, pool, 1, &prevCmd);
-            prevCmd = VK_NULL_HANDLE;
-        }
     }
 
-    //! Submit @p cmd on @p queue with the fence; the cmd retires on the next
-    //! retire() call. Returns false (and frees the cmd) on submit failure.
+    //! Submit the recorded command buffer (@p recorded must be the one
+    //! beginCmd() returned) on @p queue with the fence; no wait. Returns false
+    //! on submit failure (nothing is pending then).
     bool
-    submit(VkQueue queue, VkCommandBuffer cmd)
+    submit(VkQueue queue, VkCommandBuffer recorded)
     {
         VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
+        si.pCommandBuffers = &recorded;
         vkResetFences(dev, 1, &fence);
-        if (vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
-            vkFreeCommandBuffers(dev, pool, 1, &cmd);
-            return false;
-        }
+        if (vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) return false;
         pending = true;
-        prevCmd = cmd;
         return true;
     }
 
+    //! Reset + begin the stage's one command buffer. Call retire() first (the
+    //! buffer must not be pending). VK_NULL_HANDLE on failure.
     VkCommandBuffer
     beginCmd()
     {
-        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        ai.commandPool = pool;
-        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = 1;
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(dev, &ai, &cmd) != VK_SUCCESS) return VK_NULL_HANDLE;
+        if (cmd == VK_NULL_HANDLE || pending) return VK_NULL_HANDLE;
+        if (vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) return VK_NULL_HANDLE;
         VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
-            vkFreeCommandBuffers(dev, pool, 1, &cmd);
-            return VK_NULL_HANDLE;
-        }
+        if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) return VK_NULL_HANDLE;
         return cmd;
     }
 
@@ -243,7 +242,7 @@ struct FencedStage {
         if (dev == VK_NULL_HANDLE) return;
         retire();
         if (fence != VK_NULL_HANDLE) vkDestroyFence(dev, fence, nullptr);
-        if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(dev, pool, nullptr);
+        if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(dev, pool, nullptr); // frees cmd
         if (mem != VK_NULL_HANDLE) {
             if (mapped != nullptr) vkUnmapMemory(dev, mem);
             vkFreeMemory(dev, mem, nullptr);
