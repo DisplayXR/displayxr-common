@@ -67,7 +67,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_url_fetch_test displayxr_launch_args_test
+        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_url_fetch_test displayxr_launch_args_test displayxr_cursor_depth_test displayxr_cursor_depth_x11_compile
 
       - name: Test (launch contract + SHA-1 cache key)
         run: ./build/tests/displayxr_launch_args_test
@@ -92,6 +92,11 @@ jobs:
 
       - name: Test (probe + arg parsing, no display)
         run: ./build/tests/displayxr_linux_window_test
+
+      - name: Test (dxr::CursorDepth core + the X11 cursor adapter under Xvfb)
+        run: |
+          ./build/tests/displayxr_cursor_depth_test
+          xvfb-run -a -s "-screen 0 1280x800x24" ./build/tests/displayxr_cursor_depth_x11_compile
 
       - name: Test (X11 windows under Xvfb)
         run: xvfb-run -a -s "-screen 0 1920x1080x24" env DXR_LW_TEST_X11=1 ./build/tests/displayxr_linux_window_test

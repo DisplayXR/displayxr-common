@@ -207,7 +207,11 @@ else()
         # XR_DXR_wayland_surface_binding.h SPEC_VERSION 2 (the surface-geometry
         # struct + transparentBackgroundEnabled that displayxr::linux_window
         # chains; the previous pin had spec 1).
-        GIT_TAG 4c3fa8e816f0224844e12e59374f01f9d8d50f9a
+        # Bumped 2026-10-11 to displayxr-extensions@main (runtime c4a9d06b5):
+        # XR_DXR_cursor_depth.h SPEC_VERSION 5 (the runtime-drawn cursor's
+        # XrCursorDepthDrawInfoDXR / XrCursorDepthDrawStateDXR), which
+        # common/cursor_depth.h needs.
+        GIT_TAG af2de88348ab062a21344bf4d27c19eba40dfd8a
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
@@ -279,6 +283,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/content_bounds.h # header-only: ProjectAabbToCanvasBounds + ChainContentBounds (XR_DXR_depth_budget v2)
     common/content_mask.h # header-only: ContentMaskFromCoverage + ChainContentMask (XR_DXR_depth_budget v3)
     common/dxr_view_config.h # header-only: DxrSelectViewConfigType() PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486)
+    common/cursor_depth.h   # header-only core: dxr::CursorDepth, XR_DXR_cursor_depth v5 (ADR-046 Amendment 2)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES
@@ -299,6 +304,7 @@ if(WIN32)
         common/text_overlay.h
         common/hud_renderer.cpp
         common/hud_renderer.h
+        common/cursor_depth_win32.cpp # dxr::cursorPlatformWin32 (pointer + WM_SETCURSOR hide)
     )
 elseif(APPLE)
     list(APPEND DISPLAYXR_COMMON_SOURCES
@@ -306,6 +312,7 @@ elseif(APPLE)
         common/hud_renderer_macos.mm
         common/hud_renderer_macos.h
         common/stb_image_impl_macos.cpp
+        common/cursor_depth_macos.mm # dxr::cursorPlatformCocoa (pointer + NSCursor hide)
     )
 endif()
 
@@ -337,6 +344,13 @@ endif()
 # frame ring most (Adreno DVFS, modelviewer #170). They need <vulkan/vulkan.h>
 # on the include path and the consumer's existing Vulkan link; nothing is added
 # here.
+#
+# common/cursor_depth.h (dxr::CursorDepth) likewise: its core is header-only
+# and needs only <openxr/XR_DXR_cursor_depth.h> (SPEC_VERSION >= 5), so an
+# Android leg gets the footprint rays + struct chaining through this target
+# and drives it with setPointerUV(). Its Win32 / Cocoa window adapters are
+# compiled into displayxr::common; the X11 one is header-only
+# (cursor_depth_x11.h) because this library does not link libX11.
 add_library(displayxr_rules INTERFACE)
 add_library(displayxr::rules ALIAS displayxr_rules)
 target_include_directories(displayxr_rules INTERFACE

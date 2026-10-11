@@ -141,6 +141,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — submit every located view, aliasing the ones the active mode does not use (ADR-041) | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
 | Vulkan **frame ring**: N frames in flight (default 3), ONE `vkQueueSubmit` per frame, per-slot command buffer + fence + dynamic-offset UBO slice allocated once, tile barriers, deferred deletion, one named blocking escape hatch (`submitImmediate`) — see *Vulkan frame discipline* below | `vk_frame_ring.h` | all (also `displayxr::rules`, so Linux/Android legs get it; needs `<vulkan/vulkan.h>`) |
 | Vulkan overlay kit: content-hash-gated layer uploads (`CachedLayerUploader`) + fence-pipelined readbacks (`PipelinedReadback`), each with ONE reused command buffer ([runtime#837](https://github.com/DisplayXR/displayxr-runtime/issues/837)) | `vk_overlay_kit.h` | all (needs `<vulkan/vulkan.h>`) |
+| Depth-aware cursor (`XR_DXR_cursor_depth` v5, ADR-046 Amendment 2): `dxr::CursorDepth` — pointer -> canvas UV, footprint rays through last frame's views, nearest hit, struct chaining, OS cursor hidden exactly while the runtime draws; `dxr::cursorFootprintRays()` | `cursor_depth.h` (+ `cursor_depth_win32.cpp`, `cursor_depth_macos.mm`, header-only `cursor_depth_x11.h`) | core: all (also `displayxr::rules`); adapters: Win32, macOS, X11 |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -684,6 +685,61 @@ if (const uint8_t* cov = punch.coverage()) {
                                  punch.coverageWidth(), winW, winH, nullptr, 64, 64, cells);
 }
 ```
+
+## Depth-aware cursor (`cursor_depth.h`, `XR_DXR_cursor_depth` v5)
+
+The runtime **draws** the depth cursor (ADR-046 Amendment 2 §B): a stereo sprite lifted just in
+front of whatever content pops out of the screen under the pointer, and nothing at all (the OS
+cursor is the cursor) over content on or behind the glass. The app only owns the depth under the
+pointer. `dxr::CursorDepth` does the rest of the bookkeeping:
+
+```cpp
+#include "cursor_depth.h"
+
+dxr::CursorDepth cursor;                          // inert until enable()
+cursor.enable(cursorDepthSpecVersion);            // extensionVersion if you enabled XR_DXR_cursor_depth, else 0
+cursor.setWindowCocoa((__bridge void *)view);     // or setWindowWin32(hwnd), or
+                                                  // setPlatform(dxr::cursorPlatformX11(dpy, win))
+cursor.setRayCast([&](const dxr::CursorRay &r) -> std::optional<float> {
+    return scene.raycast(r.origin, r.dir);        // t of the first hit, or std::nullopt
+});
+
+// every frame:
+cursor.chain(locateInfo, viewState);              // pointer UV + hit test + struct chaining
+xrLocateViews(session, &locateInfo, &viewState, n, &n, views.data());
+cursor.afterLocate(views.data(), activeViewCount);// hides the OS cursor exactly while willDraw
+```
+
+- **Zero cost when not enabled:** `enable(0)` (or never calling it) leaves both struct chains
+  untouched and never touches the OS cursor. Enabled, a frame allocates nothing.
+- **Depth source:** `setRayCast` (ray -> nearest hit; the helper fires rays from the two outer
+  views through the cursor's footprint and keeps the hit nearest the viewer), `setHitTest` (full
+  control: you get the views, the UV and the ready-made rays), or `useDepthLayer(true)` (spec v2:
+  the runtime reads the depth you submit with `XR_KHR_composition_layer_depth`).
+- **Look:** `setSprite(swapchain, hotSpot, sizeMeters, aspect)`; the default (`XR_NULL_HANDLE`)
+  is the runtime's own look, the OS cursor's shape or the classic arrow. The footprint follows
+  the sprite: the arrow's is the tip plus a ring around its body, the same rule as the runtime
+  and the web SDK (`cursorArrowFootprint`).
+- **Options:** `setAnchor()`, `setMargin()` (spec v3), `setCursorHeight()` (footprint size,
+  default 0.03 of the canvas height), `setWantPlacement(true)` for diagnostics.
+- **App-drawn cursor** (v1-v4 style): `setDrawMode(DrawMode::App)`, then draw your sprite at
+  `placement().pose` / `placement().height` while `appShouldDraw()`.
+- **Never no cursor:** the OS cursor is hidden only while the runtime reports `willDraw`, so a
+  backend that cannot draw yet (spec v5: Metal draws first) leaves the flat OS cursor.
+
+**Platforms.** The core is header-only and platform-neutral (it ships in `displayxr::rules`, so
+Android legs can use it). Window adapters:
+
+| Window | Adapter | Pointer | OS-cursor hide |
+|---|---|---|---|
+| Win32 `HWND` | `setWindowWin32(hwnd)` (`cursor_depth_win32.cpp`) | `GetCursorPos` -> client rect | answers `WM_SETCURSOR`/`HTCLIENT` with `SetCursor(NULL)` via a chained window proc; client area only |
+| Cocoa `NSView*` | `setWindowCocoa(view)` (`cursor_depth_macos.mm`) | `mouseLocationOutsideOfEventStream` -> view bounds | `NSCursor hide/unhide`, balanced, on the main thread |
+| Xlib `(Display*, Window)` | `setPlatform(dxr::cursorPlatformX11(dpy, win))` (header-only `cursor_depth_x11.h`; the app links libX11) | `XQueryPointer` | an invisible pixmap cursor on the window |
+| Anything else (Wayland, Android, `displayxr::linux_window`, a custom toolkit) | manual: `setPointerUV(u, v)` / `clearPointerUV()` + `onDepthCursorShownChanged(cb)` | yours | yours, e.g. `win.set_cursor(shown ? DxrCursor::Hidden : DxrCursor::Default)` |
+
+`dxr::cursorFootprintRays(views, activeCount, uv, heightFrac)` is usable on its own for an app that
+keeps its own chaining. Reference adoption: the runtime's
+`test_apps/handle/cube_handle_metal_macos`.
 
 ## Client-side window chrome (`csd_titlebar.h`)
 
