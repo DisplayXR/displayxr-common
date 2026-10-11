@@ -113,3 +113,26 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_input_test COMMAND displayxr_linux_window_input_test)
 endif()
+
+# vk_frame_ring.h (frame-ring discipline, Adreno DVFS). The bare CI runners have
+# no Vulkan SDK, so the test always runs the pure helpers (ring arithmetic,
+# env clamp, UBO slice alignment, deferred-deletion order) via
+# DXR_VK_FRAME_RING_PURE_ONLY, and additionally compile-checks the full
+# VkFrameRing class (plus vk_overlay_kit.h) when Vulkan headers are found.
+# GPU-free by design: nothing here creates a VkDevice.
+add_executable(displayxr_vk_frame_ring_test vk_frame_ring_test.cpp)
+target_link_libraries(displayxr_vk_frame_ring_test PRIVATE displayxr::rules)
+find_package(Vulkan QUIET)
+if(TARGET Vulkan::Headers)
+    target_link_libraries(displayxr_vk_frame_ring_test PRIVATE Vulkan::Headers)
+else()
+    find_path(DXR_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+        HINTS "$ENV{VULKAN_SDK}/include" /opt/homebrew/include /usr/local/include)
+    if(DXR_VULKAN_INCLUDE_DIR)
+        target_include_directories(displayxr_vk_frame_ring_test PRIVATE "${DXR_VULKAN_INCLUDE_DIR}")
+    endif()
+endif()
+set_target_properties(displayxr_vk_frame_ring_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+add_test(NAME displayxr_vk_frame_ring_test COMMAND displayxr_vk_frame_ring_test)

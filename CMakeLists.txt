@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # VERSION tracks the NEXT git tag. The tags are the version of record (consumers
 # pin GIT_TAG, nothing reads this field) — it had drifted to 0.4.0 against v2.13.0.
 project(displayxr_common
-    VERSION 2.27.0
+    VERSION 2.28.0
     DESCRIPTION "Shared off-axis Kooima projection math + C++ app scaffolding for DisplayXR 3D displays"
     LANGUAGES C CXX)
 
@@ -266,6 +266,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/auto_fit_canvas.h # header-only runtime-canvas viewport source + aspect gate
     common/frame_stage_timer.h # header-only env-gated per-stage frame timing (#837)
     common/vk_overlay_kit.h   # header-only VK cached-layer-upload + pipelined-readback kit (#837)
+    common/vk_frame_ring.h    # header-only VK frame ring: N in flight, one submit/frame (Adreno DVFS)
     common/vk_clickthrough_region.h # header-only coverage->SetWindowRgn punch-through (#833, Win32)
     common/win_window_drag.h  # header-only RMB window-drag for borderless overlays (Win32)
     common/launch_args.h      # header-only viewer launch contract: CLI flags + displayxr-view: URL
@@ -330,6 +331,12 @@ endif()
 # the include path (<openxr/openxr.h>, and ideally the consumer's
 # XR_DXR_display_info.h) — which every leg that calls OpenXR already has — so
 # this target still adds no dependency of its own.
+#
+# common/vk_frame_ring.h (and vk_overlay_kit.h) are reachable through this
+# target too — the Android Vulkan legs are exactly the consumers that need the
+# frame ring most (Adreno DVFS, modelviewer #170). They need <vulkan/vulkan.h>
+# on the include path and the consumer's existing Vulkan link; nothing is added
+# here.
 add_library(displayxr_rules INTERFACE)
 add_library(displayxr::rules ALIAS displayxr_rules)
 target_include_directories(displayxr_rules INTERFACE
