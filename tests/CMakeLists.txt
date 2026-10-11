@@ -136,3 +136,33 @@ set_target_properties(displayxr_vk_frame_ring_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_test(NAME displayxr_vk_frame_ring_test COMMAND displayxr_vk_frame_ring_test)
+
+# dxr::CursorDepth contract test (XR_DXR_cursor_depth v5, ADR-046 Amendment 2):
+# canvas UV, the footprint rule, footprint rays vs a Kooima pair, the struct
+# chain order and the OS-cursor transitions. Header-only core, like the view
+# config test: displayxr::rules + the header-only OpenXR / extension targets.
+add_executable(displayxr_cursor_depth_test cursor_depth_test.cpp)
+target_link_libraries(displayxr_cursor_depth_test PRIVATE
+    displayxr::rules
+    displayxr_ext_headers
+    ${DISPLAYXR_MATH_OPENXR})
+set_target_properties(displayxr_cursor_depth_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME displayxr_cursor_depth_test COMMAND displayxr_cursor_depth_test)
+
+# The header-only X11 adapter (cursor_depth_x11.h) compiles and links against
+# Xlib wherever Xlib is installed (the Linux CI legs).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(X11 QUIET)
+    if(X11_FOUND)
+        add_executable(displayxr_cursor_depth_x11_compile cursor_depth_x11_compile.cpp)
+        target_link_libraries(displayxr_cursor_depth_x11_compile PRIVATE
+            displayxr::rules
+            displayxr_ext_headers
+            ${DISPLAYXR_MATH_OPENXR}
+            ${X11_LIBRARIES})
+        target_include_directories(displayxr_cursor_depth_x11_compile PRIVATE ${X11_INCLUDE_DIR})
+        set_target_properties(displayxr_cursor_depth_x11_compile PROPERTIES
+            CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    endif()
+endif()
