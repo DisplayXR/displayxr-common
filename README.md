@@ -139,6 +139,8 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
 | View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — submit every located view, aliasing the ones the active mode does not use (ADR-041) | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
+| Vulkan **frame ring**: N frames in flight (default 3), ONE `vkQueueSubmit` per frame, per-slot command buffer + fence + dynamic-offset UBO slice allocated once, tile barriers, deferred deletion, one named blocking escape hatch (`submitImmediate`) — see *Vulkan frame discipline* below | `vk_frame_ring.h` | all (also `displayxr::rules`, so Linux/Android legs get it; needs `<vulkan/vulkan.h>`) |
+| Vulkan overlay kit: content-hash-gated layer uploads (`CachedLayerUploader`) + fence-pipelined readbacks (`PipelinedReadback`), each with ONE reused command buffer ([runtime#837](https://github.com/DisplayXR/displayxr-runtime/issues/837)) | `vk_overlay_kit.h` | all (needs `<vulkan/vulkan.h>`) |
 
 **Divergence policy:** behavior differences between consumers are parameterized at the call site (e.g. `InputState::hudToggleRequiresShift`, `EndFrame(..., projectionLayerFlags)`) — never `#ifdef APP` in the lib. Request-flag fields that only one app consumes (file picker, clip playback, transparency toggle) are fine: unconsumed flags are inert.
 
@@ -203,6 +205,45 @@ The type value comes from the consumer's `XR_DXR_display_info.h` when one is on 
 (`__has_include`); a tree pinned to a pre-19 snapshot falls back to the fixed DXR author-ID value, so the header
 compiles everywhere. `tests/view_config_test.c` + `view_config_test_cxx.cpp` pin that behaviour, and the aliasing contract (C11 and C++17,
 GPU- and loader-free — they script a fake `xrEnumerateViewConfigurations`).
+
+### Vulkan frame discipline (`vk_frame_ring.h`)
+
+**The rule:** keep at least two frames in flight, make ONE `vkQueueSubmit` per frame (every tile/view of
+the atlas in one command buffer, ordered by a barrier between tiles — not by a CPU wait), never wait the
+fence of the frame you just submitted, and never allocate command buffers per frame. Submit **before**
+`xrReleaseSwapchainImage` — the runtime composes on the same `VkQueue`.
+
+**Why:** mobile GPU governors (Adreno's `msm-adreno-tz`) clock the GPU from its busy %. Submit → wait →
+submit leaves it idle half the time, so it parks at ~1/3 clock (measured: 220 MHz, ~50 % busy, ~10 fps on
+an Adreno 740), which makes each frame slower, which keeps it idle. `displayxr-demo-modelviewer` went
+13 → 30 fps with a 3-deep ring (PR #170); `dxr::VkFrameRing` is the generic half of that fix.
+
+```cpp
+#include "vk_frame_ring.h"
+
+dxr::VkFrameRing ring;                        // once
+dxr::VkFrameRing::Config cfg;
+cfg.perViewUboBytes = sizeof(ViewUbo);        // 0 = no UBO
+cfg.maxViewsPerFrame = kMaxViews;
+ring.init(device, physDevice, queue, queueFamily, cfg);
+
+// per frame, after xrAcquire/WaitSwapchainImage:
+VkCommandBuffer cmd = ring.beginFrame();      // waits only the fence from N frames ago
+for (uint32_t i = 0; i < viewCount; ++i) {
+    if (i > 0) dxr::VkFrameRing::tileBarrier(cmd);
+    uint32_t dynOff;
+    *static_cast<ViewUbo*>(ring.viewUbo(i, &dynOff)) = ...;   // slot-private slice
+    // bind with dynOff (UNIFORM_BUFFER_DYNAMIC on ring.uboBuffer()), record tile i
+}
+ring.endFrame();                              // ONE submit, no wait
+// xrReleaseSwapchainImage, xrEndFrame
+```
+
+Resources an in-flight frame may still read go through `ring.deferDestroy(fn)`; `ring.waitAll()` is for
+resize/teardown; `ring.submitImmediate(record)` is the one sanctioned blocking submit (one-off uploads).
+`DXR_VK_FRAMES_IN_FLIGHT=1..8` overrides the depth for A/B tests (`1` reproduces the anti-pattern);
+Android has no usable environment, so pass `Config::framesInFlight` there. `tests/vk_frame_ring_test.cpp`
+pins the ring arithmetic, env clamp, UBO slice alignment and deferred-deletion order GPU-free.
 
 ### Color: honest sRGB by default (`color_policy.h`, ADR-021 / [#1589](https://github.com/DisplayXR/displayxr-runtime/issues/1589))
 
