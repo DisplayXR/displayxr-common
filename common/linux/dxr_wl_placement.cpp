@@ -6,6 +6,7 @@
  */
 
 #include "dxr_wl_placement.h"
+#include "dxr_wl_geom_json.h"
 
 #include "util/u_wayland_layout.h"
 
@@ -297,54 +298,6 @@ DxrWlPlacement::drain()
 	}
 }
 
-namespace {
-//! The integers of a JSON array `"key":[a,b,c,d]` inside [from, to).
-bool
-json_int4(const char *from, const char *to, const char *key, int32_t out[4])
-{
-	const char *p = strstr(from, key);
-	if (p == nullptr || p >= to) {
-		return false;
-	}
-	p = strchr(p, '[');
-	if (p == nullptr || p >= to) {
-		return false;
-	}
-	p++;
-	for (int i = 0; i < 4; i++) {
-		char *end = nullptr;
-		const long v = strtol(p, &end, 10);
-		if (end == p) {
-			return false;
-		}
-		out[i] = (int32_t)v;
-		p = end;
-		while (*p == ',' || *p == ' ') {
-			p++;
-		}
-	}
-	return true;
-}
-
-//! A number `"key":v` inside [from, to).
-bool
-json_num(const char *from, const char *to, const char *key, double *out)
-{
-	const char *p = strstr(from, key);
-	if (p == nullptr || p >= to) {
-		return false;
-	}
-	p += strlen(key);
-	char *end = nullptr;
-	const double v = strtod(p, &end);
-	if (end == p) {
-		return false;
-	}
-	*out = v;
-	return true;
-}
-} // namespace
-
 bool
 DxrWlPlacement::get_own_geometry(OwnGeometry *out)
 {
@@ -364,50 +317,20 @@ DxrWlPlacement::get_own_geometry(OwnGeometry *out)
 	const char *json = nullptr;
 	bool ok = false;
 	if (dbus_message_get_args(reply, nullptr, DBUS_TYPE_STRING, &json, DBUS_TYPE_INVALID) && json != nullptr) {
-		// The publisher's own JSON.stringify output: one object per window,
-		// each starting at its "pid". Ours is the first with our PID.
-		char needle[32];
-		snprintf(needle, sizeof(needle), "\"pid\":%d,", (int)getpid());
-		const char *obj = strstr(json, needle);
-		if (obj != nullptr) {
-			const char *next = strstr(obj + 1, "\"pid\":");
-			const char *end = next != nullptr ? next : json + strlen(json);
-			const char *mon = strstr(obj, "\"monitor\":{");
-			// The monitor object's keys, in its own order: x, y, w, h, scale.
-			double mx = 0.0, my = 0.0, mw = 0.0, mh = 0.0;
-			ok = json_int4(obj, end, "\"frame\":", out->frame) && json_int4(obj, end, "\"buffer\":", out->buffer) &&
-			     mon != nullptr && mon < end && json_num(mon, end, "\"x\":", &mx) &&
-			     json_num(mon, end, "\"y\":", &my) && json_num(mon, end, "\"w\":", &mw) &&
-			     json_num(mon, end, "\"h\":", &mh) && json_num(mon, end, "\"scale\":", &out->monitor_scale) &&
-			     out->monitor_scale > 0.0;
-			// Extension v11: device px per stage px, inside the monitor
-			// object (after "scale"; `"scale":` above never matches the
-			// `"device_scale":` key, whose quote precedes "device").
-			out->device_scale = 0.0;
-			if (!json_num(mon, end, "\"device_scale\":", &out->device_scale) || !(out->device_scale > 0.0)) {
-				out->device_scale = 0.0;
-			}
-			// Top level, before the window list.
-			const char *windows = strstr(json, "\"windows\":");
-			const char *lm = strstr(json, "\"layout_mode\":\"");
-			out->layout_mode = 0;
-			if (lm != nullptr && (windows == nullptr || lm < windows)) {
-				lm += strlen("\"layout_mode\":\"");
-				if (strncmp(lm, "logical\"", 8) == 0) {
-					out->layout_mode = U_WL_LAYOUT_MODE_LOGICAL;
-				} else if (strncmp(lm, "physical\"", 9) == 0) {
-					out->layout_mode = U_WL_LAYOUT_MODE_PHYSICAL;
-				}
-			}
-			out->monitor[0] = (int32_t)mx;
-			out->monitor[1] = (int32_t)my;
-			out->monitor[2] = (int32_t)mw;
-			out->monitor[3] = (int32_t)mh;
-			// Extension v9+ (runtime#1748). JSON.stringify writes no spaces.
-			const char *ms = strstr(obj, "\"move_sync\":true");
-			out->move_sync = ms != nullptr && ms < end;
-		}
-	}
+          // Walked by structure, not substring: the spec fixes the keys, not
+          // their order (a KWin publisher sorts them, runtime#1928).
+          dxr_wl_geom_json::Window w;
+          ok = dxr_wl_geom_json::parse_own_window(json, (long)getpid(), &w);
+          if (ok) {
+            memcpy(out->frame, w.frame, sizeof(out->frame));
+            memcpy(out->buffer, w.buffer, sizeof(out->buffer));
+            memcpy(out->monitor, w.monitor, sizeof(out->monitor));
+            out->monitor_scale = w.monitor_scale;
+            out->device_scale = w.device_scale;
+            out->layout_mode = w.layout_mode;
+            out->move_sync = w.move_sync;
+          }
+        }
 	dbus_message_unref(reply);
 	return ok;
 }
