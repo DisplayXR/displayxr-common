@@ -81,6 +81,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_lattice_test COMMAND displayxr_linux_window_lattice_test)
 
+    # This process's window out of the geometry publisher's payload
+    # (dxr_wl_geom_json.h, pure): any key order, runtime#1928.
+    add_executable(displayxr_linux_window_geom_json_test linux_window_geom_json_test.cpp)
+    target_include_directories(displayxr_linux_window_geom_json_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux/xrt_aux")
+    set_target_properties(displayxr_linux_window_geom_json_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_geom_json_test COMMAND displayxr_linux_window_geom_json_test)
+
     # The two Wayland scale factors (dxr_wl_scale.h, pure) in both of mutter's
     # layout modes: device px per SURFACE unit (sizing) and per STAGE px
     # (positions, the window-geometry extension's rects).
