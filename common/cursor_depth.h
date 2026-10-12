@@ -3,7 +3,7 @@
 /*!
  * @file
  * @brief `dxr::CursorDepth` — the app-side helper for the depth-aware cursor
- *        (`XR_DXR_cursor_depth`, ADR-046 + Amendment 2).
+ *        (`XR_DXR_cursor_depth`, ADR-046 + Amendments 2 and 3).
  *
  * The runtime DRAWS the depth cursor (spec v5, Amendment 2 §B); the app only
  * owns the depth under it. What is left for an app is bookkeeping that every
@@ -18,7 +18,8 @@
  *                                                      // setPlatform(dxr::cursorPlatformX11(dpy, win))
  *     cursor.setRayCast([&](const dxr::CursorRay& r) -> std::optional<float> {
  *         float t; return myScene.raycast(r.origin, r.dir, t) ? std::optional<float>(t) : std::nullopt;
- *     });                                              // or useDepthLayer(true), or setHitTest(...)
+ *     });                                              // or useDepthLayer(true), useMeasuredDisparity(true),
+ *                                                      // or setHitTest(...)
  *     // per frame, around xrLocateViews:
  *     cursor.chain(locateInfo, viewState);
  *     xrLocateViews(session, &locateInfo, &viewState, cap, &n, views);
@@ -62,6 +63,17 @@
 #endif
 
 namespace dxr {
+
+/*!
+ * XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR (spec v7, ADR-046 Amendment 3).
+ * Spelled as a value so a consumer whose vendored header is v5/v6 still
+ * compiles; the helper only sends it to a runtime that reported v7+.
+ */
+inline constexpr XrCursorDepthSourceKindDXR kCursorDepthSourceMeasuredDisparity = (XrCursorDepthSourceKindDXR)2;
+#if XR_DXR_cursor_depth_SPEC_VERSION >= 7
+static_assert(kCursorDepthSourceMeasuredDisparity == XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR,
+              "MEASURED_DISPARITY is source kind 2");
+#endif
 
 // ---------------------------------------------------------------------------
 // Pure geometry
@@ -368,7 +380,20 @@ public:
      * submits (XR_KHR_composition_layer_depth, projection layer in the locate
      * space). No hit test runs. Ignored below v2.
      */
-    void useDepthLayer(bool on) { m_depthLayer = on; }
+    void useDepthLayer(bool on) { setSource(Source::DepthLayer, on); }
+
+    /*!
+     * Spec v7 (ADR-046 Amendment 3): for stereo content with NO depth (SBS /
+     * stereo video, stereo photos, camera pairs). The runtime measures the
+     * disparity under the cursor between the two outermost submitted views;
+     * no hit test runs and the hint carries no point. Low confidence (flat
+     * or repetitive texture) = the display plane = the OS cursor stays.
+     * The request is per frame, so toggling this off stops all runtime cost
+     * from the next frame. Below v7 it is ignored (the ray cast / hit test,
+     * if any, is used instead). Replaces useDepthLayer(true) and vice versa.
+     */
+    void useMeasuredDisparity(bool on) { setSource(Source::MeasuredDisparity, on); }
+    bool measuredDisparity() const { return m_sourceKind == Source::MeasuredDisparity; }
 
     void setRayCast(RayCastFn fn) { m_rayCast = std::move(fn); }
     void setHitTest(HitTestFn fn) { m_hitTest = std::move(fn); }
@@ -408,7 +433,12 @@ public:
             m_hint.cursorHeight = m_height;
             m_hint.hasContent = XR_FALSE;
             m_hint.nearestPoint = {0.0f, 0.0f, 0.0f};
-            const bool layer = m_depthLayer && m_spec >= 2;
+            XrCursorDepthSourceKindDXR runtimeSource = XR_CURSOR_DEPTH_SOURCE_APP_POINT_DXR;
+            if (m_sourceKind == Source::DepthLayer && m_spec >= 2)
+                runtimeSource = XR_CURSOR_DEPTH_SOURCE_SUBMITTED_DEPTH_DXR;
+            else if (m_sourceKind == Source::MeasuredDisparity && m_spec >= 7)
+                runtimeSource = kCursorDepthSourceMeasuredDisparity;
+            const bool layer = runtimeSource != XR_CURSOR_DEPTH_SOURCE_APP_POINT_DXR;
             if (!layer) {
                 std::optional<XrVector3f> hit = hitTest(uv);
                 if (hit) {
@@ -420,7 +450,7 @@ public:
             if (layer) {
                 m_source = detail::makeXr<XrCursorDepthSourceDXR>(XR_TYPE_CURSOR_DEPTH_SOURCE_DXR);
                 m_source.next = tail;
-                m_source.source = XR_CURSOR_DEPTH_SOURCE_SUBMITTED_DEPTH_DXR;
+                m_source.source = runtimeSource;
                 tail = &m_source;
             }
             if (m_chainOptions && m_spec >= 3) {
@@ -490,6 +520,21 @@ public:
     const XrCursorDepthDrawStateDXR &drawState() const { return m_drawState; }
 
 private:
+    //! Who finds the content under the cursor.
+    enum class Source
+    {
+        AppPoint,          //!< the ray cast / hit test (or none)
+        DepthLayer,        //!< spec v2: SUBMITTED_DEPTH
+        MeasuredDisparity, //!< spec v7: MEASURED_DISPARITY
+    };
+    void setSource(Source s, bool on)
+    {
+        if (on)
+            m_sourceKind = s;
+        else if (m_sourceKind == s)
+            m_sourceKind = Source::AppPoint;
+    }
+
     std::optional<XrVector3f> hitTest(XrVector2f uv) const
     {
         if (m_prevCount < 2) return std::nullopt; // 2D or no previous locate: nothing to hint
@@ -533,7 +578,7 @@ private:
     bool m_inCanvas = false;
     float m_height = 0.03f;
     XrVector2f m_bodyOffset = kCursorArrowBodyOffset;
-    bool m_depthLayer = false;
+    Source m_sourceKind = Source::AppPoint;
     bool m_chainOptions = false;
     bool m_wantPlacement = false;
     bool m_hintChained = false;
