@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /*!
  * @file
- * @brief  Contract test for cursor_depth.h (dxr::CursorDepth, XR_DXR_cursor_depth v5).
+ * @brief  Contract test for cursor_depth.h (dxr::CursorDepth, XR_DXR_cursor_depth v5-v7).
  *
  * The pure parts: pointer -> canvas UV, the footprint (same rule as the
  * runtime / web SDK), footprint rays against a known Kooima pair (built the
@@ -417,6 +417,91 @@ testNearestHit()
     CHECK(casts == 0 && c.hint().hasContent == XR_FALSE, "2D: no rays");
 }
 
+static const XrCursorDepthSourceDXR *
+findSource(const XrViewLocateInfo &li)
+{
+    for (const Base *b = static_cast<const Base *>(li.next); b != nullptr; b = static_cast<const Base *>(b->next))
+        if (b->type == XR_TYPE_CURSOR_DEPTH_SOURCE_DXR) return reinterpret_cast<const XrCursorDepthSourceDXR *>(b);
+    return nullptr;
+}
+
+static void
+testMeasuredDisparity()
+{
+    XrView v[2] = {kooima({-0.032f, 0, 0.6f}), kooima({0.032f, 0, 0.6f})};
+    int casts = 0;
+    auto rayCast = [&](const dxr::CursorRay &) -> std::optional<float> {
+        casts++;
+        return 1.0f;
+    };
+    { // v7: the source struct carries MEASURED_DISPARITY; no app hit test, no point.
+        dxr::CursorDepth c;
+        c.enable(7);
+        c.setPointerUV(0.4f, 0.6f);
+        c.setRayCast(rayCast);
+        c.useMeasuredDisparity(true);
+        CHECK(c.measuredDisparity(), "measured source selected");
+        c.afterLocate(v, 2);
+        casts = 0;
+        XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+        XrViewState vs{XR_TYPE_VIEW_STATE};
+        c.chain(li, vs);
+        const XrCursorDepthSourceDXR *src = findSource(li);
+        CHECK(src && src->source == XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR, "v7: source = MEASURED (2)");
+        CHECK(casts == 0 && c.hint().hasContent == XR_FALSE, "v7 measured: no app hit test, no point");
+        CHECK(c.hint().cursorUV.x == 0.4f && c.hint().cursorUV.y == 0.6f, "cursorUV still sent");
+
+        // Pointer off the canvas: nothing chained on the locate (zero runtime cost).
+        c.setPointerUV(-0.1f, 0.5f);
+        XrViewLocateInfo li2{XR_TYPE_VIEW_LOCATE_INFO};
+        c.chain(li2, vs);
+        CHECK(li2.next == nullptr && findSource(li2) == nullptr, "off the canvas: no request");
+
+        // Off again: the next frame carries no source and the hit test is back.
+        c.setPointerUV(0.4f, 0.6f);
+        c.useMeasuredDisparity(false);
+        XrViewLocateInfo li3{XR_TYPE_VIEW_LOCATE_INFO};
+        c.chain(li3, vs);
+        CHECK(findSource(li3) == nullptr && casts == 20, "measured off: no source, ray cast resumes");
+    }
+    { // v6 runtime: measured is not understood -> not sent; the ray cast is the fallback.
+        dxr::CursorDepth c;
+        c.enable(6);
+        c.setPointerUV(0.5f, 0.5f);
+        c.setRayCast(rayCast);
+        c.useMeasuredDisparity(true);
+        c.afterLocate(v, 2);
+        casts = 0;
+        XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+        XrViewState vs{XR_TYPE_VIEW_STATE};
+        c.chain(li, vs);
+        CHECK(findSource(li) == nullptr && casts == 20, "v6: no measured request, ray cast used");
+    }
+    { // The two runtime sources replace each other; turning off the inactive one is a no-op.
+        dxr::CursorDepth c;
+        c.enable(7);
+        c.setPointerUV(0.5f, 0.5f);
+        c.useDepthLayer(true);
+        c.useMeasuredDisparity(true);
+        XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+        XrViewState vs{XR_TYPE_VIEW_STATE};
+        c.chain(li, vs);
+        const XrCursorDepthSourceDXR *src = findSource(li);
+        CHECK(src && src->source == XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR, "last call wins (measured)");
+        c.useDepthLayer(false);
+        XrViewLocateInfo li2{XR_TYPE_VIEW_LOCATE_INFO};
+        c.chain(li2, vs);
+        src = findSource(li2);
+        CHECK(src && src->source == XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR,
+              "useDepthLayer(false) leaves measured selected");
+        c.useDepthLayer(true);
+        XrViewLocateInfo li3{XR_TYPE_VIEW_LOCATE_INFO};
+        c.chain(li3, vs);
+        src = findSource(li3);
+        CHECK(src && src->source == XR_CURSOR_DEPTH_SOURCE_SUBMITTED_DEPTH_DXR, "last call wins (depth layer)");
+    }
+}
+
 int
 main()
 {
@@ -427,6 +512,7 @@ main()
     testChainOrder();
     testShowHide();
     testNearestHit();
+    testMeasuredDisparity();
     if (g_failures == 0) std::printf("cursor_depth_test: all checks passed\n");
     return g_failures == 0 ? 0 : 1;
 }

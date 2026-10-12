@@ -778,6 +778,13 @@ cursor.afterLocate(views.data(), activeViewCount);// hides the OS cursor exactly
   views through the cursor's footprint and keeps the hit nearest the viewer), `setHitTest` (full
   control: you get the views, the UV and the ready-made rays), or `useDepthLayer(true)` (spec v2:
   the runtime reads the depth you submit with `XR_KHR_composition_layer_depth`).
+  For stereo content with **no depth at all** (SBS / stereo video, stereo photos, camera pairs),
+  `useMeasuredDisparity(true)` (spec v7, ADR-046 Amendment 3): the runtime block-matches a
+  cursor-sized patch between the two outermost views you submit and lifts the cursor over the
+  nearest *confident* disparity; flat or repetitive texture leaves the cursor on the glass (the OS
+  cursor). The request is per frame, so turning it off costs nothing from the next frame. Below v7
+  it is not sent (the ray cast / hit test, if set, is the fallback). In-process native compositors
+  only; IPC/service and display-zones frames report no content.
 - **Look:** `setSprite(swapchain, hotSpot, sizeMeters, aspect)`; the default (`XR_NULL_HANDLE`)
   is the runtime's own look, the OS cursor's shape or the classic arrow. The footprint follows
   the sprite: the arrow's is the tip plus a ring around its body, the same rule as the runtime

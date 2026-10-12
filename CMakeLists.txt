@@ -211,7 +211,10 @@ else()
         # XR_DXR_cursor_depth.h SPEC_VERSION 5 (the runtime-drawn cursor's
         # XrCursorDepthDrawInfoDXR / XrCursorDepthDrawStateDXR), which
         # common/cursor_depth.h needs.
-        GIT_TAG af2de88348ab062a21344bf4d27c19eba40dfd8a
+        # Bumped 2026-10-12 to displayxr-extensions@main (runtime 1d7fd8b2a):
+        # XR_DXR_cursor_depth.h SPEC_VERSION 7 (XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR,
+        # ADR-046 Amendment 3), which CursorDepth::useMeasuredDisparity() sends.
+        GIT_TAG 722b47b6e555991487df1d7880ccb94b1e8fdaaa
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)
