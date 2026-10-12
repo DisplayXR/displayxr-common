@@ -428,61 +428,34 @@ bool ReleaseQuadSwapchainImage(XrSessionManager& xr) {
 }
 
 void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt) {
-    // One-time configure of the sequencer (0.18 s SmoothStep ease).
+    // Windows convenience wrapper over the platform-neutral dxr::ModeSwitch::step()
+    // (mode_switch.h) — the macOS / Linux / Android legs call step() directly with
+    // the same arguments, so every platform eases a switch identically.
     if (!xr.modeSwitchConfigured) {
-        xr.modeSwitch.configure(0.18f, dxr::ModeSwitchEasing::SmoothStep);
+        xr.modeSwitch.configure(dxr::kModeSwitchDefaultDurationS, dxr::ModeSwitchEasing::SmoothStep);
         xr.modeSwitchConfigured = true;
     }
-
-    const float steady = state.viewParams.steadyIpdFactor;
-
-    // Active view count of a mode (1 = 2D/mono, >1 = 3D); clamp empty/OOB to 1.
-    auto vcOf = [&](uint32_t m) -> uint32_t {
-        return (m < xr.renderingModeCount && xr.renderingModeViewCounts[m] > 0)
-                   ? xr.renderingModeViewCounts[m] : 1;
-    };
 
     // Funnel the V-cycle and the 0-8 absolute requests into one target. Absolute
     // wins if both fired the same frame. Clear the flags as we consume them.
     int32_t target = -1;
     if (state.cycleRenderingModeRequested) {
         state.cycleRenderingModeRequested = false;
-        if (xr.renderingModeCount > 0)
-            target = (int32_t)((xr.currentModeIndex + 1) % xr.renderingModeCount);
+        target = dxr::ModeSwitch::cycleTarget(xr.currentModeIndex, xr.renderingModeCount);
     }
     if (state.absoluteRenderingModeRequested >= 0) {
         int32_t a = state.absoluteRenderingModeRequested;
         state.absoluteRenderingModeRequested = -1;
         if ((uint32_t)a < xr.renderingModeCount) target = a;
     }
+    const bool canRequest = xr.session != XR_NULL_HANDLE && xr.pfnRequestDisplayRenderingModeEXT != nullptr;
 
-    if (target >= 0 && xr.session != XR_NULL_HANDLE &&
-        xr.pfnRequestDisplayRenderingModeEXT != nullptr) {
-        // Hand the switch to the sequencer. currentIpd = the disparity actually on
-        // screen right now: the last ramp output while a ramp is in flight, else
-        // the steady value (what the idle branch below renders). Do NOT use the
-        // bare modeSwitch.ipd() — it is 0 until the first ramp ever runs, so the
-        // FIRST 3D->2D switch would ramp 0->0 and fire immediately = a one-time
-        // snap from full disparity. steadyIpd = the tuned target to restore to.
-        const float currentIpd = xr.modeSwitch.active() ? xr.modeSwitch.ipd() : steady;
-        xr.modeSwitch.request((uint32_t)target, vcOf((uint32_t)target),
-                              xr.currentModeIndex, vcOf(xr.currentModeIndex),
-                              currentIpd, steady);
-    }
-
-    if (xr.modeSwitch.active()) {
-        float ipd = steady;
-        bool fire = false;
-        uint32_t mode = xr.currentModeIndex;
-        xr.modeSwitch.update(dt, &ipd, &fire, &mode);
-        state.viewParams.ipdFactor = ipd; // the rig render value this frame
-        if (fire && mode != xr.currentModeIndex && xr.session != XR_NULL_HANDLE &&
-            xr.pfnRequestDisplayRenderingModeEXT != nullptr) {
-            xr.pfnRequestDisplayRenderingModeEXT(xr.session, mode);
-        }
-    } else {
-        // Idle: render the tuned steady value (tracks +/- adjustments immediately).
-        state.viewParams.ipdFactor = steady;
+    const dxr::ModeSwitchFrame f = xr.modeSwitch.step(
+        dt, canRequest ? target : -1, xr.renderingModeCount, xr.renderingModeViewCounts,
+        xr.currentModeIndex, state.viewParams.steadyIpdFactor);
+    state.viewParams.ipdFactor = f.ipd; // the rig render value this frame
+    if (f.fire && canRequest) {
+        xr.pfnRequestDisplayRenderingModeEXT(xr.session, f.mode);
     }
 }
 

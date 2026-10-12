@@ -567,6 +567,65 @@ static void test_mode_switch()
         }
         CHECK(fireCount == 1 && firedMode == 2, "3D->3D must fire the new mode once");
     }
+
+    // --- step(): the one-call per-frame glue every platform uses. ---
+    {
+        CHECK(dxr::ModeSwitch::cycleTarget(1, 3) == 2 && dxr::ModeSwitch::cycleTarget(2, 3) == 0 &&
+                  dxr::ModeSwitch::cycleTarget(0, 0) == -1,
+              "cycleTarget must wrap and reject an empty mode list");
+
+        // Modes: 0 = 2D (1 view), 1 = stereo (2 views), 2 = quad (4 views).
+        const uint32_t vcs[3] = {1, 2, 4};
+        const float steady = 0.8f; // user-tuned, NOT 1.0
+        dxr::ModeSwitch ms;        // no configure(): defaults must be the shared ramp
+        uint32_t current = 1;
+
+        // The FIRST request of a fresh sequencer being 3D->2D must ramp from the
+        // on-screen steady disparity (the 4307382 first-press snap regression).
+        {
+            dxr::ModeSwitch fresh;
+            dxr::ModeSwitchFrame g = fresh.step(DT, 0, 3, vcs, 1, steady);
+            CHECK(!g.fire && g.ipd > 0.1f, "fresh 3D->2D must not snap flat on the first frame");
+        }
+
+        // Idle: steady verbatim, never fires.
+        dxr::ModeSwitchFrame f = ms.step(DT, -1, 3, vcs, current, steady);
+        CHECK(!f.fire && f.ipd == steady && !ms.active(), "idle step: steady ipd, no fire");
+
+        // V from stereo -> mode 2 (3D->3D): fires at once, keeps steady disparity.
+        f = ms.step(DT, dxr::ModeSwitch::cycleTarget(current, 3), 3, vcs, current, steady);
+        CHECK(f.fire && f.mode == 2 && f.ipd > steady - 1e-4f, "3D->3D step fires immediately");
+        current = 2; // the runtime's RenderingModeChanged event
+        while (ms.active()) ms.step(DT, -1, 3, vcs, current, steady);
+
+        // 0 (absolute) from quad -> 2D: the FIRST frame after the request must
+        // still carry nearly full disparity (a ramp, not a snap), and the fire
+        // comes only on landing at zero.
+        f = ms.step(DT, 0, 3, vcs, current, steady);
+        CHECK(!f.fire && f.ipd > 0.0f && f.ipd < steady, "3D->2D step: first frame is mid-ramp, not fired");
+        int frames = 1;
+        uint32_t fires = 0;
+        while (ms.active() && frames < 20) {
+            f = ms.step(DT, -1, 3, vcs, current, steady);
+            frames++;
+            if (f.fire) { fires++; CHECK(f.mode == 0 && f.ipd < 1e-3f, "3D->2D fires mode 0 at zero disparity"); }
+        }
+        CHECK(fires == 1 && frames >= 3 && frames <= 4, "default ramp = 0.18 s ~ 3 frames at DT, one fire");
+        current = 0;
+
+        // Out-of-range request is ignored.
+        f = ms.step(DT, 7, 3, vcs, current, steady);
+        CHECK(!f.fire && !ms.active(), "out-of-range request must be ignored");
+
+        // A request for the mode the runtime is already in never fires.
+        f = ms.step(DT, 0, 3, vcs, current, steady);
+        CHECK(!f.fire, "request for the current mode must not fire");
+        while (ms.active()) ms.step(DT, -1, 3, vcs, current, steady);
+
+        // Null view counts: every mode reads as 1 view -> same-dim, fires now.
+        f = ms.step(DT, 1, 3, nullptr, current, steady);
+        CHECK(f.fire && f.mode == 1, "null view-count table must still route the request");
+    }
 }
 
 // Off-axis projection self-test: display-rig math, plus display<->camera rig
