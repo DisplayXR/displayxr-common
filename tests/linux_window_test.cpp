@@ -450,6 +450,47 @@ test_x11_initial_rect(bool header_bar)
 	win.destroy();
 }
 
+/*!
+ * start_hidden (workspace session): a panel-sized desc — the shape that would
+ * otherwise go fullscreen on the panel — creates a bindable window that is
+ * never mapped, whose size is still the desc size, and that pumping does not
+ * show.
+ */
+static void
+test_x11_start_hidden()
+{
+	DxrLinuxWindowDesc desc;
+	desc.width = 800;
+	desc.height = 500;
+	desc.panel_left = 0;
+	desc.panel_top = 0;
+	desc.panel_width = 800; // panel-sized: the fullscreen shape
+	desc.panel_height = 500;
+	desc.title = "linux_window_test (start hidden)";
+	desc.start_hidden = true;
+
+	DxrLinuxWindow win;
+	CHECK(win.create(DxrWindowBackend::X11, desc), "create X11 window (start_hidden)");
+	if (win.backend() != DxrWindowBackend::X11) {
+		return;
+	}
+	uint32_t w = 0, h = 0;
+	CHECK(win.current_size(&w, &h) && w == 800 && h == 500, "start_hidden: content size is the desc size");
+	const auto *bind = static_cast<const XrXlibWindowBindingCreateInfoDXR *>(win.session_binding_chain(nullptr));
+	CHECK(bind != nullptr && bind->window == win.x11_bound_window(), "start_hidden: the window is still bindable");
+	bool running = true;
+	for (int i = 0; i < 10; i++) {
+		win.pump_events({}, &running);
+	}
+	Display *dpy = win.x11_display();
+	XSync(dpy, False);
+	XWindowAttributes wa = {};
+	CHECK(XGetWindowAttributes(dpy, win.x11_bound_window(), &wa) != 0 && wa.map_state == IsUnmapped,
+	      "start_hidden: the window is never mapped");
+	CHECK(running, "start_hidden: no close request");
+	win.destroy();
+}
+
 static void
 test_x11_window(bool demo_shape)
 {
@@ -836,6 +877,56 @@ test_wayland_panel_fullscreen(const char *spec)
 	win.destroy();
 }
 
+/*!
+ * start_hidden on Wayland: the toplevel is created and configured but no
+ * buffer is ever attached and the panel fullscreen is never requested — not
+ * even by pump()'s 240-pump "never mapped" fallback.
+ * @p panel: "x,y,w,h:name" from DXR_LW_TEST_WAYLAND_PANEL, or null.
+ */
+static void
+test_wayland_start_hidden(const char *panel)
+{
+	DxrLinuxWindowDesc desc;
+	desc.width = 640;
+	desc.height = 360;
+	desc.title = "linux_window_test (wayland start hidden)";
+	desc.fullscreen_on_wayland = true;
+	desc.start_hidden = true;
+	int px = 0, py = 0;
+	unsigned pw = 0, ph = 0;
+	char name[64] = {0};
+	const bool have_panel =
+	    panel != nullptr && std::sscanf(panel, "%d,%d,%u,%u:%63s", &px, &py, &pw, &ph, name) == 5;
+	if (have_panel) {
+		desc.width = pw;
+		desc.height = ph;
+		desc.panel_left = px;
+		desc.panel_top = py;
+		desc.panel_width = pw;
+		desc.panel_height = ph;
+	}
+
+	DxrLinuxWindow win;
+	CHECK(win.create(DxrWindowBackend::Wayland, desc), "create Wayland window (start_hidden)");
+	if (win.backend() != DxrWindowBackend::Wayland) {
+		return;
+	}
+	uint32_t w = 0, h = 0;
+	CHECK(win.current_size(&w, &h) && w > 0 && h > 0, "wayland start_hidden: a declared size");
+	if (have_panel) {
+		CHECK(w == pw && h == ph, "wayland start_hidden: the declared buffer is still the panel mode");
+	}
+	bool running = true;
+	for (int i = 0; i < 260 && running; i++) { // past the 240-pump fallback
+		win.pump_events({}, &running);
+		usleep(1000);
+	}
+	CHECK(!win.is_fullscreen(), "wayland start_hidden: fullscreen is never requested");
+	CHECK(win.current_output_name().empty(), "wayland start_hidden: the surface never entered an output");
+	CHECK(running, "wayland start_hidden: no close request");
+	win.destroy();
+}
+
 static void
 test_wayland_window()
 {
@@ -926,6 +1017,7 @@ main()
 			test_x11_initial_rect(false);
 			test_x11_initial_rect(true);
 			test_x11_text_dnd_cursor();
+			test_x11_start_hidden();
 		}
 	} else {
 		std::printf("X11 window checks skipped (set DXR_LW_TEST_X11=1 under xvfb-run to run them)\n");
@@ -937,6 +1029,7 @@ main()
 		CHECK(p.wayland_connects, "DXR_LW_TEST_WAYLAND=1 needs a compositor (e.g. weston --backend=headless)");
 		if (p.wayland_connects) {
 			test_wayland_window();
+			test_wayland_start_hidden(std::getenv("DXR_LW_TEST_WAYLAND_PANEL"));
 			if (const char *panel = std::getenv("DXR_LW_TEST_WAYLAND_PANEL")) {
 				test_wayland_panel_fullscreen(panel);
 			}
