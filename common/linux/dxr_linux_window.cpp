@@ -924,6 +924,23 @@ DxrLinuxWindow::create_x11(const DxrLinuxWindowDesc &desc)
 		x11_set_undecorated(m_x_display, m_x_window);
 	}
 
+	// start_hidden (workspace session): everything above — the window, its
+	// properties, the hints the WM would read at map time — exists so the
+	// window can be bound, but it is never mapped, moved or fullscreened, and
+	// the settle waits below (which only make sense for a mapped window) are
+	// skipped. XGetWindowAttributes answers an unmapped window's created size,
+	// so current_size() is the desc size.
+	if (desc.start_hidden) {
+		m_x_drag_at_x = screenLeft;
+		m_x_drag_at_y = screenTop;
+		x11_layout_content();
+		XFlush(m_x_display);
+		DXRW_INFO("Created app-owned X11 window 0x%lx: %ux%u, HIDDEN (start_hidden — never mapped; the "
+		          "workspace composites this app)",
+		          m_x_window, desc.width, desc.height);
+		return true;
+	}
+
 	XMapWindow(m_x_display, m_x_window);
 	XFlush(m_x_display);
 
@@ -3855,7 +3872,9 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 		// from the start (m_wl_fullscreen_mode_w/h stay set), so the
 		// swapchain the runtime creates at xrCreateSession is already the
 		// fullscreen one and the transition does not resize it.
-		m_wl_fs_deferred = true;
+		// start_hidden: keep the panel-mode declaration (current_size() is
+		// unchanged) but never arm the request — pump() would fire it.
+		m_wl_fs_deferred = !desc.start_hidden;
 		m_wl_fullscreen = false;
 		m_wl_fs_on_panel = true;
 		for (const auto &out : m_wl_outputs) {
@@ -3868,10 +3887,21 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 				m_wl_config_h = (int32_t)((double)out.mode_h / s + 0.5);
 			}
 		}
-		DXRW_INFO("Wayland: fullscreen on %s requested — DEFERRED until the surface is mapped (mutter "
-		          "discards the output of a set_fullscreen made before the first buffer); expect one "
-		          "windowed frame first",
-		          wl_output_label(m_wl_panel_output).c_str());
+		if (desc.start_hidden) {
+			DXRW_INFO("Wayland: start_hidden — the surface is never mapped and fullscreen on %s is never "
+			          "requested (the workspace composites this app); the declared size stays the panel mode",
+			          wl_output_label(m_wl_panel_output).c_str());
+		} else {
+			DXRW_INFO("Wayland: fullscreen on %s requested — DEFERRED until the surface is mapped "
+			          "(mutter discards the output of a set_fullscreen made before the first buffer); "
+			          "expect one windowed frame first",
+			          wl_output_label(m_wl_panel_output).c_str());
+		}
+	} else if (desc.fullscreen_on_wayland && desc.start_hidden) {
+		// start_hidden with no panel output matched: no request at all.
+		m_wl_fullscreen = false;
+		m_wl_fs_on_panel = false;
+		DXRW_INFO("Wayland: start_hidden — no fullscreen request (the workspace composites this app)");
 	} else if (desc.fullscreen_on_wayland) {
 		// No panel output matched: there is no output to lose, so the old
 		// pre-map request is as good as any — the compositor's choice.
@@ -4008,8 +4038,9 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 	DXRW_INFO("Created app-owned Wayland surface %p (xdg toplevel, %s), content size %dx%d @ %u mHz, "
 	          "decorations %s",
 	          (void *)m_wl_surface,
-	          m_wl_fs_deferred ? "fullscreen on the panel once mapped"
-	                           : (desc.fullscreen_on_wayland ? "fullscreen" : "windowed"),
+	          desc.start_hidden  ? "HIDDEN — start_hidden, never mapped"
+	          : m_wl_fs_deferred ? "fullscreen on the panel once mapped"
+	                             : (desc.fullscreen_on_wayland ? "fullscreen" : "windowed"),
 	          m_wl_config_w,
 	          m_wl_config_h, m_wl_refresh_mhz,
 #ifdef DXR_APP_HAVE_WL_CHROME
@@ -4024,7 +4055,7 @@ DxrLinuxWindow::create_wayland(const DxrLinuxWindowDesc &desc)
 	// output's mode), so this fires when no output matched — then the buffer
 	// is the LOGICAL configure size and the compositor will resample it.
 	// One WARN, at create time — never per frame.
-	if (desc.fullscreen_on_wayland && desc.panel_width > 0 && desc.panel_height > 0) {
+	if (desc.fullscreen_on_wayland && !desc.start_hidden && desc.panel_width > 0 && desc.panel_height > 0) {
 		uint32_t dw = 0, dh = 0;
 		wl_declared_size(&dw, &dh);
 		if (dw != desc.panel_width || dh != desc.panel_height) {

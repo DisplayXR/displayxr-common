@@ -436,6 +436,28 @@ struct DxrLinuxWindowDesc
 	bool has_position = false;
 	int32_t x = 0;
 	int32_t y = 0;
+
+	/*!
+	 * Create the window but never show it — for an app launched into the
+	 * DisplayXR workspace (`DISPLAYXR_WORKSPACE_SESSION=1`). There the app is
+	 * an IPC client: the service composites its swapchain into the shared
+	 * spatial surface, so its own window is never a render target and must
+	 * not flash up (fullscreen on the 3D panel, for a panel-sized desc).
+	 *
+	 * X11: the window (and header-bar child) is created and fully configured
+	 * — so it can be bound through XR_DXR_xlib_window_binding — but never
+	 * XMapWindow'd, never moved and never sent the fullscreen request; the
+	 * create-time settle waits are skipped too. Wayland: the xdg_toplevel is
+	 * created and its initial configure acked (the role-only commit attaches
+	 * no buffer, so it does not map), but the panel fullscreen is never armed
+	 * or requested — pump() will not fire it. The surface stays unmapped,
+	 * which is legal: the runtime's IPC path never presents to it.
+	 *
+	 * current_size() still answers the desc size (the panel MODE for a
+	 * panel-sized Wayland desc, exactly as when shown), so swapchain sizing is
+	 * unchanged. Default false: behaviour is exactly as before.
+	 */
+	bool start_hidden = false;
 };
 
 /*!
