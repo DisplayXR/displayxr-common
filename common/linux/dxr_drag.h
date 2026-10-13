@@ -593,13 +593,27 @@ enum class WlDragMode
 
 struct WlDragEnv
 {
-	//! The compositor is mutter (it advertises gtk_shell1, or the
-	//! window-geometry extension is running): its move grab ends only on
-	//! button 1 (or its resize button) — see the file comment.
-	bool mutter = false;
-	//! The window-geometry extension offers the pointer drag (capability 4).
-	bool shell_pointer_drag = false;
+  //! The compositor is mutter: its move grab ends only on button 1 (or its
+  //! resize button) — see the file comment.
+  bool mutter = false;
+  //! The window-geometry extension offers the pointer drag (capability 4).
+  bool shell_pointer_drag = false;
 };
+
+/*!
+ * The drag environment from what the client can see: whether the compositor
+ * advertises gtk_shell1, and whether the window-geometry publisher offers the
+ * pointer drag. Only gtk_shell1 says mutter — mutter advertises it to every
+ * client. A publisher is not evidence: KWin's publisher offers the drag table
+ * too, and KWin ends a move grab on the release of whichever button started
+ * it, so a secondary button goes to xdg_toplevel.move there (runtime#1928).
+ */
+inline WlDragEnv wl_drag_env_for(bool gtk_shell, bool publisher_pointer_drag) {
+  WlDragEnv env;
+  env.mutter = gtk_shell;
+  env.shell_pointer_drag = publisher_pointer_drag;
+  return env;
+}
 
 /*!
  * The mode for a content drag on @p button (1 = left, 2 = middle, 3 = right,

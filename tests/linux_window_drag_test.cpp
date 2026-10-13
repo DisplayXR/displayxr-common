@@ -463,7 +463,18 @@ test_wayland()
 	CHECK(D::wl_drag_mode(8, mutter_new) == M::Nobody); // no Clutter mask
 	CHECK(D::wl_drag_mode(3, other) == M::CompositorMove);
 	CHECK(D::wl_drag_mode(8, other) == M::CompositorMove);
-	{
+        // Only gtk_shell1 says mutter (runtime#1928): KWin with its publisher
+        // (drag table, no pointer drag) runs a right-button drag as its own
+        // move.
+        CHECK(D::wl_drag_env_for(false, false).mutter == false);
+        CHECK(D::wl_drag_mode(3, D::wl_drag_env_for(false, false)) ==
+              M::CompositorMove);
+        CHECK(D::wl_drag_mode(3, D::wl_drag_env_for(false, true)) ==
+              M::CompositorMove);
+        CHECK(D::wl_drag_mode(3, D::wl_drag_env_for(true, true)) ==
+              M::ShellPointer);
+        CHECK(D::wl_drag_mode(3, D::wl_drag_env_for(true, false)) == M::Nobody);
+        {
 		// Compositor move: leave at the grab, enter after it: the app is owed
 		// the release it never saw.
 		D::WlContentDrag d;
