@@ -2755,17 +2755,13 @@ DxrLinuxWindow::wl_to_buffer(double lx, double ly, int32_t *bx, int32_t *by) con
 	*by = (int32_t)(ly * sy);
 }
 
-dxr_drag::WlDragEnv
-DxrLinuxWindow::wl_drag_env() const
-{
-	dxr_drag::WlDragEnv env;
-	env.mutter = m_wl_gtk_shell;
+dxr_drag::WlDragEnv DxrLinuxWindow::wl_drag_env() const {
 #ifdef DXR_APP_HAVE_WL_CHROME
-	// The window-geometry extension runs inside GNOME Shell: mutter.
-	env.mutter = env.mutter || m_wl_placement.has_drag_lattice() || m_wl_placement.has_pointer_drag();
-	env.shell_pointer_drag = m_wl_placement.has_pointer_drag();
+  return dxr_drag::wl_drag_env_for(m_wl_gtk_shell,
+                                   m_wl_placement.has_pointer_drag());
+#else
+  return dxr_drag::wl_drag_env_for(m_wl_gtk_shell, false);
 #endif
-	return env;
 }
 
 void
