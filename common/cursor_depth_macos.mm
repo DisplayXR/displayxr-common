@@ -15,6 +15,13 @@
  * from another. The hide is app-wide, but the helper only hides while the
  * pointer is over the canvas (no hint is chained otherwise, so willDraw is
  * false), exactly like the hand-written reference adoption.
+ *
+ * Inactive app: AppKit ignores +[NSCursor hide] while the app is not the
+ * active one, so hovering a background window would show the OS arrow on top
+ * of the runtime-drawn cursor. Win32 and X11 hide per window and are not
+ * affected. While the app is inactive the adapter therefore reports no
+ * pointer: no hint is chained, willDraw drops, the hide is released, and the
+ * user sees the plain OS arrow. Activation is picked up on the next chain().
  */
 #import <AppKit/AppKit.h>
 
@@ -38,6 +45,7 @@ public:
         NSView *view = m_view;
         NSWindow *window = view.window;
         if (view == nil || window == nil) return false;
+        if (![NSApp isActive]) return false; // +[NSCursor hide] would be ignored
         NSPoint pw;
         if ([NSThread isMainThread]) {
             pw = [window mouseLocationOutsideOfEventStream];
