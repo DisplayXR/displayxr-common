@@ -176,3 +176,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     endif()
 endif()
+
+# dxr::GamepadActionsApply contract (gamepad_actions.h): stick deadzone, rising
+# edges, the trigger release latch, and on Windows the pad -> camera path in
+# UpdateCameraMovement. Pure — the OpenXR-calling half is never linked in.
+add_executable(displayxr_gamepad_actions_test gamepad_actions_test.cpp)
+target_link_libraries(displayxr_gamepad_actions_test PRIVATE displayxr::common)
+set_target_properties(displayxr_gamepad_actions_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME displayxr_gamepad_actions_test COMMAND displayxr_gamepad_actions_test)
