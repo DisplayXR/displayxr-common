@@ -252,6 +252,7 @@ endif()
 set(DISPLAYXR_COMMON_SOURCES
     common/atlas_capture.h
     common/view_params.h
+    common/input_state.h  # platform-neutral InputState (input_handler.h includes it)
     common/mip_chain.h
     common/color_policy.cpp # ADR-021/#1589 color-swapchain format rule (device-free)
     common/color_policy.h

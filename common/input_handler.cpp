@@ -16,12 +16,10 @@
 
 using namespace DirectX;
 
-// Monotonic wall-clock seconds — matches macOS NowSec() semantics.
-static double NowSec() {
-    using namespace std::chrono;
-    return (double)duration_cast<microseconds>(
-        high_resolution_clock::now().time_since_epoch()).count() * 1e-6;
-}
+// Monotonic wall-clock seconds — matches macOS NowSec() semantics. One
+// clock for every InputState producer (input_state.h), so the gamepad's
+// lastInputTimeSec stamps compare against the same time base.
+static double NowSec() { return InputStateNowSec(); }
 
 static void MarkUserInput(InputState& state) {
     state.lastInputTimeSec = NowSec();
