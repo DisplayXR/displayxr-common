@@ -52,6 +52,17 @@ struct InputState {
     float cameraPosY = 0.0f;
     float cameraPosZ = 0.0f;  // Start at origin (OpenXR view matrix provides eye offset)
 
+    // Gamepad analog inputs (gamepad_actions.h, /user/gamepad). Written each
+    // frame by dxr::GamepadActionsPoll, consumed by UpdateCameraMovement next
+    // to the WASDQE keys and in the same units. All 0 while no pad holds
+    // /user/gamepad, which leaves keyboard / mouse behaviour exactly as before.
+    float padMoveX = 0.0f;    // left stick X  [-1,1]: strafe (+ = right, like D)
+    float padMoveY = 0.0f;    // left stick Y  [-1,1]: forward (+ = forward, like W)
+    float padLookX = 0.0f;    // right stick X [-1,1]: yaw   (+ = turn right)
+    float padLookY = 0.0f;    // right stick Y [-1,1]: pitch (+ = look up)
+    float padAscend = 0.0f;   // [0,1]: up   (like E) — right shoulder
+    float padDescend = 0.0f;  // [0,1]: down (like Q) — left shoulder
+
     // View reset (spacebar)
     bool resetViewRequested = false;
 
