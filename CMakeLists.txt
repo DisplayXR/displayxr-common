@@ -252,6 +252,10 @@ endif()
 set(DISPLAYXR_COMMON_SOURCES
     common/atlas_capture.h
     common/view_params.h
+    common/input_state.h  # platform-neutral InputState (input_handler.h includes it)
+    common/gamepad_actions.cpp       # OpenXR actions on /user/gamepad -> InputState (every platform)
+    common/gamepad_actions_apply.cpp # its pure sample -> InputState mapping
+    common/gamepad_actions.h
     common/mip_chain.h
     common/color_policy.cpp # ADR-021/#1589 color-swapchain format rule (device-free)
     common/color_policy.h

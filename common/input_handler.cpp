@@ -16,12 +16,10 @@
 
 using namespace DirectX;
 
-// Monotonic wall-clock seconds — matches macOS NowSec() semantics.
-static double NowSec() {
-    using namespace std::chrono;
-    return (double)duration_cast<microseconds>(
-        high_resolution_clock::now().time_since_epoch()).count() * 1e-6;
-}
+// Monotonic wall-clock seconds — matches macOS NowSec() semantics. One
+// clock for every InputState producer (input_state.h), so the gamepad's
+// lastInputTimeSec stamps compare against the same time base.
+static double NowSec() { return InputStateNowSec(); }
 
 static void MarkUserInput(InputState& state) {
     state.lastInputTimeSec = NowSec();
@@ -400,6 +398,19 @@ void UpdateCameraMovement(InputState& state, float deltaTime, float displayHeigh
 
     const float moveSpeed = 0.1f * m2v / state.viewParams.scaleFactor; // Virtual units per second, scaled with zoom
 
+    // Gamepad look (right stick, gamepad_actions.h): full deflection turns at
+    // 90 deg/s. Same sign convention as the mouse drag (stick right = look
+    // right, stick up = look up) and the same pitch clamp. Applied before the
+    // orientation is built so this frame's movement uses the new heading.
+    // Guarded so keyboard-only frames are untouched.
+    if (state.padLookX != 0.0f || state.padLookY != 0.0f) {
+        const float turnRate = 1.5707963f; // rad/s at full deflection
+        state.yaw -= state.padLookX * turnRate * deltaTime;
+        state.pitch += state.padLookY * turnRate * deltaTime;
+        if (state.pitch > 1.4f) state.pitch = 1.4f;
+        if (state.pitch < -1.4f) state.pitch = -1.4f;
+    }
+
     // Build orientation quaternion using the same function as LocateViews,
     // guaranteeing movement vectors match the view rotation exactly.
     XMVECTOR ori = XMQuaternionRotationRollPitchYaw(state.pitch, state.yaw, 0.0f);
@@ -442,6 +453,29 @@ void UpdateCameraMovement(InputState& state, float deltaTime, float displayHeigh
         state.cameraPosX -= up.x * moveSpeed * deltaTime;
         state.cameraPosY -= up.y * moveSpeed * deltaTime;
         state.cameraPosZ -= up.z * moveSpeed * deltaTime;
+    }
+
+    // Gamepad movement (left stick + shoulders, gamepad_actions.h): the same
+    // axes and speed as W/S, A/D, E/Q, scaled by deflection (a full stick ==
+    // a held key). Zero pad fields leave the keyboard path above unchanged.
+    if (state.padMoveY != 0.0f) {
+        const float k = state.padMoveY * moveSpeed * deltaTime;
+        state.cameraPosX += fwd.x * k;
+        state.cameraPosY += fwd.y * k;
+        state.cameraPosZ += fwd.z * k;
+    }
+    if (state.padMoveX != 0.0f) {
+        const float k = state.padMoveX * moveSpeed * deltaTime;
+        state.cameraPosX += rt.x * k;
+        state.cameraPosY += rt.y * k;
+        state.cameraPosZ += rt.z * k;
+    }
+    const float padVertical = state.padAscend - state.padDescend;
+    if (padVertical != 0.0f) {
+        const float k = padVertical * moveSpeed * deltaTime;
+        state.cameraPosX += up.x * k;
+        state.cameraPosY += up.y * k;
+        state.cameraPosZ += up.z * k;
     }
 
     // Teleport animation: exponential ease-out (legacy path used by cube_* apps).

@@ -1,0 +1,191 @@
+// Copyright 2025, The DisplayXR Project and its contributors
+// SPDX-License-Identifier: BSL-1.0
+/*!
+ * @file
+ * @brief  InputState — the app's input/camera state, platform-neutral.
+ *
+ * Split out of input_handler.h so producers that are not Win32 messages
+ * (gamepad_actions.h: OpenXR actions on /user/gamepad) can write the same
+ * state on every platform. input_handler.h includes this header, so existing
+ * consumers see no change.
+ */
+
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <string>
+
+#include <openxr/openxr.h>
+#include "view_params.h"
+
+struct InputState {
+    // Mouse state
+    int mouseX = 0;
+    int mouseY = 0;
+    bool leftButton = false;
+    bool rightButton = false;
+    bool middleButton = false;
+
+    // Mouse drag for camera look
+    bool dragging = false;
+    int dragStartX = 0;
+    int dragStartY = 0;
+    float yaw = 0.0f;    // Camera yaw (radians)
+    float pitch = 0.0f;  // Camera pitch (radians)
+
+    // Keyboard state for WASDQE movement
+    bool keyW = false;
+    bool keyA = false;
+    bool keyS = false;
+    bool keyD = false;
+    bool keyE = false;      // Up
+    bool keyQ = false;      // Down
+    bool keyP = false;      // Parallax toggle (press)
+    bool keyF11 = false;    // Fullscreen toggle (press)
+
+    // Last key pressed for display
+    std::string lastKey;
+
+    // Camera position (updated by movement)
+    float cameraPosX = 0.0f;
+    float cameraPosY = 0.0f;
+    float cameraPosZ = 0.0f;  // Start at origin (OpenXR view matrix provides eye offset)
+
+    // Gamepad analog inputs (gamepad_actions.h, /user/gamepad). Written each
+    // frame by dxr::GamepadActionsPoll, consumed by UpdateCameraMovement next
+    // to the WASDQE keys and in the same units. All 0 while no pad holds
+    // /user/gamepad, which leaves keyboard / mouse behaviour exactly as before.
+    float padMoveX = 0.0f;    // left stick X  [-1,1]: strafe (+ = right, like D)
+    float padMoveY = 0.0f;    // left stick Y  [-1,1]: forward (+ = forward, like W)
+    float padLookX = 0.0f;    // right stick X [-1,1]: yaw   (+ = turn right)
+    float padLookY = 0.0f;    // right stick Y [-1,1]: pitch (+ = look up)
+    float padAscend = 0.0f;   // [0,1]: up   (like E) — right shoulder
+    float padDescend = 0.0f;  // [0,1]: down (like Q) — left shoulder
+
+    // View reset (spacebar)
+    bool resetViewRequested = false;
+
+    // Teleport to clicked point (double-click)
+    bool teleportRequested = false;
+    float teleportMouseX = 0.0f;
+    float teleportMouseY = 0.0f;
+
+    // Teleport animation
+    bool teleportAnimating = false;
+    float teleportTargetX = 0, teleportTargetY = 0, teleportTargetZ = 0;
+
+    // Parallax toggle state
+    bool parallaxEnabled = true;
+
+    // Fullscreen state
+    bool fullscreen = false;
+    bool fullscreenToggleRequested = false;
+
+    // View parameters (IPD, parallax, perspective, scale/zoom)
+    ViewParams viewParams;
+
+    // HUD visibility toggle (TAB key)
+    bool hudVisible = true;
+
+    // Rendering mode REQUESTS (single source of truth lives on the runtime
+    // side — read back as `xr.currentModeIndex` after the runtime's
+    // XrEventDataRenderingModeChangedDXR lands). The keyboard handler emits
+    // transient requests that the main loop translates into
+    // xrRequestDisplayRenderingModeDXR calls; the actual current mode is
+    // never mirrored here.
+    uint32_t renderingModeCount = 0;            // Set from xrEnumerateDisplayRenderingModesDXR
+    bool cycleRenderingModeRequested = false;   // V key / mode button: cycle to next mode
+    int32_t absoluteRenderingModeRequested = -1; // 0-8 keys / config: jump to this mode (-1 = none)
+
+    // Camera vs display mode toggle (C key)
+    bool cameraMode = false;
+    float nominalViewerZ = 0.5f;  // Cached from runtime for camera-mode init
+
+    // Disturbance-free rig round-trip toggle (C key). The keyboard handler sets
+    // the request; UpdateCameraMovement converts the CURRENT rig to its exact
+    // equivalent in the other parameterization (display<->camera) so the
+    // rendered view is unchanged across the toggle. display->camera->display is
+    // an identity, so pressing C repeatedly never moves the scene.
+    bool rigModeToggleRequested = false;
+
+    // Physical CANVAS size in meters (window client area the runtime renders
+    // into) — from XR_DXR_view_rig XrViewDisplayRawDXR::canvasSizeMeters, set by
+    // the app each frame. The rig math runs on the canvas, NOT the full display,
+    // so the C-toggle converter uses this as physical_height_m (else display<->
+    // camera diverge in any non-fullscreen window). 0 = falls back to display.
+    float canvasWidthM = 0.0f;
+    float canvasHeightM = 0.0f;
+
+    // Initial virtual display height, set once by the app at startup. SPACE
+    // resets the rig to exactly this initial display-centric state. 0 = unset
+    // (SPACE then preserves the current vHeight, pre-absolute-reset behavior).
+    float initialVirtualDisplayHeight = 0.0f;
+
+    // Eye tracking mode toggle (T key)
+    bool eyeTrackingModeToggleRequested = false;
+
+    // Background transparency toggle (Ctrl+T): flips the renderer between
+    // opaque clear and premultiplied alpha = 1 - T (desktop see-through).
+    // Requires the session to have been created with transparentBackgroundEnabled.
+    // Apps without a transparency path simply never consume the flag.
+    bool transparentBgToggleRequested = false;
+
+    // HUD toggle policy: when true (default) the HUD only toggles on
+    // SHIFT+TAB, leaving bare TAB to fall through to the workspace shell's
+    // focus-cycle hotkey (the runtime test apps run under displayxr-shell).
+    // Standalone demos set this false at InputState init to keep bare TAB.
+    bool hudToggleRequiresShift = true;
+
+    // 'I' key: snapshot the **app's projection-layer atlas only** (cols ×
+    // rows × renderW × renderH) to %USERPROFILE%\Pictures\DisplayXR\
+    // <app>-<N>_<cols>x<rows>.png. One projection layer; HUD / window-space
+    // / quad layers and per-eye disparity are NOT included. Skipped for 1×1
+    // (mono) layouts. Filename auto-increments per (cols×rows).
+    //
+    // For runtime-side captures, use the trigger files (or MCP capture_frame):
+    //   `displayxr_atlas_trigger` → post-compose (all layers, what DP weaves)
+    //   `displayxr_atlas_trigger.projection` → projection-only (per-tile,
+    //                                          no window-space layers)
+    // See u_capture_intent.h and issue #210.
+    bool captureAtlasRequested = false;
+
+    // 'B' key: smoke-test xrRequestFilePickerDXR (#228 Tier 1 spatial picker).
+    // Main loop sees the flag, resolves the PFN, makes the call, polls events
+    // for completion, and logs both. Falls through silently when the extension
+    // is not enabled / not available.
+    bool filePickerRequestRequested = false;
+
+    // --- Gaussian-splat demo extensions (additive; unused by cube_* apps) ---
+
+    // Smooth display-pose transition (double-click focus). When active,
+    // UpdateCameraMovement interpolates pose and rewrites cameraPos + yaw/pitch.
+    bool transitioning = false;
+    XrPosef transitionFrom = {{0,0,0,1}, {0,0,0}};
+    XrPosef transitionTo   = {{0,0,0,1}, {0,0,0}};
+    float transitionT = 0.0f;
+    float transitionDuration = 0.45f;
+
+    // Auto-orbit (turntable) — idle-timer gated yaw advance.
+    bool animateEnabled = false;
+    double lastInputTimeSec = 0.0;
+    bool animationActive = false;          // derived: (animateEnabled && idle>10s)
+    bool animateToggleRequested = false;   // set by 'M' key or UI button
+
+    // glTF clip playback (model-viewer): one-shot, set by 'N' / 'K', cleared
+    // by the render loop after it drives cycleAnimation()/togglePaused().
+    bool cycleClipRequested = false;       // 'N' → next animation clip
+    bool playPauseRequested = false;       // 'K' → toggle play/pause
+
+    // File-open / drag-drop queue (app-populated, app-consumed).
+    std::string pendingLoadPath;
+    bool loadRequested = false;            // app queues; caller shows dialog
+};
+
+// Monotonic wall-clock seconds — the clock lastInputTimeSec is stamped in.
+// Every InputState producer (keyboard/mouse, gamepad) uses this one.
+inline double InputStateNowSec() {
+    using namespace std::chrono;
+    return (double)duration_cast<microseconds>(
+        high_resolution_clock::now().time_since_epoch()).count() * 1e-6;
+}
