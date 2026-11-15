@@ -67,6 +67,8 @@ typedef struct Camera3DView {
  * @param count          Number of views (must be >= 1)
  * @param nominal_viewer Nominal viewer position in DISPLAY space (or NULL for {0,0,0.5})
  * @param screen         Physical screen dimensions (used for aspect ratio)
+ *                       (width or height <= 0: a finite identity-style view —
+ *                       identity projection, zero FOV, view at the camera pose)
  * @param tunables       Camera tunables (or NULL for defaults)
  * @param camera_pose    Camera pose in world space (or NULL for identity)
  * @param near_z         Near clip plane distance
@@ -93,6 +95,8 @@ camera3d_compute_views(const XrVector3f *raw_eyes,
  * @param processed_eye  Processed eye position (after apply_eye_factors)
  * @param nominal_z      Nominal viewer Z distance (e.g. 0.5)
  * @param screen         Physical screen dimensions (for aspect ratio)
+ *                       (width or height <= 0: a finite identity-style view —
+ *                       identity projection, zero FOV, view at the camera pose)
  * @param tunables       Camera tunables (or NULL for defaults)
  * @param camera_pose    Camera pose in world space (or NULL for identity)
  * @param near_z         Near clip plane distance

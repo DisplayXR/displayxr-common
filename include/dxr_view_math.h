@@ -66,7 +66,7 @@ typedef struct dxr_display3d_tunables {
 	float ipd_factor;             //!< [0, 1] — scales inter-eye distance (0=mono, 1=full)
 	float parallax_factor;        //!< [0, 1] — lerps eye center toward nominal (0=no tracking, 1=full)
 	float perspective_factor;     //!< [0.1, 10] — scales eye XYZ only (changes object perspective)
-	float virtual_display_height; //!< Virtual display height in app units (always required)
+	float virtual_display_height; //!< Virtual display height in app units (<= 0: the screen's physical height, 1:1 m)
 } dxr_display3d_tunables;
 
 typedef struct dxr_screen {

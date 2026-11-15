@@ -30,8 +30,8 @@ typedef struct Display3DTunables {
 	float ipd_factor;              //!< [0, 1] — scales inter-eye distance (0=mono, 1=full)
 	float parallax_factor;         //!< [0, 1] — lerps eye center toward nominal (0=no tracking, 1=full)
 	float perspective_factor;      //!< [0.1, 10] — scales eye XYZ only (changes object perspective)
-	float virtual_display_height;  //!< Virtual display height in app units (always required;
-	                               //!< use physical display height for 1:1 meters)
+	float virtual_display_height;  //!< Virtual display height in app units. <= 0 (the default)
+	                               //!< means the screen's physical height, i.e. 1:1 meters
 } Display3DTunables;
 
 typedef struct Display3DScreen {
@@ -117,7 +117,11 @@ display3d_resolve_window_rect(const Display3DWindowPlacement *placement,
  * @param count          Number of views (must be >= 1)
  * @param nominal_viewer Nominal viewer position in DISPLAY space (or NULL for {0,0,0.5})
  * @param screen         Physical screen dimensions
- * @param tunables       View factors (or NULL for defaults: all 1.0)
+ *                       (width or height <= 0, e.g. a minimised window: a finite
+ *                       identity-style view — identity projection, zero FOV,
+ *                       view at the display pose — instead of Inf/NaN)
+ * @param tunables       View factors (or NULL for defaults: factors 1.0,
+ *                       virtual_display_height = the screen's physical height)
  * @param display_pose   Display pose in world space (or NULL for identity)
  * @param near_offset    Pop-out clip as an ABSOLUTE offset (in virtual-display-
  *                       height / kooima-scaled units) in front of the per-eye
@@ -160,6 +164,9 @@ display3d_compute_views(const XrVector3f *raw_eyes,
  * @param count          Number of views (must be >= 1)
  * @param nominal_viewer Nominal viewer in DISPLAY space (or NULL for {0,0,0.5})
  * @param screen         Physical screen dimensions
+ *                       (width or height <= 0, e.g. a minimised window: a finite
+ *                       identity-style view — identity projection, zero FOV,
+ *                       view at the display pose — instead of Inf/NaN)
  * @param tunables       View factors (or NULL for defaults)
  * @param display_pose   Display pose in world space (or NULL for identity)
  * @param near_offset    See display3d_compute_views.
@@ -269,6 +276,9 @@ display3d_apply_eye_factors_n(const XrVector3f *raw_eyes,
  *
  * @param processed_eye  Processed eye position (after apply_eye_factors)
  * @param screen         Physical screen dimensions
+ *                       (width or height <= 0, e.g. a minimised window: a finite
+ *                       identity-style view — identity projection, zero FOV,
+ *                       view at the display pose — instead of Inf/NaN)
  * @param tunables       View factors (perspective_factor, virtual_display_height)
  * @param display_pose   Display pose in world space (or NULL for identity)
  * @param near_offset    Pop-out clip as an absolute offset (vH/kooima-scaled
@@ -287,7 +297,9 @@ display3d_compute_view(const XrVector3f *processed_eye,
                        Display3DView *out);
 
 /*!
- * Default tunables (all factors = 1.0).
+ * Default tunables: ipd/parallax/perspective factors = 1.0 and
+ * virtual_display_height = 0, which the compute functions resolve to the
+ * screen's physical height (1:1 meters).
  */
 Display3DTunables
 display3d_default_tunables(void);
