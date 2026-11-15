@@ -286,6 +286,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/content_mask.h # header-only: ContentMaskFromCoverage + ChainContentMask (XR_DXR_depth_budget v3)
     common/dxr_view_config.h # header-only: DxrSelectViewConfigType() PRIMARY_MULTIVIEW_DXR opt-in (runtime #1486)
     common/cursor_depth.h   # header-only core: dxr::CursorDepth, XR_DXR_cursor_depth v5 (ADR-046 Amendment 2)
+    common/gltf_accessor.h  # header-only validated glTF accessor reader (template over tinygltf-shaped models)
 )
 if(WIN32)
     list(APPEND DISPLAYXR_COMMON_SOURCES

@@ -67,7 +67,10 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_geom_json_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_url_fetch_test displayxr_launch_args_test displayxr_cursor_depth_test displayxr_cursor_depth_x11_compile
+        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_geom_json_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_url_fetch_test displayxr_launch_args_test displayxr_cursor_depth_test displayxr_cursor_depth_x11_compile displayxr_gltf_accessor_test
+
+      - name: Test (validated glTF accessor reader)
+        run: ./build/tests/displayxr_gltf_accessor_test
 
       - name: Test (launch contract + SHA-1 cache key)
         run: ./build/tests/displayxr_launch_args_test
