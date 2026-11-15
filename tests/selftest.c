@@ -15,6 +15,8 @@
  *      OpenXR-typed wrapper and the dxr core must produce BIT-IDENTICAL
  *      outputs (fov, eyes, matrices) for both rigs — the wrapper is a pure
  *      cast and must stay one (#396 W7 equivalence-by-construction).
+ *   4. degenerate inputs (#87): a zero-size rect, NULL/default tunables and a
+ *      camera rig with m2v <= 0 must all produce finite output.
  * A non-zero return fails CI.
  */
 
@@ -151,6 +153,133 @@ check_core_equivalence(void)
 	return fail;
 }
 
+// Every member of the view structs is a float, so a view can be scanned as a
+// flat float array.
+static int
+all_finite(const void *data, size_t bytes)
+{
+	const float *f = (const float *)data;
+	for (size_t i = 0; i < bytes / sizeof(float); i++) {
+		if (!isfinite(f[i]))
+			return 0;
+	}
+	return 1;
+}
+
+// displayxr-common#87: inputs the API documents as valid (or that its own
+// input-prep produces) must never yield Inf/NaN.
+static int
+check_degenerate_inputs(void)
+{
+	int fail = 0;
+	XrVector3f eyes[2] = {{-0.032f, 0.01f, 0.6f}, {0.032f, 0.01f, 0.6f}};
+	XrVector3f nom = {0.0f, 0.0f, 0.6f};
+	XrPosef pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.1f, 1.2f, -0.3f}};
+
+	// (1) Zero-size rect (minimised window) -> 0 x 0 m screen -> finite,
+	//     identity-projection views for both rigs.
+	{
+		Display3DWindowPlacement p;
+		p.display_width_m = 0.344f; p.display_height_m = 0.194f;
+		p.display_width_px = 3840.0f; p.display_height_px = 2160.0f;
+		p.rect_center_x_px = 1920.0f; p.rect_center_y_px = 1080.0f;
+		p.rect_width_px = 0.0f; p.rect_height_px = 0.0f;
+		Display3DScreen screen;
+		XrVector3f reyes[2];
+		display3d_resolve_window_rect(&p, eyes, 2, &screen, reyes);
+
+		Display3DTunables dt = {1.0f, 1.0f, 1.0f, 0.5f};
+		Display3DView dv[2];
+		display3d_compute_views(reyes, 2, &nom, &screen, &dt, &pose, 0.1f, 10.0f, 0, dv);
+		if (!all_finite(dv, sizeof(dv))) {
+			fprintf(stderr, "degenerate: zero-size rect gave non-finite display views\n");
+			fail++;
+		}
+		if (dv[0].projection_matrix[0] != 1.0f || dv[0].projection_matrix[5] != 1.0f ||
+		    dv[0].projection_matrix[11] != 0.0f || dv[0].projection_matrix[15] != 1.0f) {
+			fprintf(stderr, "degenerate: zero-size rect display projection is not identity\n");
+			fail++;
+		}
+		if (!near_eq(dv[0].eye_world.x, pose.position.x) || !near_eq(dv[0].eye_world.y, pose.position.y) ||
+		    !near_eq(dv[0].eye_world.z, pose.position.z)) {
+			fprintf(stderr, "degenerate: zero-size rect display eye_world is not the display pose\n");
+			fail++;
+		}
+
+		Camera3DTunables ct = camera3d_default_tunables();
+		Camera3DView cv[2];
+		camera3d_compute_views(reyes, 2, &nom, &screen, &ct, &pose, 0.1f, 10.0f, cv);
+		if (!all_finite(cv, sizeof(cv))) {
+			fprintf(stderr, "degenerate: zero-size rect gave non-finite camera views\n");
+			fail++;
+		}
+		if (cv[1].projection_matrix[0] != 1.0f || cv[1].projection_matrix[11] != 0.0f) {
+			fprintf(stderr, "degenerate: zero-size rect camera projection is not identity\n");
+			fail++;
+		}
+
+		// A NaN or negative extent is handled the same way (core API).
+		dxr_screen bad[3] = {{0.3f, 0.0f}, {-0.3f, 0.2f}, {0.3f, 0.0f}};
+		bad[2].height_m = nanf("");
+		dxr_vec3 deye = {0.0f, 0.0f, 0.6f};
+		for (int i = 0; i < 3; i++) {
+			dxr_display3d_view d;
+			dxr_display3d_compute_view(&deye, &bad[i], NULL, NULL, 0.1f, 10.0f, &d);
+			dxr_camera3d_view c;
+			dxr_camera3d_compute_view(&deye, 0.6f, &bad[i], NULL, NULL, 0.1f, 10.0f, &c);
+			if (!all_finite(&d, sizeof(d)) || !all_finite(&c, sizeof(c))) {
+				fprintf(stderr, "degenerate: screen case %d gave non-finite output\n", i);
+				fail++;
+			}
+		}
+	}
+
+	// (2) NULL tunables (documented "defaults") and the default tunables'
+	//     virtual_display_height = 0 resolve to the physical screen height
+	//     (1:1 meters): finite, and identical to passing vH = height_m.
+	{
+		Display3DScreen screen = {0.344f, 0.194f};
+		Display3DView vnull[2], vdef[2], vexp[2];
+		display3d_compute_views(eyes, 2, &nom, &screen, NULL, &pose, 0.1f, 10.0f, 0, vnull);
+		Display3DTunables def = display3d_default_tunables();
+		display3d_compute_views(eyes, 2, &nom, &screen, &def, &pose, 0.1f, 10.0f, 0, vdef);
+		Display3DTunables want = def;
+		want.virtual_display_height = screen.height_m;
+		display3d_compute_views(eyes, 2, &nom, &screen, &want, &pose, 0.1f, 10.0f, 0, vexp);
+		if (!all_finite(vnull, sizeof(vnull)) || !all_finite(vdef, sizeof(vdef))) {
+			fprintf(stderr, "degenerate: NULL/default tunables gave non-finite views\n");
+			fail++;
+		}
+		if (memcmp(vnull, vexp, sizeof(vnull)) != 0 || memcmp(vdef, vexp, sizeof(vdef)) != 0) {
+			fprintf(stderr, "degenerate: NULL/default tunables differ from vH = physical height\n");
+			fail++;
+		}
+	}
+
+	// (3) Camera rig with m2v <= 0 ("treated as 1") converts to a display rig
+	//     exactly like m2v = 1, with a finite return value.
+	{
+		dxr_rig_display_info info = {0.194f, 1.7783f, 0.6f};
+		dxr_camera_rig c1 = {{{0, 0, 0, 1}, {0, 0, 0}}, 1.0f, 1.0f, 0.5f, 0.3249f, 1.0f};
+		dxr_camera_rig c0 = c1;
+		c0.m2v = 0.0f;
+		dxr_display_rig d1, d0;
+		float r1 = dxr_view_rig_camera_to_display(&c1, &info, &d1);
+		float r0 = dxr_view_rig_camera_to_display(&c0, &info, &d0);
+		if (!isfinite(r0) || !all_finite(&d0, sizeof(d0))) {
+			fprintf(stderr, "degenerate: camera_to_display with m2v=0 gave non-finite output\n");
+			fail++;
+		}
+		if (r0 != r1 || memcmp(&d0, &d1, sizeof(d0)) != 0) {
+			fprintf(stderr, "degenerate: camera_to_display with m2v=0 (ipd=%.4f) != m2v=1 (ipd=%.4f)\n",
+			        d0.ipd_factor, d1.ipd_factor);
+			fail++;
+		}
+	}
+
+	return fail;
+}
+
 int
 main(void)
 {
@@ -158,6 +287,7 @@ main(void)
 	failures += check_resolve_window_rect();
 	failures += dxr_display3d_selftest();
 	failures += check_core_equivalence();
+	failures += check_degenerate_inputs();
 
 	if (failures != 0) {
 		fprintf(stderr, "displayxr::math selftest FAILED: %d check(s)\n", failures);

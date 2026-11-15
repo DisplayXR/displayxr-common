@@ -197,8 +197,35 @@ dxr_display3d_default_tunables(void)
 	t.ipd_factor = 1.0f;
 	t.parallax_factor = 1.0f;
 	t.perspective_factor = 1.0f;
+	// 0 = "unset": dxr_display3d_compute_view resolves vH <= 0 to the screen's
+	// physical height (1:1 meters), the neutral default the headers document.
 	t.virtual_display_height = 0.0f;
 	return t;
+}
+
+// A screen the Kooima math can use: both extents strictly positive and finite.
+// (`x > 0` is false for NaN.) A minimised window resolves to a 0 x 0 m
+// screen through dxr_display3d_resolve_window_rect, so this is a normal input.
+static int
+screen_is_usable(const dxr_screen *screen)
+{
+	return screen != NULL && screen->width_m > 0.0f && screen->height_m > 0.0f && isfinite(screen->width_m) &&
+	       isfinite(screen->height_m);
+}
+
+// Finite, identity-style output used when the screen is unusable: the view sits
+// at the rig pose (eye at the pose origin), the projection is identity and the
+// FOV is zero. Well-defined (no Inf/NaN reaches a renderer or xrEndFrame) and
+// obviously neutral; consumers that care can test the screen themselves.
+static void
+fill_degenerate_view(dxr_quat ori, dxr_vec3 pos, float *view_matrix, float *projection_matrix, dxr_fov *fov)
+{
+	build_view_matrix(view_matrix, ori, pos);
+	mat4_identity(projection_matrix);
+	fov->angle_left = 0.0f;
+	fov->angle_right = 0.0f;
+	fov->angle_up = 0.0f;
+	fov->angle_down = 0.0f;
 }
 
 void
@@ -377,7 +404,23 @@ dxr_display3d_compute_view(const dxr_vec3 *processed_eye,
 		disp_pos = display_pose->position;
 	}
 
-	float m2v = t.virtual_display_height / screen->height_m;
+	// Degenerate screen (e.g. a minimised window's 0 x 0 m rect): no Kooima
+	// frustum exists. Emit a finite identity-style view instead of Inf/NaN.
+	if (!screen_is_usable(screen)) {
+		dxr_vec3 zero = {0.0f, 0.0f, 0.0f};
+		out->eye_display = zero;
+		out->eye_world = disp_pos;
+		out->orientation = disp_ori;
+		out->near_z = 1.0e-4f;
+		out->far_z = 2.0e-4f;
+		fill_degenerate_view(disp_ori, disp_pos, out->view_matrix, out->projection_matrix, &out->fov);
+		return;
+	}
+
+	// virtual_display_height <= 0 (the default-tunables / NULL-tunables value)
+	// means "unset": use the screen's physical height, i.e. 1:1 meters (m2v = 1).
+	float vH = (t.virtual_display_height > 0.0f) ? t.virtual_display_height : screen->height_m;
+	float m2v = vH / screen->height_m;
 
 	// Apply perspective * m2v to eye XYZ
 	float es = t.perspective_factor * m2v;
@@ -1104,6 +1147,15 @@ dxr_camera3d_compute_view(const dxr_vec3 *processed_eye,
 		cam_pos = camera_pose->position;
 	}
 
+	// Degenerate screen: the aspect ratio is undefined. Emit a finite
+	// identity-style view at the camera pose instead of NaN.
+	if (!screen_is_usable(screen)) {
+		out->eye_world = cam_pos;
+		out->orientation = cam_ori;
+		fill_degenerate_view(cam_ori, cam_pos, out->view_matrix, out->projection_matrix, &out->fov);
+		return;
+	}
+
 	float aspect = screen->width_m / screen->height_m;
 	float ro = t.half_tan_vfov * aspect;
 	float uo = t.half_tan_vfov;
@@ -1249,7 +1301,11 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	// NOTE: f > 1 (convergence NEARER than nominal) wants ipd_factor > 1; callers
 	// that clamp ipd to [0,1] will fall short of exact there — far convergence
 	// (f <= 1, incl. the 0.5 dp default) is always exact.
-	float f = in->m2v * in->inv_convergence_distance * N;
+	// m2v <= 0 (e.g. unset) means identity, exactly as dxr_camera3d_compute_view
+	// and the comfort helpers read it — otherwise f = 0 would silently turn a rig
+	// that renders correctly into a mono, untracked display rig.
+	float m2v = (in->m2v > 0.0f) ? in->m2v : 1.0f;
+	float f = m2v * in->inv_convergence_distance * N;
 	out->ipd_factor = in->ipd_factor * f;
 	out->parallax_factor = in->parallax_factor * f;
 
@@ -1284,7 +1340,7 @@ dxr_view_rig_camera_to_display(const dxr_camera_rig *in, const dxr_rig_display_i
 	// rescale above the conversion is now exact for any convergence (modulo a
 	// caller ipd clamp for f>1), so this is informational — how far the camera's
 	// convergence sits from the nominal distance — not a "lossy" flag.
-	float compatible_invd = 1.0f / (in->m2v * N);
+	float compatible_invd = 1.0f / (m2v * N);
 	return in->inv_convergence_distance - compatible_invd;
 }
 
