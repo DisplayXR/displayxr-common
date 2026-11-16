@@ -384,7 +384,8 @@ std::wstring FormatDisplayInfo(float widthM, float heightM, float nomX, float no
 }
 
 std::wstring FormatEyeTrackingInfo(const float eyePositions[][3], uint32_t eyeCount,
-    bool active, bool isTracking, uint32_t activeMode, uint32_t supportedModes) {
+    bool active, bool isTracking, uint32_t activeMode, uint32_t supportedModes,
+    bool showModeToggleHint) {
     std::wostringstream oss;
     oss << std::fixed << std::setprecision(0);
     if (active && eyeCount > 0) {
@@ -407,7 +408,10 @@ std::wstring FormatEyeTrackingInfo(const float eyePositions[][3], uint32_t eyeCo
     if (supportedModes & 0x1) { oss << L"MANAGED"; first = false; }
     if (supportedModes & 0x2) { if (!first) oss << L"|"; oss << L"MANUAL"; }
     if (supportedModes == 0) { oss << L"none"; }
-    oss << L") [T]";
+    oss << L")";
+    if (showModeToggleHint) {
+        oss << L" [T]";
+    }
     return oss.str();
 }
 
