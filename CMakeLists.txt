@@ -265,6 +265,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/rig_transition.cpp # platform-neutral convert-then-lerp rig transition
     common/rig_transition.h
     common/mode_switch.h  # header-only smooth 2D<->3D mode-switch sequencer (every platform; also via displayxr::rules)
+    common/mode_table.h   # header-only dxr::ModeTable: rendering modes by meaning (flat/stereo), two-mode contract (runtime #2766)
     common/toast.cpp      # platform-neutral transient confirmation-message state
     common/toast.h
     common/recenter_control.h # header-only per-axis dynamic-recenter pin state
@@ -347,6 +348,13 @@ endif()
 # the include path (<openxr/openxr.h>, and ideally the consumer's
 # XR_DXR_display_info.h) — which every leg that calls OpenXR already has — so
 # this target still adds no dependency of its own.
+#
+# common/mode_table.h (dxr::ModeTable) is the same story for the mode LIST:
+# every leg enumerated xrEnumerateDisplayRenderingModesDXR with its own copy of
+# the same loop. The table answers "which mode is 2D / which is 3D" for the
+# two-mode contract (runtime #2766) and still works against an older runtime
+# reporting more modes. Like dxr_view_config.h it needs <openxr/openxr.h> and
+# <openxr/XR_DXR_display_info.h> on the include path and adds nothing here.
 #
 # common/vk_frame_ring.h (and vk_overlay_kit.h) are reachable through this
 # target too — the Android Vulkan legs are exactly the consumers that need the

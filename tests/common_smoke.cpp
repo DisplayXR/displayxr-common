@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "dxr_view_math.h"
 #include "mip_chain.h"
 #include "mode_switch.h"
+#include "mode_table.h"
 #include "view_params.h"
 #include "xr_window_space_hud.h"
 
@@ -449,6 +451,195 @@ static void test_stb_symbols_link()
     CHECK(pWrite != nullptr, "stb_image_write linked");
 }
 #endif
+
+// dxr::ModeTable (mode_table.h): the rendering-mode list by meaning, for the
+// two-mode contract (runtime #2766) AND older multi-mode runtimes. Pure; the
+// enumerate is injected.
+static XrDisplayRenderingModeInfoDXR make_mode(uint32_t idx, const char* name, uint32_t views, bool hw3d,
+                                               uint32_t cols, uint32_t rows, float sx, float sy,
+                                               bool active, bool requestable = true)
+{
+    XrDisplayRenderingModeInfoDXR m;
+    std::memset(&m, 0, sizeof(m));
+    m.type = XR_TYPE_DISPLAY_RENDERING_MODE_INFO_DXR;
+    m.modeIndex = idx;
+    std::snprintf(m.modeName, sizeof(m.modeName), "%s", name);
+    m.viewCount = views;
+    m.hardwareDisplay3D = hw3d ? XR_TRUE : XR_FALSE;
+    m.tileColumns = cols;
+    m.tileRows = rows;
+    m.viewScaleX = sx;
+    m.viewScaleY = sy;
+    m.isActive = active ? XR_TRUE : XR_FALSE;
+    m.isRequestable = requestable ? XR_TRUE : XR_FALSE;
+    return m;
+}
+
+// A fake xrEnumerateDisplayRenderingModesDXR over a vector (two-call idiom).
+struct FakeModeEnum
+{
+    std::vector<XrDisplayRenderingModeInfoDXR> modes;
+    XrResult fail = XR_SUCCESS; // returned by every call when not XR_SUCCESS
+    int calls = 0;
+    int growOnce = 0;           // >0: the fill call grows the list once and reports SIZE_INSUFFICIENT
+    XrResult operator()(uint32_t cap, uint32_t* count, XrDisplayRenderingModeInfoDXR* out)
+    {
+        calls++;
+        if (fail != XR_SUCCESS) return fail;
+        if (cap != 0 && growOnce > 0) {
+            growOnce = 0;
+            modes.push_back(make_mode(9, "late", 2, true, 2, 1, 0.5f, 1.0f, false));
+            *count = (uint32_t)modes.size();
+            return XR_ERROR_SIZE_INSUFFICIENT;
+        }
+        *count = (uint32_t)modes.size();
+        if (cap == 0) return XR_SUCCESS;
+        if (cap < modes.size()) return XR_ERROR_SIZE_INSUFFICIENT;
+        for (size_t i = 0; i < modes.size(); i++) {
+            CHECK(out[i].type == XR_TYPE_DISPLAY_RENDERING_MODE_INFO_DXR, "fill call must pre-set type");
+            out[i] = modes[i];
+        }
+        return XR_SUCCESS;
+    }
+};
+
+static void test_mode_table()
+{
+    // --- Two-mode table (the new contract): 0 = 2D, 1 = 3D. ---
+    {
+        FakeModeEnum fe;
+        fe.modes = {make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+                    make_mode(1, "Lenticular", 2, true, 2, 1, 0.5f, 1.0f, true)};
+        dxr::ModeTable t;
+        CHECK(t.empty() && t.flat() == nullptr && t.stereo() == nullptr && t.active() == nullptr,
+              "fresh table is empty with no lookups");
+        CHECK(t.refresh(std::ref(fe)) && t.lastRefreshOk(), "first refresh reports a change");
+        CHECK(fe.calls == 2, "two-call idiom: exactly two calls");
+        CHECK(t.size() == 2 && t.isTwoMode(), "two-mode table");
+        CHECK(t.flat() && t.flat()->modeIndex == 0, "two-mode flat() = mode 0");
+        CHECK(t.stereo() && t.stereo()->modeIndex == 1, "two-mode stereo() = mode 1");
+        CHECK(t.active() && t.active()->modeIndex == 1, "active() follows isActive");
+        CHECK(std::strcmp(t.find(1)->modeName, "Lenticular") == 0 && t.find(1)->next == nullptr,
+              "find() by modeIndex, copy has next cleared");
+        CHECK(t.find(2) == nullptr, "find() of a missing index is null");
+        CHECK(t.cycleTarget(1) == 0 && t.cycleTarget(0) == 1, "V toggles 3D<->2D");
+        CHECK(t.digitTarget(0) == 0 && t.digitTarget(1) == 1, "0 = flat, 1 = stereo");
+        for (int d = 2; d <= 8; d++) CHECK(t.digitTarget(d) == -1, "digits 2-8 are inert with two modes");
+        CHECK(!t.refresh(std::ref(fe)), "unchanged re-read reports no change");
+
+        // Only the active flag moved (an ordinary switch): not a layout change.
+        fe.modes[0].isActive = XR_TRUE;
+        fe.modes[1].isActive = XR_FALSE;
+        CHECK(!t.refresh(std::ref(fe)), "active flag change alone is not a layout change");
+        CHECK(t.active()->modeIndex == 0, "active() refreshed");
+        CHECK(t.stereo()->modeIndex == 1, "stereo() from 2D = the 3D mode");
+
+        // Locked by a workspace: nothing requestable -> fallbacks still resolve.
+        for (auto& m : fe.modes) m.isRequestable = XR_FALSE;
+        t.refresh(std::ref(fe));
+        CHECK(t.flatModeIndex() == 0 && t.stereoModeIndex() == 1, "non-requestable table still resolves");
+    }
+
+    // --- Six-mode table (an older runtime). ---
+    {
+        const XrDisplayRenderingModeInfoDXR six[6] = {
+            make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+            make_mode(1, "SBS", 2, false, 2, 1, 0.5f, 1.0f, false),
+            make_mode(2, "Anaglyph", 2, false, 2, 1, 0.5f, 1.0f, false),
+            make_mode(3, "Lenticular", 2, true, 2, 1, 0.5f, 1.0f, false),
+            make_mode(4, "Quad", 4, true, 2, 2, 0.5f, 0.5f, true),
+            make_mode(5, "Blend", 2, false, 2, 1, 0.5f, 1.0f, false),
+        };
+        dxr::ModeTable t;
+        CHECK(t.assign(six, 6), "assign reports a change from empty");
+        CHECK(t.size() == 6 && !t.isTwoMode(), "six-mode table is not two-mode");
+        CHECK(t.flatModeIndex() == 0, "six-mode flat() = mode 0");
+        CHECK(t.stereoModeIndex() == 4, "stereo() = the ACTIVE 3D mode (Quad)");
+        CHECK(t.cycleTarget(4) == 5 && t.cycleTarget(5) == 0, "V cycles in runtime order, wrapping");
+        for (int d = 1; d <= 5; d++) CHECK(t.digitTarget(d) == d, "digits 1-5 address their mode");
+        CHECK(t.digitTarget(6) == -1 && t.digitTarget(8) == -1, "digits past the table are inert");
+
+        // Active mode is 2D: stereo() prefers the first requestable hw-3D mode,
+        // not the first 2-view one.
+        XrDisplayRenderingModeInfoDXR six2[6];
+        std::memcpy(six2, six, sizeof(six));
+        six2[4].isActive = XR_FALSE;
+        six2[0].isActive = XR_TRUE;
+        CHECK(!t.assign(six2, 6), "flag-only change: no layout change");
+        CHECK(t.stereoModeIndex() == 3, "stereo() = first requestable hardware-3D mode");
+        // No hardware-3D mode at all: first mode with >= 2 views.
+        for (auto& m : six2) m.hardwareDisplay3D = XR_FALSE;
+        t.assign(six2, 6);
+        CHECK(t.stereoModeIndex() == 1, "stereo() fallback = first mode with viewCount >= 2");
+    }
+
+    // --- Late / empty table. ---
+    {
+        FakeModeEnum fe;
+        dxr::ModeTable t;
+        CHECK(!t.refresh(std::ref(fe)) && t.lastRefreshOk() && t.empty(), "empty enumerate: ok, empty, no change");
+        CHECK(fe.calls == 1, "empty enumerate stops after the count call");
+        CHECK(t.flatModeIndex() == 0 && t.stereoModeIndex() == -1, "empty table: flat 0, no stereo");
+        CHECK(t.cycleTarget(0) == -1 && t.digitTarget(0) == -1 && t.digitTarget(1) == -1,
+              "empty table: keys are inert");
+        CHECK(!t.refresh(nullptr, XR_NULL_HANDLE), "null pfn: no change");
+
+        // The modes arrive later.
+        fe.modes = {make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, true),
+                    make_mode(1, "3D", 2, true, 2, 1, 0.5f, 1.0f, false)};
+        CHECK(t.refresh(std::ref(fe)) && t.isTwoMode(), "late table: change reported");
+
+        // A failing enumerate keeps the previous table.
+        fe.fail = XR_ERROR_SESSION_LOST;
+        CHECK(!t.refresh(std::ref(fe)) && !t.lastRefreshOk() && t.size() == 2,
+              "failed enumerate keeps the old table");
+        fe.fail = XR_SUCCESS;
+
+        // Count grows between the calls: retried, new entry picked up.
+        fe.growOnce = 1;
+        CHECK(t.refresh(std::ref(fe)) && t.size() == 3 && t.find(9) != nullptr,
+              "SIZE_INSUFFICIENT is retried and the grown table read");
+    }
+
+    // --- modeIndex != position. ---
+    {
+        const XrDisplayRenderingModeInfoDXR odd[2] = {
+            make_mode(7, "3D", 2, true, 2, 1, 0.5f, 1.0f, true),
+            make_mode(3, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+        };
+        dxr::ModeTable t;
+        t.assign(odd, 2);
+        CHECK(t.flatModeIndex() == 3 && t.stereoModeIndex() == 7, "lookups return modeIndex, not position");
+        CHECK(t.find(7) == &t.modes()[0] && t.find(0) == nullptr, "find() matches modeIndex");
+        CHECK(t.cycleTarget(7) == 3 && t.cycleTarget(3) == 7, "toggle by modeIndex");
+        CHECK(t.digitTarget(0) == 3 && t.digitTarget(1) == 7, "0/1 resolve by meaning");
+
+        // No flat mode and no modeIndex 0: flat() is null, the index falls back to 0.
+        XrDisplayRenderingModeInfoDXR only3d = make_mode(5, "3D", 2, true, 2, 1, 0.5f, 1.0f, true);
+        t.assign(&only3d, 1);
+        CHECK(t.flat() == nullptr && t.flatModeIndex() == 0, "flat() fallback = modeIndex 0 (absent here)");
+    }
+
+    // --- refresh detects a changed scale at the same index. ---
+    {
+        FakeModeEnum fe;
+        fe.modes = {make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+                    make_mode(1, "3D", 2, true, 2, 1, 0.5f, 1.0f, true)};
+        dxr::ModeTable t;
+        t.refresh(std::ref(fe));
+        fe.modes[1].viewScaleX = 0.25f;
+        CHECK(t.refresh(std::ref(fe)), "changed viewScaleX at the same index is a change");
+        CHECK(t.find(1)->viewScaleX == 0.25f, "new scale stored");
+        fe.modes[1].tileRows = 2;
+        CHECK(t.refresh(std::ref(fe)), "changed tileRows is a change");
+        fe.modes[1].viewCount = 4;
+        CHECK(t.refresh(std::ref(fe)), "changed viewCount is a change");
+        fe.modes[1].modeIndex = 2;
+        CHECK(t.refresh(std::ref(fe)), "a modeIndex that vanished is a change");
+        fe.modes.push_back(make_mode(3, "3D-b", 2, true, 2, 1, 0.5f, 1.0f, false));
+        CHECK(t.refresh(std::ref(fe)) && !t.isTwoMode(), "count change is a change");
+    }
+}
 
 // Smooth 2D<->3D mode-switch sequencer (mode_switch.h). Pure, deterministic.
 static void test_mode_switch()
@@ -1754,6 +1945,7 @@ int main()
     test_view_params_defaults();
     test_window_space_hud_types();
     test_mode_switch();
+    test_mode_table();
     test_rig_math();
     test_clip_policy();
     test_content_bounds();
