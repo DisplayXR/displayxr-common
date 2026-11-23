@@ -67,7 +67,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_geom_json_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_url_fetch_test displayxr_launch_args_test displayxr_cursor_depth_test displayxr_cursor_depth_x11_compile displayxr_gltf_accessor_test
+        run: cmake --build build --target displayxr_linux_window_test displayxr_linux_window_geom_json_test displayxr_linux_window_lattice_test displayxr_linux_window_drag_test displayxr_linux_window_input_test displayxr_linux_window_workspace_input_test displayxr_url_fetch_test displayxr_launch_args_test displayxr_cursor_depth_test displayxr_cursor_depth_x11_compile displayxr_gltf_accessor_test
 
       - name: Test (validated glTF accessor reader)
         run: ./build/tests/displayxr_gltf_accessor_test
@@ -83,6 +83,9 @@ jobs:
           for i in $(seq 1 50); do [ -s "$RUNNER_TEMP/port" ] && break; sleep 0.1; done
           DXR_URL_FETCH_TEST_PORT=$(head -1 "$RUNNER_TEMP/port") ./build/tests/displayxr_url_fetch_test
           kill $srv
+
+      - name: Test (workspace input -> window events, no display)
+        run: ./build/tests/displayxr_linux_window_workspace_input_test
 
       - name: Test (own window from the geometry payload, any key order, no display)
         run: ./build/tests/displayxr_linux_window_geom_json_test

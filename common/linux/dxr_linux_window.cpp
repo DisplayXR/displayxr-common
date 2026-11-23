@@ -4952,6 +4952,10 @@ DxrLinuxWindow::pump_impl(const std::function<void(const DxrWindowEvent &)> &on_
 	}
 #endif
 
+	// Inside the workspace the window is hidden and the service owns the
+	// pointer and keyboard: its routed share for this app arrives here.
+	drain_workspace_input();
+
 	// Deliver. Swapped out first: a handler may call back into the window
 	// (toggle_fullscreen, set_title, ...), which may queue more.
 	std::vector<DxrWindowEvent> batch;
@@ -5178,6 +5182,19 @@ DxrLinuxWindow::attach_session(XrInstance instance, XrSession session)
 {
 	m_session = session;
 
+	// Workspace input, both backends. Resolves only when the instance enabled
+	// XR_DXR_workspace_client_input; otherwise the loader answers
+	// XR_ERROR_FUNCTION_UNSUPPORTED and the window behaves exactly as before.
+	if (instance != XR_NULL_HANDLE && m_pfn_ws_client_input == nullptr) {
+		PFN_xrVoidFunction ws = nullptr;
+		if (xrGetInstanceProcAddr(instance, "xrEnumerateWorkspaceClientInputEventsDXR", &ws) == XR_SUCCESS &&
+		    ws != nullptr) {
+			m_pfn_ws_client_input = reinterpret_cast<PFN_xrEnumerateWorkspaceClientInputEventsDXR>(ws);
+			DXRW_INFO("workspace input: armed (XR_DXR_workspace_client_input) — inside the workspace, routed "
+			          "keys/pointer arrive as window events");
+		}
+	}
+
 #ifdef DXR_APP_HAVE_WAYLAND
 	if (m_backend != DxrWindowBackend::Wayland || instance == XR_NULL_HANDLE) {
 		return;
@@ -5198,6 +5215,95 @@ DxrLinuxWindow::attach_session(XrInstance instance, XrSession session)
 #else
 	(void)instance;
 #endif
+}
+
+void
+DxrLinuxWindow::drain_workspace_input()
+{
+	if (m_pfn_ws_client_input == nullptr || m_session == XR_NULL_HANDLE) {
+		return;
+	}
+	uint32_t cw = 0, ch = 0;
+	current_size(&cw, &ch);
+	// Bounded: a few batches per frame at most, so a flood cannot stall a frame.
+	for (int batch = 0; batch < 4; batch++) {
+		XrWorkspaceClientInputEventDXR evs[32];
+		uint32_t n = 0;
+		const XrResult r = m_pfn_ws_client_input(m_session, 32, &n, evs);
+		if (XR_FAILED(r)) {
+			DXRW_WARN("workspace input: xrEnumerateWorkspaceClientInputEventsDXR failed (%d) — disarmed", (int)r);
+			m_pfn_ws_client_input = nullptr;
+			return;
+		}
+		for (uint32_t i = 0; i < n && i < 32; i++) {
+			const XrWorkspaceClientInputEventDXR &e = evs[i];
+			DxrWindowEvent out;
+			out.time_ms = e.timestampMs;
+			out.mods = dxr_wsinput::mods_from_wire(e.modifiers);
+			if (e.positionValid) {
+				dxr_wsinput::uv_to_px(e.position.x, e.position.y, cw, ch, &out.x, &out.y);
+			}
+			switch (e.eventType) {
+			case XR_WORKSPACE_CLIENT_INPUT_EVENT_KEY_DXR: {
+				out.keysym = dxr_wsinput::vk_to_keysym(e.vkCode);
+				if (out.keysym == 0) {
+					continue;
+				}
+				out.keycode = dxr_wsinput::keysym_to_keycode(out.keysym);
+				out.type = e.isDown ? DxrWindowEvent::Type::KeyDown : DxrWindowEvent::Type::KeyUp;
+				if (e.isDown) {
+					const uint32_t cp = dxr_input::us_keysym_char(out.keysym, (out.mods & DxrModShift) != 0);
+					if (cp != 0) {
+						char buf[8] = {};
+						dxr_input::utf8_encode(cp, buf);
+						dxr_input::accept_text(buf, (out.mods & (DxrModCtrl | DxrModAlt)) != 0, out.text,
+						                       sizeof(out.text));
+					}
+				}
+				break;
+			}
+			case XR_WORKSPACE_CLIENT_INPUT_EVENT_BUTTON_DXR:
+				out.button = dxr_wsinput::button_from_wire(e.button);
+				if (out.button == 0 || !e.positionValid) {
+					continue;
+				}
+				out.type = e.isDown ? DxrWindowEvent::Type::ButtonDown : DxrWindowEvent::Type::ButtonUp;
+				break;
+			case XR_WORKSPACE_CLIENT_INPUT_EVENT_MOTION_DXR:
+				if (!e.positionValid) {
+					continue;
+				}
+				out.type = DxrWindowEvent::Type::Motion;
+				break;
+			case XR_WORKSPACE_CLIENT_INPUT_EVENT_SCROLL_DXR:
+				out.scroll_steps = dxr_wsinput::scroll_steps_from_wire(e.scrollDeltaY);
+				if (out.scroll_steps == 0) {
+					continue;
+				}
+				out.type = DxrWindowEvent::Type::Scroll;
+				break;
+			default: continue;
+			}
+			if (m_ws_input_count++ == 0) {
+				DXRW_INFO("workspace input: first routed event delivered (type %d)", (int)e.eventType);
+			}
+			// DXR_WS_INPUT_LOG=1: one line per delivered event (diagnostics).
+			static const bool log_each = [] {
+				const char *v = getenv("DXR_WS_INPUT_LOG");
+				return v != nullptr && v[0] == '1';
+			}();
+			if (log_each) {
+				DXRW_INFO("workspace input: type=%d keysym=0x%x down=%d button=%u mods=0x%x pos=(%d,%d) "
+				          "scroll=%d",
+				          (int)e.eventType, out.keysym, (int)e.isDown, out.button, out.mods, out.x, out.y,
+				          out.scroll_steps);
+			}
+			m_events.push_back(out);
+		}
+		if (n < 32) {
+			break;
+		}
+	}
 }
 
 void
