@@ -431,6 +431,24 @@ std::wstring FormatMode(int outputMode, bool simDisplayAvailable, const char* mo
         return L"Mode: Weaved";
     }
     std::wostringstream oss;
+    if (modeCount == 2) {
+        // Two-mode contract (runtime #2766): one 2D mode and one 3D mode, so
+        // say which one is on; the 3D mode's name tells its kind. V toggles.
+        if (!display3D) {
+            oss << L"Mode: 2D";
+        } else {
+            oss << L"Mode: 3D";
+            if (modeName != nullptr && modeName[0] != '\0') {
+                std::wstring wname(modeName, modeName + strlen(modeName));
+                oss << L" (" << wname << L")";
+            }
+        }
+        if (!isRequestable) {
+            oss << L" [locked by workspace]";
+        }
+        return oss.str();
+    }
+    // Older runtimes with more modes: name + dimensionality + the digit range.
     if (modeName != nullptr && modeName[0] != '\0') {
         std::wstring wname(modeName, modeName + strlen(modeName));
         oss << L"Mode: " << wname;
@@ -481,8 +499,9 @@ std::wstring FormatHelpText(bool simDisplayAvailable, bool cameraMode, uint32_t 
     std::wostringstream oss;
     oss << L"WASD/QE=Move  Drag=Look  Space=Reset\n"
         << L"Scroll=Scale  Shift+Scroll=IPD+Parallax\n"
-        << L"V=Mode  T=EyeMode";
-    if (simDisplayAvailable && modeCount > 1) {
+        << (simDisplayAvailable && modeCount == 2 ? L"V=2D/3D  T=EyeMode" : L"V=Mode  T=EyeMode");
+    if (simDisplayAvailable && modeCount > 2) {
+        // Older runtimes with more than two modes: the digits address modes.
         oss << L"  1-" << modeCount << L"=Output";
     }
     oss << L"  Tab=HUD  F11=Full  ESC=Quit";

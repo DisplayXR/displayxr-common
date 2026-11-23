@@ -401,6 +401,30 @@ static void test_session_apply_mode_table()
     CHECK(xr.currentModeIndex == 0, "currentModeIndex follows the active mode");
 }
 
+// HUD wording (text_overlay.cpp): two modes -> 2D / 3D; more -> per-mode text.
+static void test_mode_hud_text()
+{
+    CHECK(FormatMode(0, true, "2D", 2, false, true) == L"Mode: 2D", "two-mode 2D text");
+    CHECK(FormatMode(1, true, "Lenticular", 2, true, true) == L"Mode: 3D (Lenticular)", "two-mode 3D text");
+    CHECK(FormatMode(1, true, nullptr, 2, true, true) == L"Mode: 3D", "two-mode 3D text, no name");
+    CHECK(FormatMode(1, true, "Lenticular", 2, true, false) == L"Mode: 3D (Lenticular) [locked by workspace]",
+          "two-mode lock suffix kept");
+    CHECK(FormatMode(3, true, "Lenticular", 6, true, true) == L"Mode: Lenticular (3D) [1-6]",
+          "multi-mode text unchanged");
+    CHECK(FormatMode(0, true, "2D", 6, false, false) == L"Mode: 2D (2D) [1-6] [locked by workspace]",
+          "multi-mode lock text unchanged");
+    CHECK(FormatMode(1, false, "x", 2, true, true) == L"Mode: Weaved", "no mode requests: unchanged");
+
+    const std::wstring h2 = FormatHelpText(true, false, 2);
+    CHECK(h2.find(L"V=2D/3D") != std::wstring::npos && h2.find(L"=Output") == std::wstring::npos,
+          "two-mode help: V=2D/3D, no digit range");
+    const std::wstring h6 = FormatHelpText(true, false, 6);
+    CHECK(h6.find(L"V=Mode") != std::wstring::npos && h6.find(L"1-6=Output") != std::wstring::npos,
+          "multi-mode help unchanged");
+    CHECK(FormatHelpText(false, false, 2).find(L"V=Mode") != std::wstring::npos,
+          "no mode requests: help unchanged");
+}
+
 // EndFrame / EndFrameWithWindowSpaceLayers `frameEndNext` (content_bounds.h's
 // dxr::ChainContentBounds is the first user — see xr_session_common.h). This
 // is a HEADER-ONLY compile check, deliberately not a call or a runtime
@@ -1989,6 +2013,7 @@ int main()
     test_input_state_defaults();
     test_session_manager_defaults();
     test_session_apply_mode_table();
+    test_mode_hud_text();
     test_endframe_frame_end_next_signature();
 #endif
 #ifdef __APPLE__
