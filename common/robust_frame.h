@@ -27,9 +27,20 @@
  *   |                      | viewer), so ~25% of the surface is in front of    |
  *   |                      | the glass                                         |
  *   | fit extent           | per-axis area-weighted 1st..99th percentile, but  |
- *   |                      | never so small that the FULL box, measured from   |
- *   |                      | the new centre, exceeds kRobustFrameCapFill (90%) |
- *   |                      | of the viewport — see RobustFitExtent()           |
+ *   |                      | never so small that the FULL box, measured about  |
+ *   |                      | the pivot, exceeds kRobustFrameCapFill (90%) of   |
+ *   |                      | the viewport — see RobustFitExtent()              |
+ *
+ * THE PIVOT AND THE SCREEN PLANE ARE SEPARATE. The subject turns about
+ * `pivot`; the screen plane is applied as a slide along the view axis, in
+ * display space, by RobustScreenPlaneShift() = pivot.z - zdpDepth model units
+ * (times the fit and zoom scale), so `zdpDepth` sits on the glass at rest and
+ * stays there under zoom. Do NOT fold them into one centre
+ * (pivot.x, pivot.y, zdpDepth): that gives the same rest pose but turns the
+ * subject about the screen plane instead of its median, which is a different
+ * picture as soon as it turns. In a model transform:
+ *
+ *     S = T(0, 0, scale * shift) * Scale(scale) * R^-1 * T(-pivot)
  *
  * This is the shared rule of the native model viewer
  * (displayxr-demo-modelviewer#192) and the web SDK's addModel
@@ -95,11 +106,13 @@ struct RobustFrame
 	float boxMin[3] = {0, 0, 0};
 	float boxMax[3] = {0, 0, 0};
 
-	//! Turn pivot: { median x, box centre y, median z }.
+	//! Turn pivot: { median x, box centre y, median z }. The subject turns
+	//! about this point; it is NOT what lands on the glass (zdpDepth is).
 	float pivot[3] = {0, 0, 0};
 
 	//! Zero-disparity (screen-plane) depth: the 75th-percentile z, +z toward
-	//! the viewer, so ~25% of the surface sits in front of the glass.
+	//! the viewer, so ~25% of the surface sits in front of the glass. Applied
+	//! as a slide (RobustScreenPlaneShift), not by moving the pivot.
 	float zdpDepth = 0.0f;
 
 	//! Per-axis 1st..99th percentile extent (FULL sizes, never below 1e-6).
@@ -263,14 +276,14 @@ private:
 };
 
 //! The extent to hand the fit (auto_fit.h, or an app's wrapper of it) for a
-//! subject centred at `centre`:
+//! subject turning about `centre` (pass the frame's `pivot`):
 //!
 //!     out[i] = max(trimmed[i], symFull[i] * fill / capFill)
 //!     symFull[i] = 2 * max(boxMax[i] - centre[i], centre[i] - boxMin[i])
 //!
 //! i.e. the 1st..99th-percentile extent, but never so small that the FULL box
-//! — measured symmetrically from the new centre, since the centre is no longer
-//! the box centre — would exceed `capFill` of the viewport once the fit scales
+//! — measured symmetrically about the pivot, since the pivot is no longer the
+//! box centre — would exceed `capFill` of the viewport once the fit scales
 //! the binding axis to `fill`. Pass the box the app frames with (it may be
 //! wider than frame.boxMin/Max, e.g. an animated model's swept bounds) and the
 //! fill the fit uses (kAutoFitDefaultFill = 0.8 unless the user changed it).
@@ -288,6 +301,17 @@ RobustFitExtent(const float trimmed[3],
 		const float symFull = 2.0f * std::max(std::fabs(boxMax[i] - centre[i]), std::fabs(centre[i] - boxMin[i]));
 		out[i] = std::max(trimmed[i], symFull * scale);
 	}
+}
+
+//! The screen-plane slide, in MODEL units: how far the pivot sits in front of
+//! the glass once `zdpDepth` is put on it (negative = the subject slides back).
+//! Multiply by the model's display scale (fit x zoom) and translate along the
+//! view axis in display space, AFTER the rotation about the pivot. Zero for an
+//! invalid frame, so a box fallback puts the pivot on the glass as before.
+inline float
+RobustScreenPlaneShift(const RobustFrame &frame)
+{
+	return frame.valid ? frame.pivot[2] - frame.zdpDepth : 0.0f;
 }
 
 } // namespace dxr

@@ -68,6 +68,9 @@ test_cube()
 	CHECK(f.zdpDepth == f.p75[2]);
 	CHECK(f.pivot[0] == f.median[0] && f.pivot[2] == f.median[2]);
 	CHECK(f.pivot[1] == 0.0f);
+	// Pivot and screen plane are separate: the slide puts p75 on the glass.
+	CHECK(near(dxr::RobustScreenPlaneShift(f), f.median[2] - 0.375f, 0.03f));
+	CHECK(dxr::RobustScreenPlaneShift(dxr::RobustFrame{}) == 0.0f);
 	// The front and back faces put 1/6 of the samples exactly on +-0.5, so the
 	// trimmed z extent is the full side.
 	CHECK(near(f.trimmedExtent[2], 1.0f, 1e-6f));
@@ -93,10 +96,10 @@ test_thin_outlier()
 
 	// Fit extent with the default 0.8 fill: the full box from the robust
 	// centre (|-5 - zdp| on the far side) bounds it from below at 0.8 / 0.9.
-	const float centre[3] = {f.pivot[0], f.pivot[1], f.zdpDepth};
+	// The guard is measured about the PIVOT (median z), not the screen plane.
 	float ext[3];
-	dxr::RobustFitExtent(f.trimmedExtent, f.boxMin, f.boxMax, centre, 0.8f, ext);
-	const float symFullZ = 2.0f * (f.zdpDepth + 5.0f);
+	dxr::RobustFitExtent(f.trimmedExtent, f.boxMin, f.boxMax, f.pivot, 0.8f, ext);
+	const float symFullZ = 2.0f * (f.pivot[2] + 5.0f);
 	CHECK(near(ext[2], symFullZ * 0.8f / 0.9f, 1e-4f));
 	CHECK(ext[2] > f.trimmedExtent[2]);
 	// x/y: the box is symmetric about the (near-zero) centre, so the cap
