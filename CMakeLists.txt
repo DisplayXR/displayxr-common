@@ -271,6 +271,7 @@ set(DISPLAYXR_COMMON_SOURCES
     common/recenter_control.h # header-only per-axis dynamic-recenter pin state
     common/auto_fit.h     # header-only load-time asset auto-fit (bbox+viewport -> vHeight)
     common/auto_fit_canvas.h # header-only runtime-canvas viewport source + aspect gate
+    common/robust_frame.h # header-only area-weighted robust framing (pivot, ZDP, trimmed extent)
     common/frame_stage_timer.h # header-only env-gated per-stage frame timing (#837)
     common/vk_overlay_kit.h   # header-only VK cached-layer-upload + pipelined-readback kit (#837)
     common/vk_frame_ring.h    # header-only VK frame ring: N in flight, one submit/frame (Adreno DVFS)
