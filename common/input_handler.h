@@ -80,8 +80,14 @@ struct InputState {
     // transient requests that the main loop translates into
     // xrRequestDisplayRenderingModeDXR calls; the actual current mode is
     // never mirrored here.
+    //
+    // Two-mode contract (runtime #2766): with exactly two modes, V means
+    // "toggle 2D/3D", 0 means "2D" and 1 means "3D"; XrSessionUpdateModeSwitch
+    // resolves them by meaning through xr.renderingModeTable (and refreshes
+    // renderingModeCount from it). With more modes (older runtimes) V cycles
+    // and every digit addresses its mode index, as before.
     uint32_t renderingModeCount = 0;            // Set from xrEnumerateDisplayRenderingModesDXR
-    bool cycleRenderingModeRequested = false;   // V key / mode button: cycle to next mode
+    bool cycleRenderingModeRequested = false;   // V key / mode button: 2D/3D toggle (two modes) or cycle
     int32_t absoluteRenderingModeRequested = -1; // 0-8 keys / config: jump to this mode (-1 = none)
 
     // Camera vs display mode toggle (C key)
