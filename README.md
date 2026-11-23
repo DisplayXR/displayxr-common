@@ -139,6 +139,7 @@ The `common/` directory is the lib's second target (epic #396 W4, re-scoped [#39
 | Content-bounds ROI for the rear-depth budget: project a world-space AABB to a canvas-normalised rect, rebase a zoned app's rect into window space, chain it as `XrContentBoundsDXR` | `content_bounds.h` | both |
 | Content-MASK ROI for the rear-depth budget: any-coverage downsample of the app's own silhouette/alpha coverage onto the extension's cell grid (whole-window or zone-placed), union, cell count, chain it as `XrContentMaskDXR` | `content_mask.h` | both |
 | **Smooth 2D↔3D transitions**: `dxr::ModeSwitch` — eases the stereo disparity around every rendering-mode switch and sequences the request (see [below](#smooth-2d3d-transitions-mode_switchh--every-app-every-platform)); `XrSessionUpdateModeSwitch()` is the Windows wrapper | `mode_switch.h` (header-only), `xr_session_common.{h,cpp}` | both (also `displayxr::rules`, so Linux/Android legs and engine ports get it) |
+| **Rendering-mode table**: `dxr::ModeTable` — the enumerated modes looked up by meaning (`flat()` / `stereo()`), the two-mode contract's key policy, modeIndex kept as reported (see [below](#rendering-modes-one-2d-mode-one-3d-mode-mode_tableh)); `XrSessionRefreshRenderingModes()` is the Windows wrapper | `mode_table.h` (header-only), `xr_session_common.{h,cpp}` | both (also `displayxr::rules`; needs the OpenXR + `XR_DXR_display_info.h` headers) |
 | View-configuration opt-in: `DxrSelectViewConfigType()` — begin the session with `PRIMARY_MULTIVIEW_DXR` when the runtime advertises it; `DxrAliasInactiveViews()` — submit every located view, aliasing the ones the active mode does not use (ADR-041) | `dxr_view_config.h` | both (also `displayxr::rules`, so Linux/Android legs get it) |
 | Vulkan **frame ring**: N frames in flight (default 3), ONE `vkQueueSubmit` per frame, per-slot command buffer + fence + dynamic-offset UBO slice allocated once, tile barriers, deferred deletion, one named blocking escape hatch (`submitImmediate`) — see *Vulkan frame discipline* below | `vk_frame_ring.h` | all (also `displayxr::rules`, so Linux/Android legs get it; needs `<vulkan/vulkan.h>`) |
 | Vulkan overlay kit: content-hash-gated layer uploads (`CachedLayerUploader`) + fence-pipelined readbacks (`PipelinedReadback`), each with ONE reused command buffer ([runtime#837](https://github.com/DisplayXR/displayxr-runtime/issues/837)) | `vk_overlay_kit.h` | all (needs `<vulkan/vulkan.h>`) |
@@ -160,7 +161,7 @@ MAX view count across rendering modes moved to a second view configuration,
 `xrEnumerateViewConfigurations` advertises **only** when the instance enabled `XR_DXR_display_info`. It is
 fixed for the instance lifetime (4 on `sim_display`, 2 on a stereo panel).
 
-So **any** app whose per-frame view count comes from the active DXR rendering mode (the 1/2/3 or V mode keys,
+So **any** app whose per-frame view count comes from the active DXR rendering mode (the V / 0 / 1 mode keys, or 1-8 on an older multi-mode runtime,
 `xrEnumerateDisplayRenderingModesDXR`) or that sizes zone tiles from the reported view count must begin its
 session with `PRIMARY_MULTIVIEW_DXR` — otherwise it goes black in `sim_display`'s Quad mode, which is always
 enumerable on a dev box. An app hardcoded to 2 views stays on `PRIMARY_STEREO` and needs none of this.
@@ -248,6 +249,42 @@ resize/teardown; `ring.submitImmediate(record)` is the one sanctioned blocking s
 Android has no usable environment, so pass `Config::framesInFlight` there. `tests/vk_frame_ring_test.cpp`
 pins the ring arithmetic, env clamp, UBO slice alignment and deferred-deletion order GPU-free.
 
+### Rendering modes: one 2D mode, one 3D mode (`mode_table.h`)
+
+**The contract.** A display driver exposes exactly **two** rendering modes at run time: a flat 2D mode and a
+3D mode ([runtime #2766](https://github.com/DisplayXR/displayxr-runtime/issues/2766)). Which *kind* of 3D
+(interlaced, side-by-side, multi-view…) is a driver setting applied at start-up, not something an app picks
+at run time, so the app's question is only "2D or 3D?". The keys follow:
+
+| Key | Two modes | Older runtime reporting more modes |
+|---|---|---|
+| **V** | toggle 2D ↔ 3D | cycle to the next mode |
+| **0** | the 2D mode | the 2D mode |
+| **1** | the 3D mode | mode 1 |
+| **2-8** | inert | that mode, if the runtime reports it |
+
+and the HUD reads `Mode: 2D` / `Mode: 3D (<mode name>)` with `V=2D/3D` in the help line; with more modes it
+keeps the per-mode `[1-N]` / `1-N=Output` text. **Apps built against this library keep working against an
+older runtime** that still reports three to eight modes: nothing assumes the count is two.
+
+**`dxr::ModeTable`** answers the 2D/3D question from `xrEnumerateDisplayRenderingModesDXR` (header-only, also
+through `displayxr::rules`; needs `<openxr/openxr.h>` + `<openxr/XR_DXR_display_info.h>`). It runs the two-call
+enumerate into a `std::vector` (no cap), keeps every mode's `modeIndex` exactly as reported (never assumed equal
+to its position), and offers `flat()` (first requestable 1-view, non-3D mode; else mode 0), `stereo()` (the
+active mode if it is 3D; else the first requestable 3D mode with ≥ 2 views; else the first mode with ≥ 2 views),
+`active()`, `find(modeIndex)`, `isTwoMode()`, and the key policy above as `cycleTarget()` / `digitTarget()`.
+`refresh()` returns true when the count, or any mode's view count, tile layout or scale, changed — re-read it on
+every `XrEventDataRenderingModeChangedDXR`.
+
+- **Windows** (`XrSessionManager` apps): call `XrSessionRefreshRenderingModes(xr)` once after `xrCreateSession`
+  in place of the hand-written enumerate loop. It fills `xr.renderingModeTable` and the existing
+  `renderingMode*` arrays (each mode in the slot named by its `modeIndex`) and syncs `currentModeIndex`;
+  `PollEvents` re-reads it on every mode-changed event, and `XrSessionUpdateModeSwitch` resolves V / 0 / 1 by
+  meaning through it. The helpers do **not** recreate the swapchain when a layout changes. Apps that keep
+  their own loop still work: until the table is filled every helper uses the arrays exactly as before.
+- **Other legs:** keep one `dxr::ModeTable` per session and feed `table.cycleTarget(currentMode)` /
+  `table.digitTarget(digit)` to `ModeSwitch::step()` below.
+
 ### Smooth 2D↔3D transitions (`mode_switch.h`) — every app, every platform
 
 **What the runtime does, and what it does not.** `xrRequestDisplayRenderingModeDXR(session, mode)` switches
@@ -277,16 +314,19 @@ no platform headers), so the same file serves the native apps, the demos, the An
 **Wiring — one call per frame, before `xrLocateViews`:**
 
 - **Windows** (`XrSessionManager` apps): `XrSessionUpdateModeSwitch(xr, inputState, dt)`. It consumes the
-  V / 0-8 request flags from `input_handler`, writes `inputState.viewParams.ipdFactor`, and issues the request.
+  V / 0-8 request flags from `input_handler` (resolved through `xr.renderingModeTable` once it is filled, see
+  above), writes `inputState.viewParams.ipdFactor`, and issues the request.
 - **Every other leg** (macOS, Linux, Android, engines — they carry their own session code):
 
 ```cpp
 #include "mode_switch.h"
+#include "mode_table.h"
 static dxr::ModeSwitch g_modeSwitch;               // defaults: 0.18 s SmoothStep, no configure() needed
+// modeTable: a dxr::ModeTable refreshed after xrCreateSession and on every mode-changed event
 
 int32_t want = -1;                                 // -1 = no request this frame
-if (vPressed)     want = dxr::ModeSwitch::cycleTarget(currentMode, modeCount);
-if (digitPressed) want = digit;                    // absolute 0-8; out-of-range is ignored
+if (vPressed)     want = modeTable.cycleTarget(currentMode);   // 2D<->3D toggle with two modes
+if (digitPressed) want = modeTable.digitTarget(digit);       // 0 = 2D, 1 = 3D; -1 = inert
 if (!canRequest)  want = -1;                       // no session / no PFN yet: the ramp still advances
 dxr::ModeSwitchFrame f = g_modeSwitch.step(dt, want, modeCount, modeViewCounts, currentMode, steadyIpd);
 rig.ipdFactor = f.ipd;                             // XrDisplayRigDXR / XrCameraRigDXR, THIS frame

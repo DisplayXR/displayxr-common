@@ -99,6 +99,11 @@ std::wstring FormatEyeTrackingInfo(const float eyePositions[][3], uint32_t eyeCo
     bool active, bool isTracking, uint32_t activeMode, uint32_t supportedModes,
     bool showModeToggleHint = true);
 std::wstring FormatParallaxInfo(bool parallaxEnabled, float eyePosX, float eyePosY);
+// FormatMode / FormatHelpText take the runtime's rendering-mode count. With
+// exactly two modes (the two-mode contract, runtime #2766) they read
+// "Mode: 2D" / "Mode: 3D (<mode name>)" and "V=2D/3D"; with more modes (an
+// older runtime) they keep the per-mode "[1-N]" / "1-N=Output" wording.
+// "[locked by workspace]" is appended whenever the mode is not requestable.
 std::wstring FormatMode(int outputMode, bool simDisplayAvailable, const char* modeName = nullptr, uint32_t modeCount = 0, bool display3D = true, bool isRequestable = true);
 std::wstring FormatCameraInfo(float cameraPosX, float cameraPosY, float cameraPosZ,
     float forwardX, float forwardY, float forwardZ, bool cameraMode = false);

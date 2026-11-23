@@ -250,9 +250,13 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             break;
         case 'V':
-            // Request a cycle to the next mode. Main loop reads the runtime's
-            // current mode index (xr.currentModeIndex) to compute the target
-            // and calls xrRequestDisplayRenderingModeDXR.
+            // V = the 2D/3D key. The handler only raises the request; the
+            // target is resolved where the mode table lives
+            // (XrSessionUpdateModeSwitch -> dxr::ModeTable::cycleTarget): with
+            // two modes (runtime #2766) it toggles between the table's flat()
+            // and stereo() modes; with more (an older runtime) it cycles to the
+            // next mode, as before. An app that consumes the flag itself and
+            // cycles (current + 1) % count gets the same toggle with two modes.
             state.cycleRenderingModeRequested = true;
             break;
         case 'I':
@@ -266,11 +270,17 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
             // xrRequestFilePickerDXR, polls events for the completion.
             state.filePickerRequestRequested = true;
             break;
+        // Digits. XrSessionUpdateModeSwitch resolves them through
+        // dxr::ModeTable::digitTarget once the table is filled: 0 = the flat()
+        // mode, 1 = the stereo() mode when there are exactly two modes (the
+        // same thing as mode index 1 on such a runtime), 2-8 = that mode index.
+        // 2-8 stay gated on the count, so they are inert with two modes and
+        // still address their mode on an older runtime that reports more.
         case '0':
-            state.absoluteRenderingModeRequested = 0; // 2D mode
+            state.absoluteRenderingModeRequested = 0; // 2D mode (flat())
             break;
         case '1':
-            if (state.renderingModeCount > 1) state.absoluteRenderingModeRequested = 1;
+            if (state.renderingModeCount > 1) state.absoluteRenderingModeRequested = 1; // 3D (stereo()) with two modes
             break;
         case '2':
             if (state.renderingModeCount > 2) state.absoluteRenderingModeRequested = 2;

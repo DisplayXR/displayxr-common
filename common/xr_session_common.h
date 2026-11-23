@@ -31,12 +31,14 @@
 #include <openxr/XR_DXR_atlas_capture.h>
 #include <openxr/XR_DXR_mcp_tools.h>
 #include <DirectXMath.h>
+#include <cstring>
 #include <vector>
 #include <string>
 #include <functional>
 
 #include "view_params.h"
 #include "mode_switch.h"  // dxr::ModeSwitch — smooth 2D<->3D disparity sequencer
+#include "mode_table.h"   // dxr::ModeTable — rendering modes by meaning (two-mode contract)
 
 struct InputState; // fwd-decl: XrSessionUpdateModeSwitch consumes the input flags
 
@@ -187,6 +189,15 @@ struct XrSessionManager {
     // mode 1 as a fallback for runtimes that don't expose `isActive`; on
     // runtimes with XR_DXR_display_info v13+ the enumerate step replaces
     // this with the runtime-reported active mode (initial-mode-sync, #234).
+    //
+    // XrSessionRefreshRenderingModes() fills these arrays from
+    // `renderingModeTable` (and PollEvents re-reads them on every
+    // XrEventDataRenderingModeChangedDXR). Each mode lands in the slot named
+    // by its modeIndex, so `renderingModeXxx[currentModeIndex]` is that mode;
+    // renderingModeCount = highest modeIndex + 1 (== the mode count on every
+    // runtime, whose indices are dense). The arrays hold modeIndex 0-7; the
+    // table itself has no cap. Under the two-mode contract (runtime #2766)
+    // only slots 0 and 1 are used.
     uint32_t currentModeIndex = 1;
     uint32_t renderingModeCount = 0;
     char renderingModeNames[8][XR_MAX_SYSTEM_NAME_SIZE] = {};
@@ -200,6 +211,11 @@ struct XrSessionManager {
     // session is a non-controller workspace client (runtime drops requests).
     // Apps use this to gate mode-toggle UI ("Mode locked by workspace").
     bool renderingModeIsRequestable[8] = {};
+    // The full table the arrays above are filled from (no cap, modeIndex kept
+    // as reported). Empty until XrSessionRefreshRenderingModes() / the first
+    // rendering-mode-changed event; while it is empty every helper here falls
+    // back to the arrays alone, exactly as before the table existed.
+    dxr::ModeTable renderingModeTable;
 
     // Smooth 2D<->3D disparity ramp on a mode switch. One sequencer per session;
     // driven by XrSessionUpdateModeSwitch() each frame. modeSwitchConfigured gates
@@ -268,6 +284,61 @@ bool CreateQuadLayerSwapchain(XrSessionManager& xr, uint32_t width, uint32_t hei
 bool AcquireQuadSwapchainImage(XrSessionManager& xr, uint32_t& imageIndex);
 bool ReleaseQuadSwapchainImage(XrSessionManager& xr);
 
+// Enumerate the session's rendering modes into xr.renderingModeTable and fill
+// the renderingMode* arrays + currentModeIndex from it (the one copy of the
+// loop every app used to carry). Call once after xrCreateSession; PollEvents
+// calls it again on every XrEventDataRenderingModeChangedDXR. Needs
+// xr.pfnEnumerateDisplayRenderingModesEXT and xr.session; a no-op returning
+// false without them. Returns true when the count or any mode's view count,
+// tile layout or scale changed (dxr::ModeTable::refresh). It does NOT
+// recreate the swapchain.
+bool XrSessionRefreshRenderingModes(XrSessionManager& xr);
+
+// Fill the renderingMode* arrays, renderingModeCount and (when the runtime
+// flags one active) currentModeIndex from xr.renderingModeTable. Leaves them
+// untouched while the table is empty. Inline (no OpenXR calls) so it stays
+// usable — and testable — without the loader.
+inline void XrSessionApplyModeTable(XrSessionManager& xr) {
+    const dxr::ModeTable& t = xr.renderingModeTable;
+    if (t.empty()) {
+        return;
+    }
+    const uint32_t kSlots = 8;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < kSlots; i++) {
+        xr.renderingModeNames[i][0] = '\0';
+        xr.renderingModeViewCounts[i] = 0;
+        xr.renderingModeTileColumns[i] = 0;
+        xr.renderingModeTileRows[i] = 0;
+        xr.renderingModeScaleX[i] = 0.0f;
+        xr.renderingModeScaleY[i] = 0.0f;
+        xr.renderingModeDisplay3D[i] = false;
+        xr.renderingModeIsRequestable[i] = false;
+    }
+    for (const XrDisplayRenderingModeInfoDXR& m : t.modes()) {
+        if (m.modeIndex >= kSlots) {
+            continue; // beyond the public arrays; still in the table
+        }
+        const uint32_t s = m.modeIndex;
+        std::memcpy(xr.renderingModeNames[s], m.modeName, XR_MAX_SYSTEM_NAME_SIZE);
+        xr.renderingModeNames[s][XR_MAX_SYSTEM_NAME_SIZE - 1] = '\0';
+        xr.renderingModeViewCounts[s] = m.viewCount;
+        xr.renderingModeTileColumns[s] = m.tileColumns;
+        xr.renderingModeTileRows[s] = m.tileRows;
+        xr.renderingModeScaleX[s] = m.viewScaleX;
+        xr.renderingModeScaleY[s] = m.viewScaleY;
+        xr.renderingModeDisplay3D[s] = m.hardwareDisplay3D ? true : false;
+        xr.renderingModeIsRequestable[s] = m.isRequestable ? true : false;
+        if (s + 1 > count) {
+            count = s + 1;
+        }
+    }
+    xr.renderingModeCount = count;
+    if (const XrDisplayRenderingModeInfoDXR* a = t.active()) {
+        xr.currentModeIndex = a->modeIndex; // v13 initial-mode-sync
+    }
+}
+
 // Consume the V/0-8 mode-switch requests and drive the smooth 2D<->3D disparity
 // ramp for ONE frame. Replaces the hand-rolled "if (cycleRenderingModeRequested)
 // pfnRequestDisplayRenderingModeEXT(...)" consume block: funnels both the cycle
@@ -276,6 +347,13 @@ bool ReleaseQuadSwapchainImage(XrSessionManager& xr);
 // request on the single frame the sequencer says to fire. steadyIpd comes from
 // state.viewParams.steadyIpdFactor (the user-tuned target). dt is wall-clock
 // seconds. Safe to call every frame; idle is a no-op beyond writing the steady ipd.
+//
+// Once xr.renderingModeTable is filled the requests resolve by MEANING
+// (dxr::ModeTable::cycleTarget / digitTarget): with two modes V toggles
+// 2D<->3D, 0 asks for the 2D mode and 1 for the 3D mode; with more modes (an
+// older runtime) V cycles and every digit addresses its mode index, as before.
+// It also copies xr.renderingModeCount into state.renderingModeCount so the
+// digit gating follows a re-read table.
 void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt);
 
 // Poll for OpenXR events and update session state
