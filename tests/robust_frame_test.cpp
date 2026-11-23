@@ -102,6 +102,11 @@ test_thin_outlier()
 	const float symFullZ = 2.0f * (f.pivot[2] + 5.0f);
 	CHECK(near(ext[2], symFullZ * 0.8f / 0.9f, 1e-4f));
 	CHECK(ext[2] > f.trimmedExtent[2]);
+	// The frame form pins the guard to the pivot and reports it.
+	float ext2[3], piv[3];
+	dxr::RobustFitExtent(f, f.boxMin, f.boxMax, 0.8f, ext2, piv);
+	CHECK(std::memcmp(ext, ext2, sizeof(ext)) == 0);
+	CHECK(piv[0] == f.pivot[0] && piv[1] == f.pivot[1] && piv[2] == f.pivot[2]);
 	// x/y: the box is symmetric about the (near-zero) centre, so the cap
 	// (1.0 * 0.8 / 0.9 < 1) never binds and the trimmed extent wins.
 	CHECK(near(ext[0], f.trimmedExtent[0], 1e-6f) || ext[0] >= f.trimmedExtent[0]);

@@ -303,6 +303,31 @@ RobustFitExtent(const float trimmed[3],
 	}
 }
 
+//! The recommended form: the fit extent with the guard PINNED TO THE PIVOT
+//! { frame median x, box-centre y, frame median z } — exactly what the web
+//! SDK's addModel measures (displayxr-web#330), so both ports produce
+//! identical extents. `boxMin`/`boxMax` is the box the app frames with (pass
+//! frame.boxMin/boxMax when there is no other; an animated model may pass its
+//! swept bounds, which then also supply the pivot's y). `outPivot` (optional)
+//! receives that pivot, which is the point to turn about.
+inline void
+RobustFitExtent(const RobustFrame &frame,
+                const float boxMin[3],
+                const float boxMax[3],
+                float fill,
+                float outExtent[3],
+                float outPivot[3] = nullptr,
+                float capFill = kRobustFrameCapFill)
+{
+	const float pivot[3] = {frame.pivot[0], 0.5f * (boxMin[1] + boxMax[1]), frame.pivot[2]};
+	RobustFitExtent(frame.trimmedExtent, boxMin, boxMax, pivot, fill, outExtent, capFill);
+	if (outPivot != nullptr) {
+		for (int i = 0; i < 3; ++i) {
+			outPivot[i] = pivot[i];
+		}
+	}
+}
+
 //! The screen-plane slide, in MODEL units: how far the pivot sits in front of
 //! the glass once `zdpDepth` is put on it (negative = the subject slides back).
 //! Multiply by the model's display scale (fit x zoom) and translate along the
