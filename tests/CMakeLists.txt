@@ -50,6 +50,15 @@ set_target_properties(displayxr_view_config_test PROPERTIES
 
 add_test(NAME displayxr_view_config_test COMMAND displayxr_view_config_test)
 
+# robust_frame.h contract test (displayxr-demo-modelviewer#192,
+# displayxr-web#327): area-weighted robust framing. Header-only, pure.
+add_executable(displayxr_robust_frame_test robust_frame_test.cpp)
+target_link_libraries(displayxr_robust_frame_test PRIVATE displayxr::rules)
+set_target_properties(displayxr_robust_frame_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+add_test(NAME displayxr_robust_frame_test COMMAND displayxr_robust_frame_test)
+
 # csd_titlebar contract test (displayxr-common#52): rounded-corner alpha, hit
 # testing, packing, double-click. Window-system free, so it runs everywhere.
 add_executable(displayxr_csd_test csd_test.cpp)
