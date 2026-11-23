@@ -5287,6 +5287,17 @@ DxrLinuxWindow::drain_workspace_input()
 			if (m_ws_input_count++ == 0) {
 				DXRW_INFO("workspace input: first routed event delivered (type %d)", (int)e.eventType);
 			}
+			// DXR_WS_INPUT_LOG=1: one line per delivered event (diagnostics).
+			static const bool log_each = [] {
+				const char *v = getenv("DXR_WS_INPUT_LOG");
+				return v != nullptr && v[0] == '1';
+			}();
+			if (log_each) {
+				DXRW_INFO("workspace input: type=%d keysym=0x%x down=%d button=%u mods=0x%x pos=(%d,%d) "
+				          "scroll=%d",
+				          (int)e.eventType, out.keysym, (int)e.isDown, out.button, out.mods, out.x, out.y,
+				          out.scroll_steps);
+			}
 			m_events.push_back(out);
 		}
 		if (n < 32) {
