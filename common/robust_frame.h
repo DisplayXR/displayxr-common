@@ -71,6 +71,8 @@
  * triangles plus kRobustFrameSamples samples and three sorts — a few ms.
  */
 #pragma once
+// (std::min)/(std::max) are parenthesised throughout so the header survives a
+// <windows.h> included without NOMINMAX.
 
 #include <algorithm>
 #include <cmath>
@@ -203,7 +205,7 @@ public:
 		for (int k = 0; k < samples; ++k) {
 			const double r = rnd() * total_;
 			const size_t ti = (size_t)(std::lower_bound(cum_.begin(), cum_.end(), r) - cum_.begin());
-			const Tri &t = tris_[std::min(ti, tris_.size() - 1)];
+			const Tri &t = tris_[(std::min)(ti, tris_.size() - 1)];
 			float u = (float)rnd(), v = (float)rnd();
 			if (u + v > 1.0f) {
 				u = 1.0f - u;
@@ -217,7 +219,7 @@ public:
 			std::vector<float> &a = axis[i];
 			std::sort(a.begin(), a.end());
 			auto pct = [&](float q) {
-				return a[std::min(a.size() - 1, (size_t)(q * (float)(a.size() - 1) + 0.5f))];
+				return a[(std::min)(a.size() - 1, (size_t)(q * (float)(a.size() - 1) + 0.5f))];
 			};
 			out.p01[i] = pct(0.01f);
 			out.median[i] = pct(0.50f);
@@ -225,7 +227,7 @@ public:
 			out.p99[i] = pct(0.99f);
 			out.boxMin[i] = boxMin_[i];
 			out.boxMax[i] = boxMax_[i];
-			out.trimmedExtent[i] = std::max(out.p99[i] - out.p01[i], 1e-6f);
+			out.trimmedExtent[i] = (std::max)(out.p99[i] - out.p01[i], 1e-6f);
 		}
 		out.pivot[0] = out.median[0];
 		out.pivot[1] = 0.5f * (boxMin_[1] + boxMax_[1]);
@@ -253,14 +255,14 @@ private:
 			return;
 		}
 		for (int i = 0; i < 3; ++i) {
-			const float lo = std::min(t.a[i], std::min(t.b[i], t.c[i]));
-			const float hi = std::max(t.a[i], std::max(t.b[i], t.c[i]));
+			const float lo = (std::min)(t.a[i], (std::min)(t.b[i], t.c[i]));
+			const float hi = (std::max)(t.a[i], (std::max)(t.b[i], t.c[i]));
 			if (tris_.empty()) {
 				boxMin_[i] = lo;
 				boxMax_[i] = hi;
 			} else {
-				boxMin_[i] = std::min(boxMin_[i], lo);
-				boxMax_[i] = std::max(boxMax_[i], hi);
+				boxMin_[i] = (std::min)(boxMin_[i], lo);
+				boxMax_[i] = (std::max)(boxMax_[i], hi);
 			}
 		}
 		total_ += area;
@@ -298,8 +300,8 @@ RobustFitExtent(const float trimmed[3],
 {
 	const float scale = (capFill > 0.0f) ? fill / capFill : 1.0f;
 	for (int i = 0; i < 3; ++i) {
-		const float symFull = 2.0f * std::max(std::fabs(boxMax[i] - centre[i]), std::fabs(centre[i] - boxMin[i]));
-		out[i] = std::max(trimmed[i], symFull * scale);
+		const float symFull = 2.0f * (std::max)(std::fabs(boxMax[i] - centre[i]), std::fabs(centre[i] - boxMin[i]));
+		out[i] = (std::max)(trimmed[i], symFull * scale);
 	}
 }
 
