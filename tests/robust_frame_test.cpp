@@ -165,7 +165,14 @@ test_determinism_and_degenerate()
 	dxr::RobustFrame f1, f2;
 	CHECK(s.compute(f1));
 	CHECK(s.compute(f2));
-	CHECK(std::memcmp(&f1, &f2, sizeof(f1)) == 0);
+	// Field by field: the struct has padding after `valid`, which memcmp would read.
+	CHECK(f1.valid == f2.valid && f1.zdpDepth == f2.zdpDepth);
+	CHECK(std::memcmp(f1.median, f2.median, sizeof(f1.median)) == 0);
+	CHECK(std::memcmp(f1.p01, f2.p01, sizeof(f1.p01)) == 0);
+	CHECK(std::memcmp(f1.p75, f2.p75, sizeof(f1.p75)) == 0);
+	CHECK(std::memcmp(f1.p99, f2.p99, sizeof(f1.p99)) == 0);
+	CHECK(std::memcmp(f1.pivot, f2.pivot, sizeof(f1.pivot)) == 0);
+	CHECK(std::memcmp(f1.trimmedExtent, f2.trimmedExtent, sizeof(f1.trimmedExtent)) == 0);
 
 	// Out-of-range indices, zero-area and non-finite triangles are skipped;
 	// nothing usable -> invalid.
