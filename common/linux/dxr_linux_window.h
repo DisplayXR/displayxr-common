@@ -145,6 +145,7 @@
 #include <openxr/openxr.h>
 #include <openxr/XR_DXR_xlib_window_binding.h>
 #include <openxr/XR_DXR_wayland_surface_binding.h>
+#include "dxr_workspace_input.h" // XR_DXR_workspace_client_input: routed input inside the workspace
 
 #include <atomic>
 #include <bitset>
@@ -804,6 +805,28 @@ public:
 	attach_session(XrInstance instance, XrSession session);
 
 	/*!
+	 * WORKSPACE INPUT. Inside the DisplayXR workspace the window is never
+	 * shown (DxrLinuxWindowDesc::start_hidden) and the pointer and keyboard
+	 * are on the service's surface, so the window itself receives nothing.
+	 * The runtime routes the app's share — keys while it has focus, pointer
+	 * and scroll over its window — to a per-app queue, and attach_session()
+	 * arms the drain when the instance enabled
+	 * XR_DXR_WORKSPACE_CLIENT_INPUT_EXTENSION_NAME (enable it whenever the
+	 * runtime advertises it; outside a workspace the drain returns nothing).
+	 * pump() / pump_events() then deliver those events as ordinary
+	 * DxrWindowEvents in CONTENT buffer px — the same events the window gives
+	 * when shown, so the app's handler is unchanged. Windows needs none of
+	 * this: there the service posts into the app's hidden HWND.
+	 *
+	 * @return true once the drain is armed (diagnostics only).
+	 */
+	bool
+	has_workspace_input() const
+	{
+		return m_pfn_ws_client_input != nullptr;
+	}
+
+	/*!
 	 * Republish the surface size to the runtime NOW, whatever the compositor
 	 * last configured.
 	 *
@@ -1171,6 +1194,15 @@ private:
 	// --- Mid-session geometry channel (spec v2) -----------------------------
 	XrSession m_session = XR_NULL_HANDLE;
 	PFN_xrSetWaylandSurfaceGeometryDXR m_pfn_set_wl_geometry = nullptr;
+
+	// --- Workspace input (XR_DXR_workspace_client_input) --------------------
+	PFN_xrEnumerateWorkspaceClientInputEventsDXR m_pfn_ws_client_input = nullptr;
+	uint64_t m_ws_input_count = 0; //!< events delivered (the first one logs)
+
+	//! Drain the routed workspace input into m_events. Called from pump_impl.
+	void
+	drain_workspace_input();
+
 	//! Last size actually published, so pump() only calls on a real change.
 	uint32_t m_wl_published_w = 0;
 	uint32_t m_wl_published_h = 0;

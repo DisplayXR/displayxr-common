@@ -52,6 +52,7 @@ add_library(displayxr_linux_window STATIC
     "${_dxr_lw_dir}/dxr_drag.h"
     "${_dxr_lw_dir}/dxr_input_text.h"
     "${_dxr_lw_dir}/dxr_fd_drain.h"
+    "${_dxr_lw_dir}/dxr_workspace_input.h"
     "${_dxr_lw_dir}/dxr_x11_dnd.cpp"
     "${_dxr_lw_dir}/dxr_x11_dnd.h"
 )

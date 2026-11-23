@@ -89,6 +89,17 @@ if(TARGET displayxr::linux_window)
     set_target_properties(displayxr_linux_window_test PROPERTIES
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME displayxr_linux_window_test COMMAND displayxr_linux_window_test)
+
+    # Workspace input (dxr_workspace_input.h, pure): the routed input a content
+    # app drains inside the DisplayXR workspace, as window events. Linked to the
+    # window target only for its OpenXR include path; needs no display.
+    add_executable(displayxr_linux_window_workspace_input_test linux_window_workspace_input_test.cpp)
+    target_link_libraries(displayxr_linux_window_workspace_input_test PRIVATE displayxr::linux_window)
+    target_include_directories(displayxr_linux_window_workspace_input_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../common/linux")
+    set_target_properties(displayxr_linux_window_workspace_input_test PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME displayxr_linux_window_workspace_input_test COMMAND displayxr_linux_window_workspace_input_test)
 endif()
 
 # The Wayland drag lattice's table build at any output scale (pure; runs on
