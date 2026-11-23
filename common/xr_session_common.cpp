@@ -438,16 +438,35 @@ void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt
 
     // Funnel the V-cycle and the 0-8 absolute requests into one target. Absolute
     // wins if both fired the same frame. Clear the flags as we consume them.
+    //
+    // With a filled table the requests resolve by meaning (two modes: V toggles
+    // flat()<->stereo(), 0 = flat(), 1 = stereo(); more modes: the historical
+    // cycle / per-index digits). Without one (an app that fills the arrays
+    // itself and has not seen a mode-changed event yet) the original
+    // array-count rules apply unchanged.
+    const dxr::ModeTable& table = xr.renderingModeTable;
+    if (!table.empty()) {
+        state.renderingModeCount = xr.renderingModeCount;
+    }
     int32_t target = -1;
     if (state.cycleRenderingModeRequested) {
         state.cycleRenderingModeRequested = false;
-        target = dxr::ModeSwitch::cycleTarget(xr.currentModeIndex, xr.renderingModeCount);
+        target = !table.empty() ? table.cycleTarget(xr.currentModeIndex)
+                                : dxr::ModeSwitch::cycleTarget(xr.currentModeIndex, xr.renderingModeCount);
     }
     if (state.absoluteRenderingModeRequested >= 0) {
         int32_t a = state.absoluteRenderingModeRequested;
         state.absoluteRenderingModeRequested = -1;
-        if ((uint32_t)a < xr.renderingModeCount) target = a;
+        if (!table.empty()) {
+            const int32_t t = table.digitTarget(a);
+            if (t >= 0) target = t;
+        } else if ((uint32_t)a < xr.renderingModeCount) {
+            target = a;
+        }
     }
+    // ModeSwitch indexes the per-mode arrays by mode index; a modeIndex past
+    // the public arrays (never seen on a real runtime) cannot be eased.
+    if (target >= 0 && (uint32_t)target >= xr.renderingModeCount) target = -1;
     const bool canRequest = xr.session != XR_NULL_HANDLE && xr.pfnRequestDisplayRenderingModeEXT != nullptr;
 
     const dxr::ModeSwitchFrame f = xr.modeSwitch.step(
@@ -457,6 +476,32 @@ void XrSessionUpdateModeSwitch(XrSessionManager& xr, InputState& state, float dt
     if (f.fire && canRequest) {
         xr.pfnRequestDisplayRenderingModeEXT(xr.session, f.mode);
     }
+}
+
+bool XrSessionRefreshRenderingModes(XrSessionManager& xr) {
+    if (xr.pfnEnumerateDisplayRenderingModesEXT == nullptr || xr.session == XR_NULL_HANDLE) {
+        return false;
+    }
+    const bool changed = xr.renderingModeTable.refresh(xr.pfnEnumerateDisplayRenderingModesEXT, xr.session);
+    if (!xr.renderingModeTable.lastRefreshOk()) {
+        LOG_WARN("xrEnumerateDisplayRenderingModesDXR failed; keeping the previous mode table");
+        return false;
+    }
+    XrSessionApplyModeTable(xr);
+    if (changed) {
+        LOG_INFO("Display rendering modes (%u%s):", (uint32_t)xr.renderingModeTable.size(),
+                 xr.renderingModeTable.isTwoMode() ? ", 2D/3D" : "");
+        for (const XrDisplayRenderingModeInfoDXR& m : xr.renderingModeTable.modes()) {
+            LOG_INFO("  [%u] %s (views=%u, tiles=%ux%u, scale=%.2fx%.2f, 3D=%d, active=%d, requestable=%d)",
+                     m.modeIndex, m.modeName, m.viewCount, m.tileColumns, m.tileRows, m.viewScaleX,
+                     m.viewScaleY, m.hardwareDisplay3D ? 1 : 0, m.isActive ? 1 : 0, m.isRequestable ? 1 : 0);
+            if (m.modeIndex >= 8) {
+                LOG_WARN("  mode index %u is past the renderingMode* arrays (0-7); it is kept in "
+                         "renderingModeTable only", m.modeIndex);
+            }
+        }
+    }
+    return changed;
 }
 
 bool PollEvents(XrSessionManager& xr) {
@@ -515,6 +560,18 @@ bool PollEvents(XrSessionManager& xr) {
             LOG_INFO("Rendering mode changed: %u -> %u",
                 modeEvent->previousModeIndex, modeEvent->currentModeIndex);
             xr.currentModeIndex = modeEvent->currentModeIndex;
+            // Re-read the table: under the two-mode contract the 3D mode's
+            // layout (view count / tiles / scale) can differ from what was
+            // enumerated at start-up. The event's index stays authoritative.
+            // Swapchain recreation on a layout change is the app's call.
+            if (xr.pfnEnumerateDisplayRenderingModesEXT != nullptr && xr.session != XR_NULL_HANDLE) {
+                if (XrSessionRefreshRenderingModes(xr)) {
+                    LOG_WARN("Rendering mode table changed on mode switch (%u modes); the "
+                             "swapchain is NOT recreated by this helper",
+                             (uint32_t)xr.renderingModeTable.size());
+                }
+                xr.currentModeIndex = modeEvent->currentModeIndex;
+            }
             break;
         }
         case (XrStructureType)XR_TYPE_EVENT_DATA_EYE_TRACKING_STATE_CHANGED_DXR: {

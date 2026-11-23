@@ -369,6 +369,38 @@ static void test_session_manager_defaults()
     CHECK(xr.spinSpeed == 0.5f, "MCP-settable spin speed defaults to 0.5");
 }
 
+// XrSessionApplyModeTable (inline, loader-free): the public renderingMode*
+// arrays are filled from the table, each mode in the slot named by its
+// modeIndex, and left alone while the table is empty.
+static XrDisplayRenderingModeInfoDXR make_mode(uint32_t, const char*, uint32_t, bool, uint32_t, uint32_t,
+                                               float, float, bool, bool);
+static void test_session_apply_mode_table()
+{
+    XrSessionManager xr;
+    xr.renderingModeCount = 3; // an app that filled the arrays itself
+    xr.renderingModeViewCounts[2] = 4;
+    XrSessionApplyModeTable(xr);
+    CHECK(xr.renderingModeCount == 3 && xr.renderingModeViewCounts[2] == 4 && xr.currentModeIndex == 1,
+          "empty table leaves app-filled arrays alone");
+
+    const XrDisplayRenderingModeInfoDXR two[2] = {
+        make_mode(1, "Lenticular", 2, true, 2, 1, 0.5f, 1.0f, false, true),
+        make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, true, false),
+    };
+    xr.renderingModeTable.assign(two, 2);
+    XrSessionApplyModeTable(xr);
+    CHECK(xr.renderingModeCount == 2, "two-mode table -> count 2");
+    CHECK(xr.renderingModeViewCounts[0] == 1 && xr.renderingModeViewCounts[1] == 2 &&
+              xr.renderingModeViewCounts[2] == 0,
+          "slots follow modeIndex (not position); stale slot 2 cleared");
+    CHECK(std::strcmp(xr.renderingModeNames[1], "Lenticular") == 0 && xr.renderingModeDisplay3D[1] &&
+              !xr.renderingModeDisplay3D[0] && xr.renderingModeTileColumns[1] == 2 &&
+              xr.renderingModeScaleX[1] == 0.5f && xr.renderingModeIsRequestable[1] &&
+              !xr.renderingModeIsRequestable[0],
+          "per-mode fields copied into the modeIndex slot");
+    CHECK(xr.currentModeIndex == 0, "currentModeIndex follows the active mode");
+}
+
 // EndFrame / EndFrameWithWindowSpaceLayers `frameEndNext` (content_bounds.h's
 // dxr::ChainContentBounds is the first user — see xr_session_common.h). This
 // is a HEADER-ONLY compile check, deliberately not a call or a runtime
@@ -1956,6 +1988,7 @@ int main()
 #ifdef _WIN32
     test_input_state_defaults();
     test_session_manager_defaults();
+    test_session_apply_mode_table();
     test_endframe_frame_end_next_signature();
 #endif
 #ifdef __APPLE__
