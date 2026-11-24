@@ -241,6 +241,12 @@ struct XrSessionManager {
     std::function<void(XrSessionManager& xr, bool recreateRequested)> onRenderingModeTableChanged;
     bool renderingModeRecreateWarned = false; // the one WARN for the reserved bit
     bool renderingModeFitWarned = false;      // the one WARN for a too-small swapchain
+    //! display_info v28: the runtime's worst-case statement (all zero = none
+    //! stated, an older runtime). Read once in CreateSwapchain.
+    uint32_t worstAtlasWidth = 0;
+    uint32_t worstAtlasHeight = 0;
+    uint32_t worstViewWidth = 0;
+    uint32_t worstViewHeight = 0;
 
     // Smooth 2D<->3D disparity ramp on a mode switch. One sequencer per session;
     // driven by XrSessionUpdateModeSwitch() each frame. modeSwitchConfigured gates

@@ -303,6 +303,28 @@ bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize) {
         // LAYERED with no per-mode info: fall back to a single recommended view.
         if (width == 0)  width  = view.recommendedImageRectWidth;
         if (height == 0) height = view.recommendedImageRectHeight;
+        // display_info v28 (ADR-047 Amendment 10): the table follows the
+        // window to other screens and other 3D modes, so the session screen's
+        // modes are not the worst case any more. Size at least at the worst
+        // case the runtime states (an older runtime leaves it zero).
+        if (xr.hasDisplayInfoExt && xr.instance != XR_NULL_HANDLE && xr.systemId != XR_NULL_SYSTEM_ID) {
+            XrDisplayRenderingWorstCaseDXR wc = {XR_TYPE_DISPLAY_RENDERING_WORST_CASE_DXR};
+            XrSystemProperties props = {XR_TYPE_SYSTEM_PROPERTIES};
+            props.next = &wc;
+            if (XR_SUCCEEDED(xrGetSystemProperties(xr.instance, xr.systemId, &props)) &&
+                wc.maxAtlasWidthPixels > 0 && wc.maxAtlasHeightPixels > 0) {
+                xr.worstAtlasWidth = wc.maxAtlasWidthPixels;
+                xr.worstAtlasHeight = wc.maxAtlasHeightPixels;
+                xr.worstViewWidth = wc.maxViewWidthPixels;
+                xr.worstViewHeight = wc.maxViewHeightPixels;
+                const uint32_t was_w = width, was_h = height;
+                dxr::SizeFromWorstCase(wc, layered, width, height, &width, &height);
+                LOG_INFO("Runtime worst case (display_info v28): atlas %ux%u, view %ux%u, %u views -> "
+                         "swapchain %ux%u (from the session screen's modes: %ux%u)",
+                         wc.maxAtlasWidthPixels, wc.maxAtlasHeightPixels, wc.maxViewWidthPixels,
+                         wc.maxViewHeightPixels, wc.maxViewCount, width, height, was_w, was_h);
+            }
+        }
         LOG_INFO("Swapchain at max-%s %ux%u (display %ux%u, %u modes, arraySize=%u)",
                  layered ? "view" : "atlas", width, height,
                  xr.displayPixelWidth, xr.displayPixelHeight, xr.renderingModeCount, arraySize);
@@ -539,7 +561,13 @@ void XrSessionHandleRenderingModeTableChanged(XrSessionManager& xr, const dxr::R
                  "(RECREATE_SWAPCHAINS bit); not implemented in this helper — "
                  "the old swapchain is kept and the runtime resamples");
     }
-    if (xr.swapchain.swapchain != XR_NULL_HANDLE && !xr.renderingModeFitWarned &&
+    // Sized at the runtime's v28 worst case: every table it can send fits by
+    // construction (a window on a larger screen is clamped by the runtime).
+    const bool sized_at_worst =
+        xr.worstAtlasWidth > 0 && xr.swapchain.width >= (xr.swapchain.arraySize > 1 ? xr.worstViewWidth
+                                                                                     : xr.worstAtlasWidth) &&
+        xr.swapchain.height >= (xr.swapchain.arraySize > 1 ? xr.worstViewHeight : xr.worstAtlasHeight);
+    if (xr.swapchain.swapchain != XR_NULL_HANDLE && !xr.renderingModeFitWarned && !sized_at_worst &&
         !xr.renderingModeTable.fits(xr.displayPixelWidth, xr.displayPixelHeight, xr.swapchain.width,
                                     xr.swapchain.height, xr.swapchain.arraySize)) {
         xr.renderingModeFitWarned = true;
@@ -548,7 +576,7 @@ void XrSessionHandleRenderingModeTableChanged(XrSessionManager& xr, const dxr::R
                                              xr.swapchain.arraySize > 1, &needW, &needH);
         LOG_WARN("Rendering mode table now needs %ux%u full-screen (arraySize %u), larger than the "
                  "%ux%u swapchain allocated at start; tiles must be clamped to the swapchain "
-                 "(display_info v27 states no app-visible worst case yet, ADR-066 stage 3)",
+                 "(this runtime states no worst case: display_info < v28)",
                  needW, needH, xr.swapchain.arraySize, xr.swapchain.width, xr.swapchain.height);
     }
     if (xr.onRenderingModeTableChanged) {

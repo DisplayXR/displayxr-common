@@ -77,7 +77,50 @@ typedef struct XrEventDataRenderingModeTableChangedDXR {
 #endif
 #endif
 
+/*
+ * display_info v28 (ADR-047 Amendment 10): the instance's worst case - the
+ * largest atlas and per-view rect any mode of any screen the runtime claimed
+ * can ask for, chained on XrSystemProperties. Defined here for a vendored
+ * header older than v28 (same gate as above).
+ */
+#if !defined(XR_DXR_display_info_SPEC_VERSION) || XR_DXR_display_info_SPEC_VERSION < 28
+#ifndef XR_TYPE_DISPLAY_RENDERING_WORST_CASE_DXR
+#define XR_TYPE_DISPLAY_RENDERING_WORST_CASE_DXR ((XrStructureType)1004999452)
+typedef struct XrDisplayRenderingWorstCaseDXR {
+	XrStructureType type;
+	void *XR_MAY_ALIAS next;
+	uint32_t maxAtlasWidthPixels;
+	uint32_t maxAtlasHeightPixels;
+	uint32_t maxViewWidthPixels;
+	uint32_t maxViewHeightPixels;
+	uint32_t maxViewCount;
+} XrDisplayRenderingWorstCaseDXR;
+#endif
+#endif
+
 namespace dxr {
+
+/*!
+ * The swapchain size to allocate once: the larger of what the app computed
+ * from the session screen's modes (@p computedW x @p computedH) and the
+ * runtime's v28 worst-case statement (@p wc; all zero = an older runtime that
+ * states none, so the computed size stands). TILED takes the atlas, LAYERED
+ * the per-view rect. Pure.
+ */
+inline void
+SizeFromWorstCase(const XrDisplayRenderingWorstCaseDXR &wc,
+                  bool layered,
+                  uint32_t computedW,
+                  uint32_t computedH,
+                  uint32_t *outW,
+                  uint32_t *outH)
+{
+	const uint32_t w = layered ? wc.maxViewWidthPixels : wc.maxAtlasWidthPixels;
+	const uint32_t h = layered ? wc.maxViewHeightPixels : wc.maxAtlasHeightPixels;
+	*outW = w > computedW ? w : computedW;
+	*outH = h > computedH ? h : computedH;
+}
+
 
 //! What an XrEventDataRenderingModeTableChangedDXR asks of the app, decoded.
 //! Unknown flag bits are ignored (forward compatibility).
