@@ -217,6 +217,31 @@ struct XrSessionManager {
     // back to the arrays alone, exactly as before the table existed.
     dxr::ModeTable renderingModeTable;
 
+    // XR_DXR_display_info v27 (runtime ADR-066 C1): the table can change while
+    // the active index does not (the user switched the screen's 3D mode, so
+    // slot 1 now describes another entry: view count, tiles, view scale).
+    // PollEvents handles XrEventDataRenderingModeTableChangedDXR by re-reading
+    // the table into renderingModeTable + the renderingMode* arrays above and
+    // re-asserting currentModeIndex from the event. An app that reads those
+    // arrays every frame (view count, tile layout, per-view render size =
+    // window x renderingModeScale*) follows with no extra code. An app that
+    // caches anything derived from them re-derives it on one of:
+    //  - renderingModeTableGeneration: bumped once per table-changed event;
+    //  - renderingModeTableChanged: a latch PollEvents sets, the app clears;
+    //  - onRenderingModeTableChanged: called from PollEvents after the
+    //    refresh (main loop, no locking), with `recreateRequested` = the
+    //    reserved RECREATE_SWAPCHAINS bit (never set by a v27 runtime; this
+    //    helper does NOT recreate the swapchain, it logs one WARN).
+    // The swapchain is NOT reallocated: v27 promises it is still large enough
+    // (it was sized over the driver's full declared list). PollEvents checks
+    // that against `swapchain` (renderingModeTable.fits) and WARNs once if the
+    // new table needs more than was allocated.
+    uint32_t renderingModeTableGeneration = 0;
+    bool renderingModeTableChanged = false;
+    std::function<void(XrSessionManager& xr, bool recreateRequested)> onRenderingModeTableChanged;
+    bool renderingModeRecreateWarned = false; // the one WARN for the reserved bit
+    bool renderingModeFitWarned = false;      // the one WARN for a too-small swapchain
+
     // Smooth 2D<->3D disparity ramp on a mode switch. One sequencer per session;
     // driven by XrSessionUpdateModeSwitch() each frame. modeSwitchConfigured gates
     // the one-time configure() so the helper stays a single self-contained call.
@@ -293,6 +318,14 @@ bool ReleaseQuadSwapchainImage(XrSessionManager& xr);
 // tile layout or scale changed (dxr::ModeTable::refresh). It does NOT
 // recreate the swapchain.
 bool XrSessionRefreshRenderingModes(XrSessionManager& xr);
+
+// Handle a decoded XrEventDataRenderingModeTableChangedDXR (display_info v27):
+// re-read the table (XrSessionRefreshRenderingModes), set currentModeIndex to
+// the event's activeModeIndex, bump renderingModeTableGeneration, set the
+// renderingModeTableChanged latch, check the swapchain still fits, and call
+// onRenderingModeTableChanged. PollEvents calls it; an app with its own event
+// loop can call it directly. Never recreates the swapchain.
+void XrSessionHandleRenderingModeTableChanged(XrSessionManager& xr, const dxr::RenderingModeTableChange& change);
 
 // Fill the renderingMode* arrays, renderingModeCount and (when the runtime
 // flags one active) currentModeIndex from xr.renderingModeTable. Leaves them

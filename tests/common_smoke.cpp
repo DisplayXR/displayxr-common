@@ -401,6 +401,34 @@ static void test_session_apply_mode_table()
     CHECK(xr.currentModeIndex == 0, "currentModeIndex follows the active mode");
 }
 
+// XrSessionManager carries the v27 table-changed signal fields (the handler
+// itself is in xr_session_common.cpp, which needs the loader).
+static void test_session_table_changed_defaults()
+{
+    XrSessionManager xr;
+    CHECK(xr.renderingModeTableGeneration == 0 && !xr.renderingModeTableChanged &&
+              !xr.onRenderingModeTableChanged,
+          "table-changed signal idle at init");
+    // The refresh path the handler runs: a remapped slot 1 lands in the arrays.
+    const XrDisplayRenderingModeInfoDXR before[2] = {
+        make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+        make_mode(1, "Same as 2D", 1, false, 1, 1, 1.0f, 1.0f, true),
+    };
+    xr.renderingModeTable.assign(before, 2);
+    XrSessionApplyModeTable(xr);
+    CHECK(xr.renderingModeViewCounts[1] == 1 && xr.currentModeIndex == 1, "start: slot 1 = one view");
+    const XrDisplayRenderingModeInfoDXR after[2] = {
+        make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+        make_mode(1, "Anaglyph", 2, true, 2, 1, 0.5f, 0.5f, true),
+    };
+    CHECK(xr.renderingModeTable.assign(after, 2), "remap is a layout change");
+    XrSessionApplyModeTable(xr);
+    CHECK(xr.renderingModeViewCounts[1] == 2 && xr.renderingModeTileColumns[1] == 2 &&
+              xr.renderingModeScaleX[1] == 0.5f && xr.renderingModeScaleY[1] == 0.5f &&
+              std::strcmp(xr.renderingModeNames[1], "Anaglyph") == 0 && xr.currentModeIndex == 1,
+          "arrays follow the remapped slot 1, index unchanged");
+}
+
 // HUD wording (text_overlay.cpp): two modes -> 2D / 3D; more -> per-mode text.
 static void test_mode_hud_text()
 {
@@ -695,6 +723,81 @@ static void test_mode_table()
         fe.modes.push_back(make_mode(3, "3D-b", 2, true, 2, 1, 0.5f, 1.0f, false));
         CHECK(t.refresh(std::ref(fe)) && !t.isTwoMode(), "count change is a change");
     }
+}
+
+// display_info v27 (runtime ADR-066 C1): the table changes under a running
+// session (slot 1 remapped to another declared entry), the index does not.
+static void test_mode_table_changed_event()
+{
+    // The event type / struct are available whatever header the consumer pins.
+    CHECK((int64_t)XR_TYPE_EVENT_DATA_RENDERING_MODE_TABLE_CHANGED_DXR == 1004999451,
+          "table-changed event type value");
+    CHECK(XR_RENDERING_MODE_TABLE_CHANGE_RECREATE_SWAPCHAINS_BIT_DXR == 1, "recreate bit value");
+
+    XrEventDataBuffer buf;
+    std::memset(&buf, 0, sizeof(buf));
+    auto* e = reinterpret_cast<XrEventDataRenderingModeTableChangedDXR*>(&buf);
+    e->type = XR_TYPE_EVENT_DATA_RENDERING_MODE_TABLE_CHANGED_DXR;
+    e->activeModeIndex = 1;
+    e->flags = 0;
+    dxr::RenderingModeTableChange c;
+    CHECK(dxr::DecodeRenderingModeTableChanged((const XrEventDataBaseHeader*)&buf, &c), "decodes its own type");
+    CHECK(c.activeModeIndex == 1 && !c.recreateSwapchains, "index carried, no recreate");
+    e->flags = 0xF0ull; // unknown bits only
+    CHECK(dxr::DecodeRenderingModeTableChanged((const XrEventDataBaseHeader*)&buf, &c) && !c.recreateSwapchains,
+          "unknown flag bits are ignored");
+    e->flags = 0xF1ull;
+    CHECK(dxr::DecodeRenderingModeTableChanged((const XrEventDataBaseHeader*)&buf, &c) && c.recreateSwapchains,
+          "recreate bit decoded among unknown bits");
+    buf.type = XR_TYPE_EVENT_DATA_RENDERING_MODE_CHANGED_DXR;
+    dxr::RenderingModeTableChange untouched;
+    untouched.activeModeIndex = 7;
+    CHECK(!dxr::DecodeRenderingModeTableChanged((const XrEventDataBaseHeader*)&buf, &untouched) &&
+              untouched.activeModeIndex == 7,
+          "another event type is not decoded and leaves out alone");
+    CHECK(!dxr::DecodeRenderingModeTableChanged(nullptr, &c), "null event");
+
+    // Slot 1 = "Same as 2D" (one view, scale 1, not hardware 3D), then remapped
+    // to an anaglyph-like entry, then a top-bottom one. Positional lookups.
+    FakeModeEnum fe;
+    fe.modes = {make_mode(0, "2D", 1, false, 1, 1, 1.0f, 1.0f, false),
+                make_mode(1, "Same as 2D", 1, false, 1, 1, 1.0f, 1.0f, true)};
+    dxr::ModeTable t;
+    t.refresh(std::ref(fe));
+    CHECK(t.isPositional(), "two slots 0/1 -> positional");
+    CHECK(t.flatModeIndex() == 0 && t.stereoModeIndex() == 1, "passthrough slot 1 is the 3D mode by position");
+    CHECK(t.cycleTarget(0) == 1 && t.cycleTarget(1) == 0, "V toggles by index with a passthrough slot 1");
+    CHECK(t.digitTarget(1) == 1, "1 = slot 1");
+
+    fe.modes[1] = make_mode(1, "Anaglyph", 2, true, 2, 1, 0.5f, 0.5f, true);
+    CHECK(t.refresh(std::ref(fe)), "remap to a 2-view entry is a layout change");
+    CHECK(t.find(1)->viewCount == 2 && t.find(1)->tileColumns == 2 && t.find(1)->viewScaleX == 0.5f,
+          "the new entry is read");
+    CHECK(t.stereoModeIndex() == 1 && t.active()->modeIndex == 1, "index unchanged");
+
+    // Worst case + fits: 1920x1080 panel.
+    uint32_t w = 0, h = 0;
+    CHECK(t.worstCaseAtlas(1920, 1080, false, &w, &h) && w == 1920 && h == 1080,
+          "2D + anaglyph: worst atlas = the panel");
+    CHECK(t.fits(1920, 1080, 1920, 1080), "panel-sized swapchain fits");
+    CHECK(t.worstCaseAtlas(1920, 1080, true, &w, &h) && w == 1920 && h == 1080, "layered: largest tile");
+    fe.modes[1] = make_mode(1, "Cropped SBS", 2, true, 1, 2, 0.5f, 0.5f, true);
+    CHECK(t.refresh(std::ref(fe)), "remap to top-bottom is a layout change");
+    CHECK(t.worstCaseAtlas(1920, 1080, false, &w, &h) && w == 1920 && h == 1080, "top-bottom fits the panel");
+    // An entry wider than the panel (2 full-width tiles) does not fit.
+    fe.modes[1] = make_mode(1, "Wide", 2, true, 2, 1, 1.0f, 1.0f, true);
+    t.refresh(std::ref(fe));
+    CHECK(t.worstCaseAtlas(1920, 1080, false, &w, &h) && w == 3840 && h == 1080, "wide entry needs 2x width");
+    CHECK(!t.fits(1920, 1080, 1920, 1080), "a panel-sized swapchain does not fit the wide entry");
+    CHECK(t.fits(1920, 1080, 1920, 1080, 2), "layered x2 fits it (one view per slice)");
+    fe.modes[1] = make_mode(1, "Quad", 4, true, 2, 2, 0.5f, 0.5f, true);
+    t.refresh(std::ref(fe));
+    CHECK(t.fits(1920, 1080, 1920, 1080) && !t.fits(1920, 1080, 1920, 1080, 2),
+          "4 views: tiled fits, a 2-slice array does not");
+    CHECK(t.fits(0, 0, 1, 1), "unknown display size fits trivially");
+    dxr::ModeTable empty;
+    CHECK(!empty.worstCaseAtlas(1920, 1080, false, &w, &h) && empty.fits(1920, 1080, 1, 1),
+          "empty table: no worst case, fits trivially");
 }
 
 // Smooth 2D<->3D mode-switch sequencer (mode_switch.h). Pure, deterministic.
@@ -2002,6 +2105,7 @@ int main()
     test_window_space_hud_types();
     test_mode_switch();
     test_mode_table();
+    test_mode_table_changed_event();
     test_rig_math();
     test_clip_policy();
     test_content_bounds();
@@ -2013,6 +2117,7 @@ int main()
     test_input_state_defaults();
     test_session_manager_defaults();
     test_session_apply_mode_table();
+    test_session_table_changed_defaults();
     test_mode_hud_text();
     test_endframe_frame_end_next_signature();
 #endif
