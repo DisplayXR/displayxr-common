@@ -801,6 +801,27 @@ static void test_mode_table_changed_event()
 }
 
 // Smooth 2D<->3D mode-switch sequencer (mode_switch.h). Pure, deterministic.
+// display_info v28: the swapchain is sized at the runtime's worst case when it
+// states one, and from the session screen's modes otherwise.
+static void test_size_from_worst_case()
+{
+    XrDisplayRenderingWorstCaseDXR wc = {XR_TYPE_DISPLAY_RENDERING_WORST_CASE_DXR};
+    uint32_t w = 0, h = 0;
+    dxr::SizeFromWorstCase(wc, false, 2880, 1800, &w, &h);
+    CHECK(w == 2880 && h == 1800, "no statement (older runtime): the computed size stands");
+    wc.maxAtlasWidthPixels = 3840;
+    wc.maxAtlasHeightPixels = 2160;
+    wc.maxViewWidthPixels = 3840;
+    wc.maxViewHeightPixels = 2160;
+    dxr::SizeFromWorstCase(wc, false, 2880, 1800, &w, &h);
+    CHECK(w == 3840 && h == 2160, "a larger screen elsewhere: the worst case wins (tiled)");
+    dxr::SizeFromWorstCase(wc, true, 1440, 1800, &w, &h);
+    CHECK(w == 3840 && h == 2160, "layered: the per-view worst case");
+    dxr::SizeFromWorstCase(wc, false, 5120, 1440, &w, &h);
+    CHECK(w == 5120 && h == 2160, "per-dimension maximum of the two");
+    CHECK(XR_TYPE_DISPLAY_RENDERING_WORST_CASE_DXR == (XrStructureType)1004999452, "v28 type value");
+}
+
 static void test_mode_switch()
 {
     const float DT = 0.06f; // 3 frames spans the default 0.18 s ramp.
@@ -2106,6 +2127,7 @@ int main()
     test_mode_switch();
     test_mode_table();
     test_mode_table_changed_event();
+    test_size_from_worst_case();
     test_rig_math();
     test_clip_policy();
     test_content_bounds();
