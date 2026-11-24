@@ -267,6 +267,17 @@ bool CreateSwapchain(XrSessionManager& xr, uint32_t arraySize) {
     // window size — but the swapchain has to accommodate full-screen so the
     // app can resize / fullscreen at any time without reallocating. Falls
     // back to recommended × (2,1) if display info is unavailable.
+    //
+    // display_info v27 (ADR-066 C1): the enumerate shows two slots, not the
+    // display driver's full declared list, and slot 1 can be remapped live to
+    // another entry (XrEventDataRenderingModeTableChangedDXR). The runtime
+    // sizes its own envelope over the full list, but v27 exposes no
+    // app-visible worst case: recommendedImageRect is the panel x the
+    // SMALLEST scale over the list, maxImageRect is max(compositor per-view
+    // max, panel). So the floor below (the panel itself) is what covers a
+    // later-selected entry; any entry with tileColumns x viewScaleX > 1 (or
+    // rows x scaleY > 1) outside the start-up slots would not fit. PollEvents
+    // re-checks on every table change and WARNs (renderingModeTable.fits).
     // Worst-case sizing across all rendering modes. TILED: the largest atlas
     // (cols·scaleX·displayW × rows·scaleY·displayH) — one image holding all
     // views. LAYERED: the largest single per-view tile (scaleX·displayW ×
@@ -504,6 +515,47 @@ bool XrSessionRefreshRenderingModes(XrSessionManager& xr) {
     return changed;
 }
 
+void XrSessionHandleRenderingModeTableChanged(XrSessionManager& xr, const dxr::RenderingModeTableChange& change) {
+    LOG_INFO("Rendering mode table changed (active mode %u, recreate=%d): re-reading the table",
+             change.activeModeIndex, change.recreateSwapchains ? 1 : 0);
+    XrSessionRefreshRenderingModes(xr);
+    // The event's index is authoritative (the table change does not move it;
+    // a coincident floor to 2D arrives as a mode-changed event first).
+    xr.currentModeIndex = change.activeModeIndex;
+    if (change.activeModeIndex < 8 && change.activeModeIndex < xr.renderingModeCount) {
+        LOG_INFO("  active mode %u is now '%s' (views=%u, tiles=%ux%u, scale=%.2fx%.2f)",
+                 change.activeModeIndex, xr.renderingModeNames[change.activeModeIndex],
+                 xr.renderingModeViewCounts[change.activeModeIndex],
+                 xr.renderingModeTileColumns[change.activeModeIndex],
+                 xr.renderingModeTileRows[change.activeModeIndex],
+                 xr.renderingModeScaleX[change.activeModeIndex],
+                 xr.renderingModeScaleY[change.activeModeIndex]);
+    }
+    xr.renderingModeTableGeneration++;
+    xr.renderingModeTableChanged = true;
+    if (change.recreateSwapchains && !xr.renderingModeRecreateWarned) {
+        xr.renderingModeRecreateWarned = true;
+        LOG_WARN("Rendering mode table change asks for swapchain recreation "
+                 "(RECREATE_SWAPCHAINS bit); not implemented in this helper — "
+                 "the old swapchain is kept and the runtime resamples");
+    }
+    if (xr.swapchain.swapchain != XR_NULL_HANDLE && !xr.renderingModeFitWarned &&
+        !xr.renderingModeTable.fits(xr.displayPixelWidth, xr.displayPixelHeight, xr.swapchain.width,
+                                    xr.swapchain.height, xr.swapchain.arraySize)) {
+        xr.renderingModeFitWarned = true;
+        uint32_t needW = 0, needH = 0;
+        xr.renderingModeTable.worstCaseAtlas(xr.displayPixelWidth, xr.displayPixelHeight,
+                                             xr.swapchain.arraySize > 1, &needW, &needH);
+        LOG_WARN("Rendering mode table now needs %ux%u full-screen (arraySize %u), larger than the "
+                 "%ux%u swapchain allocated at start; tiles must be clamped to the swapchain "
+                 "(display_info v27 states no app-visible worst case yet, ADR-066 stage 3)",
+                 needW, needH, xr.swapchain.arraySize, xr.swapchain.width, xr.swapchain.height);
+    }
+    if (xr.onRenderingModeTableChanged) {
+        xr.onRenderingModeTableChanged(xr, change.recreateSwapchains);
+    }
+}
+
 bool PollEvents(XrSessionManager& xr) {
     XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
 
@@ -571,6 +623,15 @@ bool PollEvents(XrSessionManager& xr) {
                              (uint32_t)xr.renderingModeTable.size());
                 }
                 xr.currentModeIndex = modeEvent->currentModeIndex;
+            }
+            break;
+        }
+        case (XrStructureType)XR_TYPE_EVENT_DATA_RENDERING_MODE_TABLE_CHANGED_DXR: {
+            // display_info v27: the table changed, the active index did not.
+            // Unknown flag bits are ignored by the decoder.
+            dxr::RenderingModeTableChange change;
+            if (dxr::DecodeRenderingModeTableChanged((const XrEventDataBaseHeader*)&event, &change)) {
+                XrSessionHandleRenderingModeTableChanged(xr, change);
             }
             break;
         }
