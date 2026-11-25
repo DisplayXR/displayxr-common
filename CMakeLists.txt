@@ -214,7 +214,13 @@ else()
         # Bumped 2026-10-12 to displayxr-extensions@main (runtime 1d7fd8b2a):
         # XR_DXR_cursor_depth.h SPEC_VERSION 7 (XR_CURSOR_DEPTH_SOURCE_MEASURED_DISPARITY_DXR,
         # ADR-046 Amendment 3), which CursorDepth::useMeasuredDisparity() sends.
-        GIT_TAG 722b47b6e555991487df1d7880ccb94b1e8fdaaa
+        # Bumped 2026-11-24 to displayxr-extensions@main d34dbbac (runtime
+        # 652db75e3): XR_DXR_display_info.h SPEC_VERSION 28 — the v27
+        # XrEventDataRenderingModeTableChangedDXR (ADR-066 C1) and the v28
+        # XrDisplayRenderingWorstCaseDXR (ADR-047 Amendment 10) that
+        # common/mode_table.h and xr_session_common use. mode_table.h keeps
+        # local fallbacks for consumers that vendor an older header.
+        GIT_TAG d34dbbacfd0eaeac9f361e0961b16cec532096c5
     )
     FetchContent_GetProperties(displayxr_extensions_headers)
     if(NOT displayxr_extensions_headers_POPULATED)

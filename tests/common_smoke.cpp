@@ -340,6 +340,28 @@ static void test_window_space_hud_types()
     CHECK(layer.width == 0.0f, "window-space layer zero-init");
 }
 
+// A rendering-mode entry for the mode-table tests (the Windows-only session
+// tests and the cross-platform dxr::ModeTable tests below both use it).
+static XrDisplayRenderingModeInfoDXR make_mode(uint32_t idx, const char* name, uint32_t views, bool hw3d,
+                                               uint32_t cols, uint32_t rows, float sx, float sy,
+                                               bool active, bool requestable = true)
+{
+    XrDisplayRenderingModeInfoDXR m;
+    std::memset(&m, 0, sizeof(m));
+    m.type = XR_TYPE_DISPLAY_RENDERING_MODE_INFO_DXR;
+    m.modeIndex = idx;
+    std::snprintf(m.modeName, sizeof(m.modeName), "%s", name);
+    m.viewCount = views;
+    m.hardwareDisplay3D = hw3d ? XR_TRUE : XR_FALSE;
+    m.tileColumns = cols;
+    m.tileRows = rows;
+    m.viewScaleX = sx;
+    m.viewScaleY = sy;
+    m.isActive = active ? XR_TRUE : XR_FALSE;
+    m.isRequestable = requestable ? XR_TRUE : XR_FALSE;
+    return m;
+}
+
 #ifdef _WIN32
 static void test_input_state_defaults()
 {
@@ -372,8 +394,6 @@ static void test_session_manager_defaults()
 // XrSessionApplyModeTable (inline, loader-free): the public renderingMode*
 // arrays are filled from the table, each mode in the slot named by its
 // modeIndex, and left alone while the table is empty.
-static XrDisplayRenderingModeInfoDXR make_mode(uint32_t, const char*, uint32_t, bool, uint32_t, uint32_t,
-                                               float, float, bool, bool);
 static void test_session_apply_mode_table()
 {
     XrSessionManager xr;
@@ -539,25 +559,6 @@ static void test_stb_symbols_link()
 // dxr::ModeTable (mode_table.h): the rendering-mode list by meaning, for the
 // two-mode contract (runtime #2766) AND older multi-mode runtimes. Pure; the
 // enumerate is injected.
-static XrDisplayRenderingModeInfoDXR make_mode(uint32_t idx, const char* name, uint32_t views, bool hw3d,
-                                               uint32_t cols, uint32_t rows, float sx, float sy,
-                                               bool active, bool requestable = true)
-{
-    XrDisplayRenderingModeInfoDXR m;
-    std::memset(&m, 0, sizeof(m));
-    m.type = XR_TYPE_DISPLAY_RENDERING_MODE_INFO_DXR;
-    m.modeIndex = idx;
-    std::snprintf(m.modeName, sizeof(m.modeName), "%s", name);
-    m.viewCount = views;
-    m.hardwareDisplay3D = hw3d ? XR_TRUE : XR_FALSE;
-    m.tileColumns = cols;
-    m.tileRows = rows;
-    m.viewScaleX = sx;
-    m.viewScaleY = sy;
-    m.isActive = active ? XR_TRUE : XR_FALSE;
-    m.isRequestable = requestable ? XR_TRUE : XR_FALSE;
-    return m;
-}
 
 // A fake xrEnumerateDisplayRenderingModesDXR over a vector (two-call idiom).
 struct FakeModeEnum
