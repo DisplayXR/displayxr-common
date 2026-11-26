@@ -70,8 +70,12 @@ static std::string GetKeyName(WPARAM vk) {
 bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_MOUSEMOVE:
-        state.mouseX = LOWORD(lParam);
-        state.mouseY = HIWORD(lParam);
+        // Client coordinates are SIGNED: while the window holds the mouse capture
+        // (every drag), a pointer left of or above the client area reports a
+        // negative x or y. LOWORD / HIWORD read those as ~65535, which turned a
+        // drag that left the window into a 65,000-pixel jump.
+        state.mouseX = (int)(short)LOWORD(lParam);
+        state.mouseY = (int)(short)HIWORD(lParam);
 
         // Update camera rotation if dragging
         if (state.dragging) {
@@ -91,8 +95,8 @@ bool UpdateInputState(InputState& state, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDBLCLK:
         MarkUserInput(state);
         state.teleportRequested = true;
-        state.teleportMouseX = (float)LOWORD(lParam);
-        state.teleportMouseY = (float)HIWORD(lParam);
+        state.teleportMouseX = (float)(short)LOWORD(lParam);
+        state.teleportMouseY = (float)(short)HIWORD(lParam);
         return true;
 
     case WM_LBUTTONDOWN:
