@@ -233,7 +233,17 @@ dxr_camera3d_compute_views(const dxr_vec3 *raw_eyes,
 // --- Rig equivalence / conversion -------------------------------------------
 //
 // The display-centric and camera-centric rigs are two parameterizations of one
-// off-axis view state. The camera rig is a strict superset by one DOF (its
+// off-axis view state. THE CONTRACT (the mapping in both directions, its limits
+// and the interpolation space of each parameter) is written down in the runtime
+// repo: docs/specs/extensions/XR_DXR_view_rig.md, section 4, "One view state,
+// two rigs: the correspondence". Keep the two in step.
+//   display {pose, vHeight, perspective, ipd, parallax}
+//     <-> camera {pose, 1/convergence, tan(vFOV/2), ipd, parallax, m2v}
+//   with H = canvas height (m), N = nominal distance (m), es = perspective*vHeight/H:
+//     convergence distance = es*N,  tan(vFOV/2) = (H/2N)/perspective,
+//     camera pose = display pose + es*N along +Z,  factors scale by es (or by
+//     f = m2v*invd*N the other way).
+// The camera rig is a strict superset by one DOF (its
 // convergence is free; the display rig pins convergence to the display plane,
 // i.e. the nominal viewing distance). These converters let an app switch rig
 // type with no visual disturbance and then animate the new rig's parameters.
@@ -272,8 +282,9 @@ dxr_view_rig_display_to_camera(const dxr_display_rig *in, const dxr_rig_display_
 // distance and the ipd/parallax factors are rescaled by f = m2v*invd*N so the
 // per-eye disparity matches too (the display rig couples convergence and eye-
 // scale through one factor; ipd supplies the missing DOF). The reverse emits
-// m2v = es which re-absorbs f, so display<->camera round-trips render
-// identically. Caveat: f > 1 (convergence nearer than nominal) yields
+// the canonical m2v = 1 and multiplies ipd/parallax by the display eye-scale
+// es = perspective * vHeight / H (= 1/f when m2v == 1), so display<->camera
+// round-trips recover the original numbers exactly. Caveat: f > 1 (convergence nearer than nominal) yields
 // ipd_factor > 1; a caller that clamps ipd to [0,1] will fall short of exact
 // there — far convergence (f <= 1) is always exact. Returns the convergence
 // delta from the compatible value (informational, not a lossy flag).
